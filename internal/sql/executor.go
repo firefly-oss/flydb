@@ -2269,18 +2269,15 @@ func (e *Executor) introspectUsers() (string, error) {
 }
 
 // introspectServer returns information about the FlyDB server/daemon.
+// Returns plain key-value pairs that the CLI can format.
 func (e *Executor) introspectServer() (string, error) {
 	var results []string
 
-	results = append(results, "╔══════════════════════════════════════╗")
-	results = append(results, "║         FlyDB Server Info            ║")
-	results = append(results, "╠══════════════════════════════════════╣")
-	results = append(results, "║  Server:     FlyDB Daemon            ║")
-	results = append(results, "║  Version:    01.26.1                 ║")
-	results = append(results, "║  Status:     Running                 ║")
-	results = append(results, "║  Storage:    WAL-backed              ║")
-	results = append(results, "║  Protocol:   Binary + Text           ║")
-	results = append(results, "╚══════════════════════════════════════╝")
+	results = append(results, "Server: FlyDB Daemon")
+	results = append(results, "Version: 01.26.1")
+	results = append(results, "Status: Running")
+	results = append(results, "Storage: WAL-backed")
+	results = append(results, "Protocol: Binary + Text")
 
 	return strings.Join(results, "\n"), nil
 }
@@ -2469,18 +2466,13 @@ func (e *Executor) introspectTable(tableName string) (string, error) {
 }
 
 // introspectStatus returns comprehensive database status and statistics.
-// This replaces the old INTROSPECT DATABASES and INTROSPECT DATABASE commands.
+// Returns plain key-value pairs that the CLI can format.
 func (e *Executor) introspectStatus() (string, error) {
 	var results []string
 
-	// Header
-	results = append(results, "╔══════════════════════════════════════════════════════╗")
-	results = append(results, "║              FlyDB Database Status                   ║")
-	results = append(results, "╠══════════════════════════════════════════════════════╣")
-
 	// Table count
 	tableCount := len(e.catalog.Tables)
-	results = append(results, fmt.Sprintf("║  Tables:        %-36d ║", tableCount))
+	results = append(results, fmt.Sprintf("Tables: %d", tableCount))
 
 	// List table names
 	if tableCount > 0 {
@@ -2489,11 +2481,7 @@ func (e *Executor) introspectStatus() (string, error) {
 			tableNames = append(tableNames, name)
 		}
 		sort.Strings(tableNames)
-		tableList := strings.Join(tableNames, ", ")
-		if len(tableList) > 36 {
-			tableList = tableList[:33] + "..."
-		}
-		results = append(results, fmt.Sprintf("║  Table list:    %-36s ║", tableList))
+		results = append(results, fmt.Sprintf("Table list: %s", strings.Join(tableNames, ", ")))
 	}
 
 	// User count
@@ -2502,7 +2490,7 @@ func (e *Executor) introspectStatus() (string, error) {
 	if err == nil {
 		userCount = len(users)
 	}
-	results = append(results, fmt.Sprintf("║  Users:         %-36d ║", userCount))
+	results = append(results, fmt.Sprintf("Users: %d", userCount))
 
 	// Index count
 	indexCount := 0
@@ -2510,7 +2498,7 @@ func (e *Executor) introspectStatus() (string, error) {
 		indexes := e.indexMgr.ListIndexes()
 		indexCount = len(indexes)
 	}
-	results = append(results, fmt.Sprintf("║  Indexes:       %-36d ║", indexCount))
+	results = append(results, fmt.Sprintf("Indexes: %d", indexCount))
 
 	// Total row count across all tables
 	totalRows := 0
@@ -2525,22 +2513,20 @@ func (e *Executor) introspectStatus() (string, error) {
 			}
 		}
 	}
-	results = append(results, fmt.Sprintf("║  Total rows:    %-36d ║", totalRows))
-	results = append(results, fmt.Sprintf("║  Data size:     %-33d B ║", totalStorageSize))
+	results = append(results, fmt.Sprintf("Total rows: %d", totalRows))
+	results = append(results, fmt.Sprintf("Data size: %d bytes", totalStorageSize))
 
 	// WAL size if available
 	if kvStore, ok := e.store.(*storage.KVStore); ok {
 		if wal := kvStore.WAL(); wal != nil {
 			if walSize, err := wal.Size(); err == nil {
-				results = append(results, fmt.Sprintf("║  WAL size:      %-33d B ║", walSize))
+				results = append(results, fmt.Sprintf("WAL size: %d bytes", walSize))
 			}
 		}
 	}
 
-	results = append(results, "╠══════════════════════════════════════════════════════╣")
-	results = append(results, "║  Storage:       WAL-backed                           ║")
-	results = append(results, "║  Status:        Active                               ║")
-	results = append(results, "╚══════════════════════════════════════════════════════╝")
+	results = append(results, "Storage: WAL-backed")
+	results = append(results, "Status: Active")
 
 	return strings.Join(results, "\n"), nil
 }
