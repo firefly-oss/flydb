@@ -89,10 +89,27 @@ package storage
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 )
+
+// wrapPathError wraps a path-related error with helpful context.
+// For permission errors, it provides guidance on how to fix the issue.
+func wrapPathError(err error, path string, operation string) error {
+	if errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("permission denied: cannot %s '%s'. "+
+			"Try one of the following:\n"+
+			"  • Run with sudo: sudo flydb\n"+
+			"  • Use a different path: flydb --db ./flydb.wal\n"+
+			"  • Create the directory with proper permissions: sudo mkdir -p %s && sudo chown $USER %s",
+			operation, path, filepath.Dir(path), filepath.Dir(path))
+	}
+	return fmt.Errorf("failed to %s '%s': %w", operation, path, err)
+}
 
 // Operation type constants for WAL records.
 const (
@@ -177,9 +194,17 @@ func OpenWAL(path string) (*WAL, error) {
 //	}
 //	defer wal.Close()
 func OpenWALWithEncryption(path string, config EncryptionConfig) (*WAL, error) {
+	// Ensure the parent directory exists
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, wrapPathError(err, dir, "create directory")
+		}
+	}
+
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
-		return nil, err
+		return nil, wrapPathError(err, path, "open database file")
 	}
 
 	var encryptor *Encryptor
