@@ -151,10 +151,15 @@ func TestNormalizeValue(t *testing.T) {
 
 func TestIsValidType(t *testing.T) {
 	validTypes := []string{
-		"INT", "BIGINT", "TEXT", "VARCHAR", "BOOLEAN", "FLOAT", "DECIMAL", "NUMERIC",
-		"TIMESTAMP", "DATE", "TIME", "BLOB", "UUID", "JSONB", "SERIAL",
+		"INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT",
+		"TEXT", "VARCHAR", "CHAR", "CHARACTER",
+		"BOOLEAN", "BOOL",
+		"FLOAT", "DOUBLE", "REAL", "DECIMAL", "NUMERIC",
+		"TIMESTAMP", "DATETIME", "DATE", "TIME",
+		"BLOB", "BYTEA", "BINARY", "VARBINARY",
+		"UUID", "JSONB", "JSON", "SERIAL",
 	}
-	invalidTypes := []string{"CHAR", "DOUBLE", "SMALLINT", "INVALID", "ARRAY"}
+	invalidTypes := []string{"INVALID", "ARRAY", "CLOB", "INTERVAL"}
 
 	for _, typeName := range validTypes {
 		if !IsValidType(typeName) {

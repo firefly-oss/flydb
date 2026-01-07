@@ -103,7 +103,7 @@ func TestExecutorInsertAndSelect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SELECT failed: %v", err)
 	}
-	expected := "Alice\n(1 rows)"
+	expected := "name\nAlice\n(1 rows)"
 	if result != expected {
 		t.Errorf("Expected '%s', got '%s'", expected, result)
 	}
@@ -142,7 +142,7 @@ func TestExecutorUpdate(t *testing.T) {
 		Columns:   []string{"name"},
 		Where:     &Condition{Column: "id", Value: "1"},
 	})
-	expected := "Bob\n(1 rows)"
+	expected := "name\nBob\n(1 rows)"
 	if result != expected {
 		t.Errorf("Expected '%s', got '%s'", expected, result)
 	}
@@ -297,10 +297,10 @@ func TestExecutorOrderByAndLimit(t *testing.T) {
 		t.Fatalf("SELECT with ORDER BY failed: %v", err)
 	}
 	lines := strings.Split(result, "\n")
-	// Result format: data rows + row count line "(N rows)"
-	// With LIMIT 2, we expect 2 data rows + 1 row count line = 3 lines
-	if len(lines) != 3 {
-		t.Errorf("Expected 3 lines (2 data + 1 count), got %d: %s", len(lines), result)
+	// Result format: header row + data rows + row count line "(N rows)"
+	// With LIMIT 2, we expect 1 header + 2 data rows + 1 row count line = 4 lines
+	if len(lines) != 4 {
+		t.Errorf("Expected 4 lines (1 header + 2 data + 1 count), got %d: %s", len(lines), result)
 	}
 }
 
@@ -342,7 +342,7 @@ func TestExecutorAggregateCount(t *testing.T) {
 		t.Fatalf("SELECT COUNT(*) failed: %v", err)
 	}
 
-	expected := "5\n(1 row)"
+	expected := "count\n5\n(1 row)"
 	if result != expected {
 		t.Errorf("Expected COUNT(*) = '%s', got '%s'", expected, result)
 	}
@@ -387,7 +387,7 @@ func TestExecutorAggregateSumAvg(t *testing.T) {
 		t.Fatalf("SELECT SUM failed: %v", err)
 	}
 
-	expected := "100.00\n(1 row)"
+	expected := "sum(amount)\n100.00\n(1 row)"
 	if result != expected {
 		t.Errorf("Expected SUM = '%s', got '%s'", expected, result)
 	}
@@ -403,7 +403,7 @@ func TestExecutorAggregateSumAvg(t *testing.T) {
 		t.Fatalf("SELECT AVG failed: %v", err)
 	}
 
-	expected = "25.00\n(1 row)"
+	expected = "avg(amount)\n25.00\n(1 row)"
 	if result != expected {
 		t.Errorf("Expected AVG = '%s', got '%s'", expected, result)
 	}
@@ -449,7 +449,7 @@ func TestExecutorAggregateMinMax(t *testing.T) {
 		t.Fatalf("SELECT MIN, MAX failed: %v", err)
 	}
 
-	expected := "25.00, 100.00\n(1 row)"
+	expected := "min(price), max(price)\n25.00, 100.00\n(1 row)"
 	if result != expected {
 		t.Errorf("Expected MIN=25.00, MAX=100.00, got '%s'", result)
 	}
@@ -501,7 +501,7 @@ func TestExecutorAggregateWithWhere(t *testing.T) {
 		t.Fatalf("SELECT COUNT with WHERE failed: %v", err)
 	}
 
-	expected := "3\n(1 row)"
+	expected := "count\n3\n(1 row)"
 	if result != expected {
 		t.Errorf("Expected COUNT = '%s' for electronics, got '%s'", expected, result)
 	}
@@ -518,7 +518,7 @@ func TestExecutorAggregateWithWhere(t *testing.T) {
 		t.Fatalf("SELECT SUM with WHERE failed: %v", err)
 	}
 
-	expected = "450.00\n(1 row)"
+	expected = "sum(amount)\n450.00\n(1 row)"
 	if result != expected {
 		t.Errorf("Expected SUM = '%s' for electronics, got '%s'", expected, result)
 	}
@@ -577,10 +577,10 @@ func TestExecutorGroupBy(t *testing.T) {
 		t.Fatalf("SELECT with GROUP BY failed: %v", err)
 	}
 
-	// Result should have 2 groups + 1 row count line = 3 lines
+	// Result should have 1 header + 2 groups + 1 row count line = 4 lines
 	lines := strings.Split(result, "\n")
-	if len(lines) != 3 {
-		t.Errorf("Expected 3 lines (2 groups + 1 count), got %d: %s", len(lines), result)
+	if len(lines) != 4 {
+		t.Errorf("Expected 4 lines (1 header + 2 groups + 1 count), got %d: %s", len(lines), result)
 	}
 
 	// Test GROUP BY with SUM
@@ -596,10 +596,10 @@ func TestExecutorGroupBy(t *testing.T) {
 		t.Fatalf("SELECT with GROUP BY SUM failed: %v", err)
 	}
 
-	// Should have 2 groups + 1 row count line = 3 lines
+	// Should have 1 header + 2 groups + 1 row count line = 4 lines
 	lines = strings.Split(result, "\n")
-	if len(lines) != 3 {
-		t.Errorf("Expected 3 lines (2 groups + 1 count), got %d: %s", len(lines), result)
+	if len(lines) != 4 {
+		t.Errorf("Expected 4 lines (1 header + 2 groups + 1 count), got %d: %s", len(lines), result)
 	}
 }
 
@@ -662,10 +662,10 @@ func TestExecutorGroupByWithHaving(t *testing.T) {
 		t.Fatalf("SELECT with HAVING failed: %v", err)
 	}
 
-	// Should have 2 groups (A and B, not C) + 1 row count line = 3 lines
+	// Should have 1 header + 2 groups (A and B, not C) + 1 row count line = 4 lines
 	lines := strings.Split(result, "\n")
-	if len(lines) != 3 {
-		t.Errorf("Expected 3 lines (2 groups + 1 count) with HAVING, got %d: %s", len(lines), result)
+	if len(lines) != 4 {
+		t.Errorf("Expected 4 lines (1 header + 2 groups + 1 count) with HAVING, got %d: %s", len(lines), result)
 	}
 
 	// Test HAVING SUM(amount) >= 500 - should return A (450) and B (550)
@@ -686,10 +686,10 @@ func TestExecutorGroupByWithHaving(t *testing.T) {
 		t.Fatalf("SELECT with HAVING SUM failed: %v", err)
 	}
 
-	// Should have 2 groups (B=550 and C=500, not A=450) + 1 row count line = 3 lines
+	// Should have 1 header + 2 groups (B=550 and C=500, not A=450) + 1 row count line = 4 lines
 	lines = strings.Split(result, "\n")
-	if len(lines) != 3 {
-		t.Errorf("Expected 3 lines (2 groups + 1 count) with HAVING SUM >= 500, got %d: %s", len(lines), result)
+	if len(lines) != 4 {
+		t.Errorf("Expected 4 lines (1 header + 2 groups + 1 count) with HAVING SUM >= 500, got %d: %s", len(lines), result)
 	}
 }
 
@@ -2046,8 +2046,8 @@ func TestTriggerDropNonExistent(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error when dropping non-existent trigger, got nil")
 	}
-	if !strings.Contains(err.Error(), "does not exist") {
-		t.Errorf("Expected 'does not exist' error, got: %v", err)
+	if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("Expected 'not found' or 'does not exist' error, got: %v", err)
 	}
 }
 
@@ -2410,5 +2410,395 @@ func TestMultipleTriggers(t *testing.T) {
 	}
 	if !strings.Contains(result, "after") {
 		t.Errorf("Expected audit log entry with 'after', got: %s", result)
+	}
+}
+
+func TestDropTable(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create a table
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "users",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT"},
+			{Name: "name", Type: "TEXT"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE failed: %v", err)
+	}
+
+	// Insert some data
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "users",
+		Values:    []string{"1", "Alice"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT failed: %v", err)
+	}
+
+	// Drop the table
+	result, err := exec.Execute(&DropTableStmt{TableName: "users"})
+	if err != nil {
+		t.Fatalf("DROP TABLE failed: %v", err)
+	}
+	if result != "DROP TABLE OK" {
+		t.Errorf("Expected 'DROP TABLE OK', got '%s'", result)
+	}
+
+	// Verify table no longer exists
+	_, err = exec.Execute(&SelectStmt{
+		TableName: "users",
+		Columns:   []string{"*"},
+	})
+	if err == nil {
+		t.Error("Expected error when selecting from dropped table")
+	}
+}
+
+func TestDropTableIfExists(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Drop a non-existent table with IF EXISTS - should succeed
+	result, err := exec.Execute(&DropTableStmt{TableName: "nonexistent", IfExists: true})
+	if err != nil {
+		t.Fatalf("DROP TABLE IF EXISTS failed: %v", err)
+	}
+	if result != "DROP TABLE OK" {
+		t.Errorf("Expected 'DROP TABLE OK', got '%s'", result)
+	}
+
+	// Drop a non-existent table without IF EXISTS - should fail
+	_, err = exec.Execute(&DropTableStmt{TableName: "nonexistent", IfExists: false})
+	if err == nil {
+		t.Error("Expected error when dropping non-existent table without IF EXISTS")
+	}
+}
+
+func TestDropTableWithForeignKeyReference(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create parent table
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "users",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT", Constraints: []ColumnConstraint{{Type: ConstraintPrimaryKey}}},
+			{Name: "name", Type: "TEXT"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE users failed: %v", err)
+	}
+
+	// Create child table with foreign key
+	_, err = exec.Execute(&CreateTableStmt{
+		TableName: "orders",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT"},
+			{Name: "user_id", Type: "INT", Constraints: []ColumnConstraint{
+				{Type: ConstraintForeignKey, ForeignKey: &ForeignKeyRef{Table: "users", Column: "id"}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE orders failed: %v", err)
+	}
+
+	// Try to drop the parent table - should fail
+	_, err = exec.Execute(&DropTableStmt{TableName: "users"})
+	if err == nil {
+		t.Error("Expected error when dropping table with foreign key reference")
+	}
+	if !strings.Contains(err.Error(), "referenced by foreign key") {
+		t.Errorf("Expected foreign key error, got: %v", err)
+	}
+
+	// Drop the child table first
+	_, err = exec.Execute(&DropTableStmt{TableName: "orders"})
+	if err != nil {
+		t.Fatalf("DROP TABLE orders failed: %v", err)
+	}
+
+	// Now drop the parent table - should succeed
+	_, err = exec.Execute(&DropTableStmt{TableName: "users"})
+	if err != nil {
+		t.Fatalf("DROP TABLE users failed: %v", err)
+	}
+}
+
+func TestTruncateTable(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create a table
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "logs",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT"},
+			{Name: "message", Type: "TEXT"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE failed: %v", err)
+	}
+
+	// Insert some data
+	exec.Execute(&InsertStmt{TableName: "logs", Values: []string{"1", "Log 1"}})
+	exec.Execute(&InsertStmt{TableName: "logs", Values: []string{"2", "Log 2"}})
+	exec.Execute(&InsertStmt{TableName: "logs", Values: []string{"3", "Log 3"}})
+
+	// Verify data exists
+	result, _ := exec.Execute(&SelectStmt{TableName: "logs", Columns: []string{"*"}})
+	if !strings.Contains(result, "3 rows") {
+		t.Errorf("Expected 3 rows before truncate, got: %s", result)
+	}
+
+	// Truncate the table
+	result, err = exec.Execute(&TruncateTableStmt{TableName: "logs"})
+	if err != nil {
+		t.Fatalf("TRUNCATE TABLE failed: %v", err)
+	}
+	if result != "TRUNCATE TABLE OK" {
+		t.Errorf("Expected 'TRUNCATE TABLE OK', got '%s'", result)
+	}
+
+	// Verify table is empty but still exists
+	result, err = exec.Execute(&SelectStmt{TableName: "logs", Columns: []string{"*"}})
+	if err != nil {
+		t.Fatalf("SELECT after TRUNCATE failed: %v", err)
+	}
+	if !strings.Contains(result, "0 rows") {
+		t.Errorf("Expected 0 rows after truncate, got: %s", result)
+	}
+}
+
+func TestTruncateTableNonExistent(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Try to truncate a non-existent table
+	_, err := exec.Execute(&TruncateTableStmt{TableName: "nonexistent"})
+	if err == nil {
+		t.Error("Expected error when truncating non-existent table")
+	}
+	if !strings.Contains(err.Error(), "table not found") {
+		t.Errorf("Expected 'table not found' error, got: %v", err)
+	}
+}
+
+func TestTruncateTableResetsSequence(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create a table with SERIAL column
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "items",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "SERIAL"},
+			{Name: "name", Type: "TEXT"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE failed: %v", err)
+	}
+
+	// Insert some data (auto-increment should assign ids 1, 2, 3)
+	exec.Execute(&InsertStmt{TableName: "items", Values: []string{"Item 1"}})
+	exec.Execute(&InsertStmt{TableName: "items", Values: []string{"Item 2"}})
+	exec.Execute(&InsertStmt{TableName: "items", Values: []string{"Item 3"}})
+
+	// Truncate the table
+	_, err = exec.Execute(&TruncateTableStmt{TableName: "items"})
+	if err != nil {
+		t.Fatalf("TRUNCATE TABLE failed: %v", err)
+	}
+
+	// Insert new data - sequence should restart from 1
+	exec.Execute(&InsertStmt{TableName: "items", Values: []string{"New Item"}})
+
+	result, _ := exec.Execute(&SelectStmt{TableName: "items", Columns: []string{"id", "name"}})
+	if !strings.Contains(result, "1") {
+		t.Errorf("Expected id to restart from 1 after truncate, got: %s", result)
+	}
+}
+
+func TestDropTablePermissionDenied(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create a table as admin
+	exec.Execute(&CreateTableStmt{
+		TableName: "secret",
+		Columns:   []ColumnDef{{Name: "data", Type: "TEXT"}},
+	})
+
+	// Create a non-admin user
+	exec.Execute(&CreateUserStmt{Username: "alice", Password: "pass"})
+
+	// Set current user to non-admin
+	exec.SetUser("alice")
+
+	// Try to drop table - should fail
+	_, err := exec.Execute(&DropTableStmt{TableName: "secret"})
+	if err == nil {
+		t.Error("Expected permission denied error")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("Expected 'permission denied' error, got: %v", err)
+	}
+}
+
+func TestTruncateTablePermissionDenied(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create a table as admin
+	exec.Execute(&CreateTableStmt{
+		TableName: "logs",
+		Columns:   []ColumnDef{{Name: "data", Type: "TEXT"}},
+	})
+
+	// Create a non-admin user
+	exec.Execute(&CreateUserStmt{Username: "alice", Password: "pass"})
+
+	// Set current user to non-admin
+	exec.SetUser("alice")
+
+	// Try to truncate table - should fail
+	_, err := exec.Execute(&TruncateTableStmt{TableName: "logs"})
+	if err == nil {
+		t.Error("Expected permission denied error")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("Expected 'permission denied' error, got: %v", err)
+	}
+}
+
+func TestExecutorAlterUser(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create a user
+	result, err := exec.Execute(&CreateUserStmt{Username: "testuser", Password: "oldpass"})
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+	if result != "CREATE USER OK" {
+		t.Errorf("Expected 'CREATE USER OK', got '%s'", result)
+	}
+
+	// Alter the user's password
+	result, err = exec.Execute(&AlterUserStmt{Username: "testuser", NewPassword: "newpass"})
+	if err != nil {
+		t.Fatalf("AlterUser failed: %v", err)
+	}
+	if result != "ALTER USER OK" {
+		t.Errorf("Expected 'ALTER USER OK', got '%s'", result)
+	}
+}
+
+func TestExecutorAlterUserNonExistent(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Try to alter a non-existent user
+	_, err := exec.Execute(&AlterUserStmt{Username: "nonexistent", NewPassword: "newpass"})
+	if err == nil {
+		t.Error("Expected error when altering non-existent user")
+	}
+	if !strings.Contains(err.Error(), "user does not exist") {
+		t.Errorf("Expected 'user does not exist' error, got: %v", err)
+	}
+}
+
+func TestExecutorAlterUserPermissionDenied(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create a user
+	exec.Execute(&CreateUserStmt{Username: "alice", Password: "pass"})
+
+	// Set current user to non-admin
+	exec.SetUser("alice")
+
+	// Try to alter user - should fail
+	_, err := exec.Execute(&AlterUserStmt{Username: "alice", NewPassword: "newpass"})
+	if err == nil {
+		t.Error("Expected permission denied error")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("Expected 'permission denied' error, got: %v", err)
+	}
+}
+
+func TestExecutorRevoke(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create a table
+	exec.Execute(&CreateTableStmt{
+		TableName: "products",
+		Columns:   []ColumnDef{{Name: "id", Type: "INT"}, {Name: "name", Type: "TEXT"}},
+	})
+
+	// Create a user
+	exec.Execute(&CreateUserStmt{Username: "bob", Password: "pass"})
+
+	// Grant permission
+	result, err := exec.Execute(&GrantStmt{TableName: "products", Username: "bob"})
+	if err != nil {
+		t.Fatalf("Grant failed: %v", err)
+	}
+	if result != "GRANT OK" {
+		t.Errorf("Expected 'GRANT OK', got '%s'", result)
+	}
+
+	// Revoke permission
+	result, err = exec.Execute(&RevokeStmt{TableName: "products", Username: "bob"})
+	if err != nil {
+		t.Fatalf("Revoke failed: %v", err)
+	}
+	if result != "REVOKE OK" {
+		t.Errorf("Expected 'REVOKE OK', got '%s'", result)
+	}
+}
+
+func TestExecutorRevokeNonExistentPermission(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create a user but don't grant any permissions
+	exec.Execute(&CreateUserStmt{Username: "charlie", Password: "pass"})
+
+	// Try to revoke a permission that doesn't exist
+	_, err := exec.Execute(&RevokeStmt{TableName: "products", Username: "charlie"})
+	if err == nil {
+		t.Error("Expected error when revoking non-existent permission")
+	}
+	if !strings.Contains(err.Error(), "permission does not exist") {
+		t.Errorf("Expected 'permission does not exist' error, got: %v", err)
+	}
+}
+
+func TestExecutorRevokePermissionDenied(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create a user
+	exec.Execute(&CreateUserStmt{Username: "alice", Password: "pass"})
+
+	// Set current user to non-admin
+	exec.SetUser("alice")
+
+	// Try to revoke - should fail
+	_, err := exec.Execute(&RevokeStmt{TableName: "products", Username: "alice"})
+	if err == nil {
+		t.Error("Expected permission denied error")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("Expected 'permission denied' error, got: %v", err)
 	}
 }

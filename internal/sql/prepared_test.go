@@ -114,11 +114,11 @@ func TestPreparedStatementExecute(t *testing.T) {
 		t.Fatalf("EXECUTE failed: %v", err)
 	}
 
-	// Should return the user's name with row count
+	// Should return the user's name with header and row count
 	if result == "" {
 		t.Error("Expected non-empty result")
 	}
-	expected := "Alice\n(1 rows)"
+	expected := "name\nAlice\n(1 rows)"
 	if result != expected {
 		t.Errorf("Expected '%s', got '%s'", expected, result)
 	}

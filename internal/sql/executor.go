@@ -94,6 +94,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Executor executes SQL statements against the storage engine.
@@ -148,6 +149,8 @@ type aggState struct {
 	// For non-numeric MIN/MAX
 	minStr *string
 	maxStr *string
+	// For GROUP_CONCAT/STRING_AGG
+	concatValues []string
 }
 
 // NewExecutor creates a new Executor with the given storage and auth manager.
@@ -246,6 +249,22 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 		}
 		return e.executeGrant(s)
 
+	case *RevokeStmt:
+		// REVOKE requires admin privileges.
+		// Only admins can remove permissions from users.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeRevoke(s)
+
+	case *AlterUserStmt:
+		// ALTER USER requires admin privileges.
+		// Only admins can modify user accounts.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeAlterUser(s)
+
 	case *InsertStmt:
 		// INSERT requires access to the target table.
 		if err := e.checkAccess(s.TableName); err != nil {
@@ -289,7 +308,13 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 		return e.executeCommit()
 
 	case *RollbackStmt:
-		return e.executeRollback()
+		return e.executeRollback(s)
+
+	case *SavepointStmt:
+		return e.executeSavepoint(s)
+
+	case *ReleaseSavepointStmt:
+		return e.executeReleaseSavepoint(s)
 
 	case *CreateIndexStmt:
 		// CREATE INDEX requires admin privileges.
@@ -297,6 +322,13 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 			return "", errors.New("permission denied")
 		}
 		return e.executeCreateIndex(s)
+
+	case *DropIndexStmt:
+		// DROP INDEX requires admin privileges.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeDropIndex(s)
 
 	case *PrepareStmt:
 		return e.executePrepare(s)
@@ -317,6 +349,12 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 
 	case *UnionStmt:
 		return e.executeUnion(s)
+
+	case *IntersectStmt:
+		return e.executeIntersect(s)
+
+	case *ExceptStmt:
+		return e.executeExcept(s)
 
 	case *CreateProcedureStmt:
 		// CREATE PROCEDURE requires admin privileges.
@@ -369,6 +407,20 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 			return "", errors.New("permission denied")
 		}
 		return e.executeDropTrigger(s)
+
+	case *DropTableStmt:
+		// DROP TABLE requires admin privileges.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeDropTable(s)
+
+	case *TruncateTableStmt:
+		// TRUNCATE TABLE requires admin privileges.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeTruncateTable(s)
 	}
 
 	return "", errors.New("unknown statement")
@@ -437,6 +489,36 @@ func (e *Executor) executeGrant(stmt *GrantStmt) (string, error) {
 	return "GRANT OK", nil
 }
 
+// executeRevoke handles REVOKE statements.
+// It delegates to the AuthManager to remove the permission.
+//
+// Parameters:
+//   - stmt: The parsed REVOKE statement
+//
+// Returns "REVOKE OK" on success, or an error.
+func (e *Executor) executeRevoke(stmt *RevokeStmt) (string, error) {
+	err := e.auth.Revoke(stmt.Username, stmt.TableName)
+	if err != nil {
+		return "", err
+	}
+	return "REVOKE OK", nil
+}
+
+// executeAlterUser handles ALTER USER statements.
+// It delegates to the AuthManager to update the user's password.
+//
+// Parameters:
+//   - stmt: The parsed ALTER USER statement
+//
+// Returns "ALTER USER OK" on success, or an error.
+func (e *Executor) executeAlterUser(stmt *AlterUserStmt) (string, error) {
+	err := e.auth.AlterUser(stmt.Username, stmt.NewPassword)
+	if err != nil {
+		return "", err
+	}
+	return "ALTER USER OK", nil
+}
+
 // executeCreate handles CREATE TABLE statements.
 // It delegates to the Catalog to create the table schema.
 //
@@ -445,6 +527,15 @@ func (e *Executor) executeGrant(stmt *GrantStmt) (string, error) {
 //
 // Returns "CREATE TABLE OK" on success, or an error.
 func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
+	// Check if table already exists
+	if _, exists := e.catalog.GetTable(stmt.TableName); exists {
+		if stmt.IfNotExists {
+			// IF NOT EXISTS specified, silently succeed
+			return "CREATE TABLE OK", nil
+		}
+		return "", fmt.Errorf("table exists")
+	}
+
 	// Validate column types before creating the table
 	for _, col := range stmt.Columns {
 		if !IsValidType(col.Type) {
@@ -514,7 +605,7 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 // Parameters:
 //   - stmt: The parsed INSERT statement
 //
-// Returns "INSERT 1" on success, or an error.
+// Returns "INSERT <count>" on success, or an error.
 func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
 	// Validate that the table exists.
 	table, ok := e.catalog.GetTable(stmt.TableName)
@@ -522,68 +613,140 @@ func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
 		return "", errors.New("table not found")
 	}
 
-	// Handle auto-increment columns - allow fewer values if auto-increment columns can fill the gap
-	autoIncCols := table.GetAutoIncrementColumns()
-	expectedCols := len(table.Columns) - len(autoIncCols)
-
-	// Validate that the number of values matches (either all columns or non-auto-increment columns)
-	if len(stmt.Values) != len(table.Columns) && len(stmt.Values) != expectedCols {
-		return "", errors.New("column count mismatch")
+	// Determine which rows to insert
+	rowsToInsert := stmt.MultiValues
+	if len(rowsToInsert) == 0 && len(stmt.Values) > 0 {
+		// Backward compatibility: use Values if MultiValues is empty
+		rowsToInsert = [][]string{stmt.Values}
 	}
 
-	// Build the row with proper handling of auto-increment and default values
+	if len(rowsToInsert) == 0 {
+		return "", errors.New("no values to insert")
+	}
+
+	insertedCount := 0
+
+	for _, rowValues := range rowsToInsert {
+		normalizedValues, conflictRowKey, err := e.prepareInsertRow(table, stmt.Columns, rowValues)
+		if err != nil {
+			// Check if this is a unique constraint violation and we have ON CONFLICT
+			if stmt.OnConflict != nil && conflictRowKey != "" {
+				if stmt.OnConflict.DoNothing {
+					// Skip this row
+					continue
+				} else if stmt.OnConflict.DoUpdate {
+					// Update the conflicting row
+					if err := e.updateConflictingRow(table, conflictRowKey, stmt.OnConflict.Updates); err != nil {
+						return "", err
+					}
+					insertedCount++
+					continue
+				}
+			}
+			return "", err
+		}
+
+		// Insert the row
+		if err := e.insertSingleRow(table, stmt.TableName, normalizedValues); err != nil {
+			return "", err
+		}
+		insertedCount++
+	}
+
+	return fmt.Sprintf("INSERT %d", insertedCount), nil
+}
+
+// prepareInsertRow prepares a single row for insertion, handling column mapping and validation.
+// Returns the normalized values, a conflicting row key (if any), and an error.
+func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values []string) ([]string, string, error) {
 	normalizedValues := make([]string, len(table.Columns))
-	valueIdx := 0
+
+	// Build a map of column name to value index if columns are specified
+	var columnValueMap map[string]string
+	if len(columns) > 0 {
+		if len(columns) != len(values) {
+			return nil, "", errors.New("column count does not match value count")
+		}
+		columnValueMap = make(map[string]string)
+		for i, col := range columns {
+			columnValueMap[col] = values[i]
+		}
+	}
 
 	for i, col := range table.Columns {
 		var value string
 
-		// Handle auto-increment columns
-		if col.IsAutoIncrement() {
-			if len(stmt.Values) == len(table.Columns) {
-				// Explicit value provided
-				value = stmt.Values[valueIdx]
-				valueIdx++
-				// Update the sequence if the explicit value is higher
-				if intVal, err := parseIntValue(value); err == nil {
-					e.catalog.UpdateAutoIncrement(stmt.TableName, col.Name, intVal)
-				}
-			} else {
+		if columnValueMap != nil {
+			// Column list specified - look up value by column name
+			if v, ok := columnValueMap[col.Name]; ok {
+				value = v
+			} else if col.IsAutoIncrement() {
 				// Generate auto-increment value
-				nextVal, err := e.catalog.GetNextAutoIncrement(stmt.TableName, col.Name)
+				nextVal, err := e.catalog.GetNextAutoIncrement(table.Name, col.Name)
 				if err != nil {
-					return "", fmt.Errorf("failed to generate auto-increment value for %s: %v", col.Name, err)
+					return nil, "", fmt.Errorf("failed to generate auto-increment value for %s: %v", col.Name, err)
 				}
 				value = fmt.Sprintf("%d", nextVal)
+			} else if defaultVal, hasDefault := col.GetDefaultValue(); hasDefault {
+				value = defaultVal
+			} else if col.IsNotNull() {
+				return nil, "", fmt.Errorf("no value provided for NOT NULL column %s", col.Name)
+			} else {
+				value = "NULL"
 			}
 		} else {
-			if valueIdx < len(stmt.Values) {
-				value = stmt.Values[valueIdx]
-				valueIdx++
+			// No column list - use positional values
+			autoIncCols := table.GetAutoIncrementColumns()
+			expectedCols := len(table.Columns) - len(autoIncCols)
+
+			if len(values) != len(table.Columns) && len(values) != expectedCols {
+				return nil, "", errors.New("column count mismatch")
+			}
+
+			valueIdx := 0
+			for j := 0; j < i; j++ {
+				if !table.Columns[j].IsAutoIncrement() || len(values) == len(table.Columns) {
+					valueIdx++
+				}
+			}
+
+			if col.IsAutoIncrement() {
+				if len(values) == len(table.Columns) {
+					value = values[i]
+					if intVal, err := parseIntValue(value); err == nil {
+						e.catalog.UpdateAutoIncrement(table.Name, col.Name, intVal)
+					}
+				} else {
+					nextVal, err := e.catalog.GetNextAutoIncrement(table.Name, col.Name)
+					if err != nil {
+						return nil, "", fmt.Errorf("failed to generate auto-increment value for %s: %v", col.Name, err)
+					}
+					value = fmt.Sprintf("%d", nextVal)
+				}
 			} else {
-				// Check for default value
-				if defaultVal, hasDefault := col.GetDefaultValue(); hasDefault {
+				if valueIdx < len(values) {
+					value = values[valueIdx]
+				} else if defaultVal, hasDefault := col.GetDefaultValue(); hasDefault {
 					value = defaultVal
 				} else {
-					return "", fmt.Errorf("no value provided for column %s", col.Name)
+					return nil, "", fmt.Errorf("no value provided for column %s", col.Name)
 				}
 			}
 		}
 
 		// Check NOT NULL constraint
 		if col.IsNotNull() && (value == "" || value == "NULL") {
-			return "", fmt.Errorf("column %s cannot be NULL", col.Name)
+			return nil, "", fmt.Errorf("column %s cannot be NULL", col.Name)
 		}
 
-		// Validate the value against the column type
+		// Validate and normalize the value
 		if value != "" && value != "NULL" {
 			if err := ValidateValue(col.Type, value); err != nil {
-				return "", fmt.Errorf("column %s: %v", col.Name, err)
+				return nil, "", fmt.Errorf("column %s: %v", col.Name, err)
 			}
-			// Normalize the value for consistent storage
 			normalized, err := NormalizeValue(col.Type, value)
 			if err != nil {
-				return "", fmt.Errorf("column %s: %v", col.Name, err)
+				return nil, "", fmt.Errorf("column %s: %v", col.Name, err)
 			}
 			normalizedValues[i] = normalized
 		} else {
@@ -591,28 +754,33 @@ func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
 		}
 	}
 
-	// Check UNIQUE and PRIMARY KEY constraints
-	if err := e.checkUniqueConstraints(table, normalizedValues, ""); err != nil {
-		return "", err
+	// Check UNIQUE and PRIMARY KEY constraints, returning conflict info
+	conflictRowKey, err := e.checkUniqueConstraintsWithConflict(table, normalizedValues, "")
+	if err != nil {
+		return nil, conflictRowKey, err
 	}
 
 	// Check FOREIGN KEY constraints
 	if err := e.checkForeignKeyConstraints(table, normalizedValues); err != nil {
-		return "", err
+		return nil, "", err
 	}
 
 	// Check CHECK constraints
 	if err := e.checkCheckConstraints(table, normalizedValues); err != nil {
-		return "", err
+		return nil, "", err
 	}
 
+	return normalizedValues, "", nil
+}
+
+// insertSingleRow inserts a single prepared row into the table.
+func (e *Executor) insertSingleRow(table TableSchema, tableName string, normalizedValues []string) error {
 	// Execute BEFORE INSERT triggers
-	if err := e.executeTriggers(stmt.TableName, TriggerTimingBefore, TriggerEventInsert); err != nil {
-		return "", fmt.Errorf("BEFORE INSERT trigger failed: %v", err)
+	if err := e.executeTriggers(tableName, TriggerTimingBefore, TriggerEventInsert); err != nil {
+		return fmt.Errorf("BEFORE INSERT trigger failed: %v", err)
 	}
 
-	// Generate a unique row ID using an auto-increment sequence.
-	// The sequence is stored at key "seq:<table>".
+	// Generate a unique row ID
 	seqKey := "seq:" + table.Name
 	var seq int
 	seqVal, err := e.store.Get(seqKey)
@@ -621,46 +789,106 @@ func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
 	}
 	seq++
 
-	// Persist the updated sequence.
 	seqBytes, _ := json.Marshal(seq)
 	e.store.Put(seqKey, seqBytes)
 
-	// Create the row key: row:<table>:<id>
 	rowKey := fmt.Sprintf("row:%s:%d", table.Name, seq)
 
-	// Build the row as a map of column names to values.
+	// Build the row
 	row := make(map[string]interface{})
 	for i, col := range table.Columns {
 		row[col.Name] = normalizedValues[i]
 	}
 
-	// Serialize the row to JSON and store it.
+	// Store the row
 	data, err := json.Marshal(row)
 	if err != nil {
-		return "", err
+		return err
 	}
-	err = e.store.Put(rowKey, data)
-	if err != nil {
-		return "", err
+	if err := e.store.Put(rowKey, data); err != nil {
+		return err
 	}
 
-	// Update indexes for the new row.
+	// Update indexes
 	if e.indexMgr != nil {
 		e.indexMgr.OnInsert(table.Name, rowKey, row)
 	}
 
-	// Invoke the OnInsert callback for reactive notifications.
-	// This enables the WATCH feature to notify subscribers.
+	// Invoke OnInsert callback
 	if e.OnInsert != nil {
 		e.OnInsert(table.Name, string(data))
 	}
 
 	// Execute AFTER INSERT triggers
-	if err := e.executeTriggers(stmt.TableName, TriggerTimingAfter, TriggerEventInsert); err != nil {
-		return "", fmt.Errorf("AFTER INSERT trigger failed: %v", err)
+	if err := e.executeTriggers(tableName, TriggerTimingAfter, TriggerEventInsert); err != nil {
+		return fmt.Errorf("AFTER INSERT trigger failed: %v", err)
 	}
 
-	return "INSERT 1", nil
+	return nil
+}
+
+// checkUniqueConstraintsWithConflict checks unique constraints and returns the conflicting row key.
+func (e *Executor) checkUniqueConstraintsWithConflict(table TableSchema, values []string, excludeRowKey string) (string, error) {
+	prefix := "row:" + table.Name + ":"
+	rows, err := e.store.Scan(prefix)
+	if err != nil {
+		return "", err
+	}
+
+	for i, col := range table.Columns {
+		if col.IsUnique() || col.IsPrimaryKey() {
+			newValue := values[i]
+			if newValue == "" || newValue == "NULL" {
+				continue
+			}
+
+			for rowKey, rowData := range rows {
+				if excludeRowKey != "" && rowKey == excludeRowKey {
+					continue
+				}
+
+				var row map[string]interface{}
+				if err := json.Unmarshal(rowData, &row); err != nil {
+					continue
+				}
+
+				if existingVal, ok := row[col.Name]; ok {
+					if fmt.Sprintf("%v", existingVal) == newValue {
+						return rowKey, fmt.Errorf("duplicate value for unique column %s: %s", col.Name, newValue)
+					}
+				}
+			}
+		}
+	}
+
+	return "", nil
+}
+
+// updateConflictingRow updates a row that caused a conflict during INSERT.
+func (e *Executor) updateConflictingRow(table TableSchema, rowKey string, updates map[string]string) error {
+	// Get the existing row
+	rowData, err := e.store.Get(rowKey)
+	if err != nil {
+		return err
+	}
+
+	var row map[string]interface{}
+	if err := json.Unmarshal(rowData, &row); err != nil {
+		return err
+	}
+
+	// Apply updates
+	for col, val := range updates {
+		row[col] = val
+	}
+
+	// Store the updated row
+	data, err := json.Marshal(row)
+	if err != nil {
+		return err
+	}
+
+	return e.store.Put(rowKey, data)
 }
 
 // parseIntValue parses a string value as an int64.
@@ -1289,6 +1517,9 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 		}
 
 		if stmt.Join != nil {
+			// Handle different join types
+			matched := false
+
 			// Nested Loop Join: iterate through all rows in the join table.
 			for _, jVal := range joinRows {
 				var jRow map[string]interface{}
@@ -1305,8 +1536,6 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 				}
 
 				// Check the JOIN ON condition.
-				// The condition is stored as Column = Value, where both
-				// may be column references (e.g., "users.id = orders.user_id").
 				leftVal, ok1 := combinedRow[stmt.Join.On.Column]
 				rightVal, ok2 := combinedRow[stmt.Join.On.Value]
 
@@ -1318,11 +1547,78 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 				// If the values match, process the combined row.
 				if ok1 && fmt.Sprintf("%v", leftVal) == fmt.Sprintf("%v", rightVal) {
 					e.processRow(combinedRow, stmt, &result, rls)
+					matched = true
 				}
+			}
+
+			// For LEFT JOIN: if no match found, include left row with NULLs for right table
+			if !matched && (stmt.Join.JoinType == JoinTypeLeft || stmt.Join.JoinType == JoinTypeFull) {
+				// Create a row with NULLs for the join table columns
+				combinedRow := make(map[string]interface{})
+				for k, v := range flatRow {
+					combinedRow[k] = v
+				}
+				// Add NULL values for join table columns
+				if joinTable, ok := e.catalog.GetTable(stmt.Join.TableName); ok {
+					for _, col := range joinTable.Columns {
+						combinedRow[col.Name] = "NULL"
+						combinedRow[stmt.Join.TableName+"."+col.Name] = "NULL"
+					}
+				}
+				e.processRow(combinedRow, stmt, &result, rls)
 			}
 		} else {
 			// No JOIN - process the row directly.
 			e.processRow(flatRow, stmt, &result, rls)
+		}
+	}
+
+	// For RIGHT JOIN and FULL JOIN: include unmatched rows from the right table
+	if stmt.Join != nil && (stmt.Join.JoinType == JoinTypeRight || stmt.Join.JoinType == JoinTypeFull) {
+		// Track which right rows were matched
+		for _, jVal := range joinRows {
+			var jRow map[string]interface{}
+			json.Unmarshal(jVal, &jRow)
+
+			// Check if this right row matched any left row
+			matched := false
+			for _, val := range rows {
+				var row map[string]interface{}
+				json.Unmarshal(val, &row)
+
+				// Check join condition
+				leftVal, ok1 := row[stmt.Join.On.Column]
+				if !ok1 {
+					leftVal, ok1 = row[strings.TrimPrefix(stmt.Join.On.Column, stmt.TableName+".")]
+				}
+				rightVal, ok2 := jRow[stmt.Join.On.Value]
+				if !ok2 {
+					rightVal, ok2 = jRow[strings.TrimPrefix(stmt.Join.On.Value, stmt.Join.TableName+".")]
+				}
+
+				if ok1 && ok2 && fmt.Sprintf("%v", leftVal) == fmt.Sprintf("%v", rightVal) {
+					matched = true
+					break
+				}
+			}
+
+			// If not matched, include with NULLs for left table
+			if !matched {
+				combinedRow := make(map[string]interface{})
+				// Add NULL values for left table columns
+				if leftTable, ok := e.catalog.GetTable(stmt.TableName); ok {
+					for _, col := range leftTable.Columns {
+						combinedRow[col.Name] = "NULL"
+						combinedRow[stmt.TableName+"."+col.Name] = "NULL"
+					}
+				}
+				// Add right table values
+				for k, v := range jRow {
+					combinedRow[k] = v
+					combinedRow[stmt.Join.TableName+"."+k] = v
+				}
+				e.processRow(combinedRow, stmt, &result, rls)
+			}
 		}
 	}
 
@@ -1377,6 +1673,13 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 		result = uniqueResult
 	}
 
+	// Apply OFFSET if present.
+	if stmt.Offset > 0 && len(result) > stmt.Offset {
+		result = result[stmt.Offset:]
+	} else if stmt.Offset > 0 {
+		result = nil // OFFSET exceeds result count
+	}
+
 	// Apply LIMIT if present.
 	if stmt.Limit > 0 && len(result) > stmt.Limit {
 		result = result[:stmt.Limit]
@@ -1392,12 +1695,26 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 	}
 
 	// Build the result with row count information.
-	// Format: data rows followed by a summary line with row count.
+	// Format: header row, data rows, then a summary line with row count.
 	rowCount := len(result)
-	if rowCount == 0 {
-		return fmt.Sprintf("(0 rows)"), nil
+
+	// Build header row from column names and function expressions
+	headers := make([]string, 0, len(stmt.Columns)+len(stmt.Functions))
+	headers = append(headers, stmt.Columns...)
+	for _, fn := range stmt.Functions {
+		if fn.Alias != "" {
+			headers = append(headers, fn.Alias)
+		} else {
+			// Build function name like "upper(name)"
+			headers = append(headers, fmt.Sprintf("%s(%s)", strings.ToLower(fn.Function), strings.Join(fn.Arguments, ", ")))
+		}
 	}
-	return fmt.Sprintf("%s\n(%d rows)", strings.Join(result, "\n"), rowCount), nil
+	header := strings.Join(headers, ", ")
+
+	if rowCount == 0 {
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
+	}
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(result, "\n"), rowCount), nil
 }
 
 // executeUnion executes a UNION statement by combining results from multiple SELECTs.
@@ -1414,6 +1731,9 @@ func (e *Executor) executeUnion(stmt *UnionStmt) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("error executing right side of UNION: %v", err)
 	}
+
+	// Extract header from left result (use left side's column names)
+	header := extractResultHeader(leftResult)
 
 	// Parse the results to extract rows
 	leftRows := extractResultRows(leftResult)
@@ -1444,7 +1764,7 @@ func (e *Executor) executeUnion(stmt *UnionStmt) (string, error) {
 	// Handle chained UNIONs
 	if stmt.NextUnion != nil {
 		// Create a temporary result and recursively process
-		tempResult := formatUnionResult(combinedRows)
+		tempResult := formatUnionResultWithHeader(header, combinedRows)
 		nextResult, err := e.executeUnion(stmt.NextUnion)
 		if err != nil {
 			return "", err
@@ -1467,16 +1787,143 @@ func (e *Executor) executeUnion(stmt *UnionStmt) (string, error) {
 		_ = tempResult // suppress unused warning
 	}
 
-	return formatUnionResult(combinedRows), nil
+	return formatUnionResultWithHeader(header, combinedRows), nil
+}
+
+// executeIntersect executes an INTERSECT statement by returning only rows that appear in both SELECTs.
+// INTERSECT removes duplicates by default, INTERSECT ALL keeps duplicates.
+func (e *Executor) executeIntersect(stmt *IntersectStmt) (string, error) {
+	// Execute the left SELECT
+	leftResult, err := e.executeSelect(stmt.Left)
+	if err != nil {
+		return "", fmt.Errorf("error executing left side of INTERSECT: %v", err)
+	}
+
+	// Execute the right SELECT
+	rightResult, err := e.executeSelect(stmt.Right)
+	if err != nil {
+		return "", fmt.Errorf("error executing right side of INTERSECT: %v", err)
+	}
+
+	// Extract header from left result
+	header := extractResultHeader(leftResult)
+
+	// Parse the results to extract rows
+	leftRows := extractResultRows(leftResult)
+	rightRows := extractResultRows(rightResult)
+
+	// Build a set of right rows for efficient lookup
+	rightSet := make(map[string]int)
+	for _, row := range rightRows {
+		rightSet[row]++
+	}
+
+	// Find intersection
+	var intersectRows []string
+	if stmt.All {
+		// INTERSECT ALL: keep duplicates up to the minimum count in both sets
+		leftCount := make(map[string]int)
+		for _, row := range leftRows {
+			leftCount[row]++
+		}
+		for row, lc := range leftCount {
+			if rc, ok := rightSet[row]; ok {
+				// Add the minimum of left and right counts
+				count := lc
+				if rc < count {
+					count = rc
+				}
+				for i := 0; i < count; i++ {
+					intersectRows = append(intersectRows, row)
+				}
+			}
+		}
+	} else {
+		// INTERSECT: remove duplicates, only include rows in both sets
+		seen := make(map[string]bool)
+		for _, row := range leftRows {
+			if !seen[row] && rightSet[row] > 0 {
+				seen[row] = true
+				intersectRows = append(intersectRows, row)
+			}
+		}
+	}
+
+	return formatUnionResultWithHeader(header, intersectRows), nil
+}
+
+// executeExcept executes an EXCEPT statement by returning rows from left that are not in right.
+// EXCEPT removes duplicates by default, EXCEPT ALL keeps duplicates.
+func (e *Executor) executeExcept(stmt *ExceptStmt) (string, error) {
+	// Execute the left SELECT
+	leftResult, err := e.executeSelect(stmt.Left)
+	if err != nil {
+		return "", fmt.Errorf("error executing left side of EXCEPT: %v", err)
+	}
+
+	// Execute the right SELECT
+	rightResult, err := e.executeSelect(stmt.Right)
+	if err != nil {
+		return "", fmt.Errorf("error executing right side of EXCEPT: %v", err)
+	}
+
+	// Extract header from left result
+	header := extractResultHeader(leftResult)
+
+	// Parse the results to extract rows
+	leftRows := extractResultRows(leftResult)
+	rightRows := extractResultRows(rightResult)
+
+	// Build a set of right rows for efficient lookup
+	rightSet := make(map[string]int)
+	for _, row := range rightRows {
+		rightSet[row]++
+	}
+
+	// Find difference (left - right)
+	var exceptRows []string
+	if stmt.All {
+		// EXCEPT ALL: for each row in left, subtract the count in right
+		leftCount := make(map[string]int)
+		for _, row := range leftRows {
+			leftCount[row]++
+		}
+		for row, lc := range leftCount {
+			rc := rightSet[row]
+			remaining := lc - rc
+			if remaining > 0 {
+				for i := 0; i < remaining; i++ {
+					exceptRows = append(exceptRows, row)
+				}
+			}
+		}
+	} else {
+		// EXCEPT: remove duplicates, only include rows in left but not in right
+		seen := make(map[string]bool)
+		for _, row := range leftRows {
+			if !seen[row] && rightSet[row] == 0 {
+				seen[row] = true
+				exceptRows = append(exceptRows, row)
+			}
+		}
+	}
+
+	return formatUnionResultWithHeader(header, exceptRows), nil
 }
 
 // extractResultRows extracts data rows from a SELECT result string.
-// It removes the row count line at the end.
+// It removes the header row (first line) and the row count line at the end.
 func extractResultRows(result string) []string {
 	var rows []string
 	lines := strings.Split(result, "\n")
+	isFirstLine := true
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
+		// Skip the header row (first non-empty line)
+		if isFirstLine && line != "" {
+			isFirstLine = false
+			continue
+		}
 		// Skip the row count line
 		if strings.HasPrefix(line, "(") && strings.HasSuffix(line, " rows)") {
 			continue
@@ -1489,13 +1936,35 @@ func extractResultRows(result string) []string {
 	return rows
 }
 
+// extractResultHeader extracts the header row from a SELECT result string.
+func extractResultHeader(result string) string {
+	lines := strings.Split(result, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
 // formatUnionResult formats combined rows into a result string with row count.
+// Deprecated: Use formatUnionResultWithHeader instead.
 func formatUnionResult(rows []string) string {
 	rowCount := len(rows)
 	if rowCount == 0 {
 		return "(0 rows)"
 	}
 	return fmt.Sprintf("%s\n(%d rows)", strings.Join(rows, "\n"), rowCount)
+}
+
+// formatUnionResultWithHeader formats combined rows into a result string with header and row count.
+func formatUnionResultWithHeader(header string, rows []string) string {
+	rowCount := len(rows)
+	if rowCount == 0 {
+		return fmt.Sprintf("%s\n(0 rows)", header)
+	}
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(rows, "\n"), rowCount)
 }
 
 // processRow applies WHERE and RLS filters to a row, then projects
@@ -1546,12 +2015,416 @@ func (e *Executor) processRow(row map[string]interface{}, stmt *SelectStmt, resu
 		}
 	}
 
+	// Evaluate scalar functions and add their results
+	for _, fn := range stmt.Functions {
+		result := e.evaluateScalarFunction(fn, row)
+		outRow = append(outRow, result)
+	}
+
 	// Add the formatted row to the result.
 	*result = append(*result, strings.Join(outRow, ", "))
 }
 
+// evaluateScalarFunction evaluates a scalar function against a row.
+func (e *Executor) evaluateScalarFunction(fn *FunctionExpr, row map[string]interface{}) string {
+	// Resolve arguments - can be column names or literals
+	args := make([]string, len(fn.Arguments))
+	for i, arg := range fn.Arguments {
+		// Check if it's a string literal (starts and ends with ')
+		if len(arg) >= 2 && arg[0] == '\'' && arg[len(arg)-1] == '\'' {
+			args[i] = arg[1 : len(arg)-1] // Remove quotes
+		} else if v, ok := row[arg]; ok {
+			// It's a column name
+			args[i] = fmt.Sprintf("%v", v)
+		} else {
+			// It's a literal value (number, NULL, etc.)
+			args[i] = arg
+		}
+	}
+
+	switch fn.Function {
+	// String functions
+	case "UPPER":
+		if len(args) >= 1 {
+			return strings.ToUpper(args[0])
+		}
+	case "LOWER":
+		if len(args) >= 1 {
+			return strings.ToLower(args[0])
+		}
+	case "LENGTH", "LEN":
+		if len(args) >= 1 {
+			return fmt.Sprintf("%d", len(args[0]))
+		}
+	case "CONCAT":
+		return strings.Join(args, "")
+	case "SUBSTRING", "SUBSTR":
+		if len(args) >= 2 {
+			str := args[0]
+			start, _ := strconv.Atoi(args[1])
+			if start < 1 {
+				start = 1
+			}
+			start-- // Convert to 0-based index
+			if start >= len(str) {
+				return ""
+			}
+			if len(args) >= 3 {
+				length, _ := strconv.Atoi(args[2])
+				end := start + length
+				if end > len(str) {
+					end = len(str)
+				}
+				return str[start:end]
+			}
+			return str[start:]
+		}
+	case "TRIM":
+		if len(args) >= 1 {
+			return strings.TrimSpace(args[0])
+		}
+	case "LTRIM":
+		if len(args) >= 1 {
+			return strings.TrimLeft(args[0], " \t\n\r")
+		}
+	case "RTRIM":
+		if len(args) >= 1 {
+			return strings.TrimRight(args[0], " \t\n\r")
+		}
+	case "REPLACE":
+		if len(args) >= 3 {
+			return strings.ReplaceAll(args[0], args[1], args[2])
+		}
+	case "LEFT":
+		if len(args) >= 2 {
+			str := args[0]
+			n, _ := strconv.Atoi(args[1])
+			if n > len(str) {
+				n = len(str)
+			}
+			if n < 0 {
+				n = 0
+			}
+			return str[:n]
+		}
+	case "RIGHT":
+		if len(args) >= 2 {
+			str := args[0]
+			n, _ := strconv.Atoi(args[1])
+			if n > len(str) {
+				n = len(str)
+			}
+			if n < 0 {
+				n = 0
+			}
+			return str[len(str)-n:]
+		}
+	case "REVERSE":
+		if len(args) >= 1 {
+			runes := []rune(args[0])
+			for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+				runes[i], runes[j] = runes[j], runes[i]
+			}
+			return string(runes)
+		}
+	case "REPEAT":
+		if len(args) >= 2 {
+			n, _ := strconv.Atoi(args[1])
+			return strings.Repeat(args[0], n)
+		}
+
+	// Numeric functions
+	case "ABS":
+		if len(args) >= 1 {
+			n, err := strconv.ParseFloat(args[0], 64)
+			if err == nil {
+				if n < 0 {
+					n = -n
+				}
+				return fmt.Sprintf("%g", n)
+			}
+		}
+	case "ROUND":
+		if len(args) >= 1 {
+			n, err := strconv.ParseFloat(args[0], 64)
+			if err == nil {
+				decimals := 0
+				if len(args) >= 2 {
+					decimals, _ = strconv.Atoi(args[1])
+				}
+				multiplier := 1.0
+				for i := 0; i < decimals; i++ {
+					multiplier *= 10
+				}
+				rounded := float64(int(n*multiplier+0.5)) / multiplier
+				if decimals > 0 {
+					return fmt.Sprintf("%.*f", decimals, rounded)
+				}
+				return fmt.Sprintf("%g", rounded)
+			}
+		}
+	case "CEIL", "CEILING":
+		if len(args) >= 1 {
+			n, err := strconv.ParseFloat(args[0], 64)
+			if err == nil {
+				return fmt.Sprintf("%g", float64(int(n)+1))
+			}
+		}
+	case "FLOOR":
+		if len(args) >= 1 {
+			n, err := strconv.ParseFloat(args[0], 64)
+			if err == nil {
+				return fmt.Sprintf("%g", float64(int(n)))
+			}
+		}
+	case "MOD":
+		if len(args) >= 2 {
+			a, err1 := strconv.Atoi(args[0])
+			b, err2 := strconv.Atoi(args[1])
+			if err1 == nil && err2 == nil && b != 0 {
+				return fmt.Sprintf("%d", a%b)
+			}
+		}
+	case "POWER", "POW":
+		if len(args) >= 2 {
+			base, err1 := strconv.ParseFloat(args[0], 64)
+			exp, err2 := strconv.ParseFloat(args[1], 64)
+			if err1 == nil && err2 == nil {
+				result := 1.0
+				for i := 0; i < int(exp); i++ {
+					result *= base
+				}
+				return fmt.Sprintf("%g", result)
+			}
+		}
+	case "SQRT":
+		if len(args) >= 1 {
+			n, err := strconv.ParseFloat(args[0], 64)
+			if err == nil && n >= 0 {
+				// Simple Newton's method for square root
+				if n == 0 {
+					return "0"
+				}
+				x := n
+				for i := 0; i < 20; i++ {
+					x = (x + n/x) / 2
+				}
+				return fmt.Sprintf("%g", x)
+			}
+		}
+
+	// Date/Time functions
+	case "NOW", "CURRENT_TIMESTAMP":
+		return time.Now().Format("2006-01-02 15:04:05")
+	case "CURRENT_DATE":
+		return time.Now().Format("2006-01-02")
+	case "CURRENT_TIME":
+		return time.Now().Format("15:04:05")
+	case "YEAR":
+		if len(args) >= 1 {
+			t, err := parseDateTime(args[0])
+			if err == nil {
+				return fmt.Sprintf("%d", t.Year())
+			}
+		}
+	case "MONTH":
+		if len(args) >= 1 {
+			t, err := parseDateTime(args[0])
+			if err == nil {
+				return fmt.Sprintf("%d", t.Month())
+			}
+		}
+	case "DAY":
+		if len(args) >= 1 {
+			t, err := parseDateTime(args[0])
+			if err == nil {
+				return fmt.Sprintf("%d", t.Day())
+			}
+		}
+	case "HOUR":
+		if len(args) >= 1 {
+			t, err := parseDateTime(args[0])
+			if err == nil {
+				return fmt.Sprintf("%d", t.Hour())
+			}
+		}
+	case "MINUTE":
+		if len(args) >= 1 {
+			t, err := parseDateTime(args[0])
+			if err == nil {
+				return fmt.Sprintf("%d", t.Minute())
+			}
+		}
+	case "SECOND":
+		if len(args) >= 1 {
+			t, err := parseDateTime(args[0])
+			if err == nil {
+				return fmt.Sprintf("%d", t.Second())
+			}
+		}
+	case "EXTRACT":
+		// EXTRACT(part FROM date) - simplified: EXTRACT(part, date)
+		if len(args) >= 2 {
+			part := strings.ToUpper(args[0])
+			t, err := parseDateTime(args[1])
+			if err == nil {
+				switch part {
+				case "YEAR":
+					return fmt.Sprintf("%d", t.Year())
+				case "MONTH":
+					return fmt.Sprintf("%d", t.Month())
+				case "DAY":
+					return fmt.Sprintf("%d", t.Day())
+				case "HOUR":
+					return fmt.Sprintf("%d", t.Hour())
+				case "MINUTE":
+					return fmt.Sprintf("%d", t.Minute())
+				case "SECOND":
+					return fmt.Sprintf("%d", t.Second())
+				}
+			}
+		}
+	case "DATE_ADD", "DATEADD":
+		// DATE_ADD(date, interval, unit) - simplified
+		if len(args) >= 3 {
+			t, err := parseDateTime(args[0])
+			if err == nil {
+				interval, _ := strconv.Atoi(args[1])
+				unit := strings.ToUpper(args[2])
+				switch unit {
+				case "DAY", "DAYS":
+					t = t.AddDate(0, 0, interval)
+				case "MONTH", "MONTHS":
+					t = t.AddDate(0, interval, 0)
+				case "YEAR", "YEARS":
+					t = t.AddDate(interval, 0, 0)
+				case "HOUR", "HOURS":
+					t = t.Add(time.Duration(interval) * time.Hour)
+				case "MINUTE", "MINUTES":
+					t = t.Add(time.Duration(interval) * time.Minute)
+				case "SECOND", "SECONDS":
+					t = t.Add(time.Duration(interval) * time.Second)
+				}
+				return t.Format("2006-01-02 15:04:05")
+			}
+		}
+	case "DATE_SUB":
+		// DATE_SUB(date, interval, unit)
+		if len(args) >= 3 {
+			t, err := parseDateTime(args[0])
+			if err == nil {
+				interval, _ := strconv.Atoi(args[1])
+				unit := strings.ToUpper(args[2])
+				switch unit {
+				case "DAY", "DAYS":
+					t = t.AddDate(0, 0, -interval)
+				case "MONTH", "MONTHS":
+					t = t.AddDate(0, -interval, 0)
+				case "YEAR", "YEARS":
+					t = t.AddDate(-interval, 0, 0)
+				case "HOUR", "HOURS":
+					t = t.Add(time.Duration(-interval) * time.Hour)
+				case "MINUTE", "MINUTES":
+					t = t.Add(time.Duration(-interval) * time.Minute)
+				case "SECOND", "SECONDS":
+					t = t.Add(time.Duration(-interval) * time.Second)
+				}
+				return t.Format("2006-01-02 15:04:05")
+			}
+		}
+	case "DATEDIFF":
+		// DATEDIFF(date1, date2) - returns days between
+		if len(args) >= 2 {
+			t1, err1 := parseDateTime(args[0])
+			t2, err2 := parseDateTime(args[1])
+			if err1 == nil && err2 == nil {
+				diff := t1.Sub(t2)
+				return fmt.Sprintf("%d", int(diff.Hours()/24))
+			}
+		}
+
+	// NULL handling functions
+	case "COALESCE":
+		for _, arg := range args {
+			if arg != "NULL" && arg != "" {
+				return arg
+			}
+		}
+		return "NULL"
+	case "NULLIF":
+		if len(args) >= 2 {
+			if args[0] == args[1] {
+				return "NULL"
+			}
+			return args[0]
+		}
+	case "IFNULL", "NVL", "ISNULL":
+		if len(args) >= 2 {
+			if args[0] == "NULL" || args[0] == "" {
+				return args[1]
+			}
+			return args[0]
+		}
+
+	// Type conversion functions
+	case "CAST", "CONVERT":
+		// CAST(value AS type) - simplified: CAST(value, type)
+		if len(args) >= 2 {
+			value := args[0]
+			targetType := strings.ToUpper(args[1])
+
+			switch targetType {
+			case "INT", "INTEGER", "SMALLINT", "BIGINT":
+				// Convert to integer
+				if f, err := strconv.ParseFloat(value, 64); err == nil {
+					return fmt.Sprintf("%d", int64(f))
+				}
+				return "0"
+			case "FLOAT", "REAL", "DOUBLE", "DECIMAL", "NUMERIC":
+				// Convert to float
+				if f, err := strconv.ParseFloat(value, 64); err == nil {
+					return fmt.Sprintf("%g", f)
+				}
+				return "0"
+			case "TEXT", "VARCHAR", "CHAR", "STRING":
+				// Already a string
+				return value
+			case "BOOLEAN", "BOOL":
+				// Convert to boolean
+				lower := strings.ToLower(value)
+				if lower == "true" || lower == "1" || lower == "yes" || lower == "on" {
+					return "true"
+				}
+				return "false"
+			case "DATE":
+				// Convert to date format
+				if t, err := parseDateTime(value); err == nil {
+					return t.Format("2006-01-02")
+				}
+				return value
+			case "TIME":
+				// Convert to time format
+				if t, err := parseDateTime(value); err == nil {
+					return t.Format("15:04:05")
+				}
+				return value
+			case "TIMESTAMP", "DATETIME":
+				// Convert to timestamp format
+				if t, err := parseDateTime(value); err == nil {
+					return t.Format("2006-01-02 15:04:05")
+				}
+				return value
+			default:
+				return value
+			}
+		}
+	}
+
+	return "NULL"
+}
+
 // evaluateWhereClause evaluates an extended WHERE clause against a row.
-// It supports subqueries with IN, NOT IN, and EXISTS operators.
+// It supports subqueries with IN, NOT IN, EXISTS, IS NULL, and IS NOT NULL operators.
 func (e *Executor) evaluateWhereClause(where *WhereClause, row map[string]interface{}) bool {
 	// Handle EXISTS operator
 	if where.Operator == "EXISTS" {
@@ -1564,6 +2437,16 @@ func (e *Executor) evaluateWhereClause(where *WhereClause, row map[string]interf
 			return !strings.Contains(result, "(0 rows)")
 		}
 		return false
+	}
+
+	// Handle IS NULL and IS NOT NULL
+	if where.Operator == "IS NULL" || where.Operator == "IS NOT NULL" {
+		colVal, exists := row[where.Column]
+		isNull := !exists || colVal == nil || fmt.Sprintf("%v", colVal) == "" || fmt.Sprintf("%v", colVal) == "NULL"
+		if where.Operator == "IS NULL" {
+			return isNull
+		}
+		return !isNull
 	}
 
 	// Get the column value from the row
@@ -1584,6 +2467,15 @@ func (e *Executor) evaluateWhereClause(where *WhereClause, row map[string]interf
 		return compareValues(colStr, where.Value) <= 0
 	case ">=":
 		return compareValues(colStr, where.Value) >= 0
+	case "LIKE", "NOT LIKE":
+		matched := matchLikePattern(colStr, where.Value)
+		if where.Operator == "LIKE" {
+			return matched
+		}
+		return !matched
+	case "BETWEEN":
+		// BETWEEN is inclusive on both ends
+		return compareValues(colStr, where.BetweenLow) >= 0 && compareValues(colStr, where.BetweenHigh) <= 0
 	case "IN", "NOT IN":
 		var valuesToCheck []string
 
@@ -1615,6 +2507,49 @@ func (e *Executor) evaluateWhereClause(where *WhereClause, row map[string]interf
 	}
 
 	return false
+}
+
+// matchLikePattern matches a string against a SQL LIKE pattern.
+// % matches any sequence of characters (including empty)
+// _ matches any single character
+func matchLikePattern(str, pattern string) bool {
+	// Convert SQL LIKE pattern to a simple matching algorithm
+	// This is a basic implementation that handles % and _
+	return matchLikeHelper(str, pattern, 0, 0)
+}
+
+func matchLikeHelper(str, pattern string, si, pi int) bool {
+	for pi < len(pattern) {
+		if pattern[pi] == '%' {
+			// % matches zero or more characters
+			// Try matching the rest of the pattern at each position
+			for si <= len(str) {
+				if matchLikeHelper(str, pattern, si, pi+1) {
+					return true
+				}
+				si++
+			}
+			return false
+		} else if pattern[pi] == '_' {
+			// _ matches exactly one character
+			if si >= len(str) {
+				return false
+			}
+			si++
+			pi++
+		} else {
+			// Regular character - must match exactly (case-insensitive)
+			if si >= len(str) {
+				return false
+			}
+			if strings.ToLower(string(str[si])) != strings.ToLower(string(pattern[pi])) {
+				return false
+			}
+			si++
+			pi++
+		}
+	}
+	return si == len(str)
 }
 
 // compareValues compares two values, trying numeric comparison first.
@@ -1709,13 +2644,23 @@ func (e *Executor) executeCommit() (string, error) {
 	return "COMMIT", nil
 }
 
-// executeRollback aborts the current transaction.
+// executeRollback aborts the current transaction or rolls back to a savepoint.
 // Returns an error if no transaction is active.
-func (e *Executor) executeRollback() (string, error) {
+func (e *Executor) executeRollback(stmt *RollbackStmt) (string, error) {
 	if e.tx == nil || !e.tx.IsActive() {
 		return "", errors.New("no transaction in progress")
 	}
 
+	// Check if rolling back to a savepoint
+	if stmt.ToSavepoint != "" {
+		err := e.tx.RollbackToSavepoint(stmt.ToSavepoint)
+		if err != nil {
+			return "", err
+		}
+		return "ROLLBACK TO SAVEPOINT " + stmt.ToSavepoint, nil
+	}
+
+	// Full rollback
 	err := e.tx.Rollback()
 	e.tx = nil
 	if err != nil {
@@ -1723,6 +2668,34 @@ func (e *Executor) executeRollback() (string, error) {
 	}
 
 	return "ROLLBACK", nil
+}
+
+// executeSavepoint creates a savepoint within the current transaction.
+func (e *Executor) executeSavepoint(stmt *SavepointStmt) (string, error) {
+	if e.tx == nil || !e.tx.IsActive() {
+		return "", errors.New("no transaction in progress")
+	}
+
+	err := e.tx.CreateSavepoint(stmt.Name)
+	if err != nil {
+		return "", err
+	}
+
+	return "SAVEPOINT " + stmt.Name, nil
+}
+
+// executeReleaseSavepoint releases a savepoint.
+func (e *Executor) executeReleaseSavepoint(stmt *ReleaseSavepointStmt) (string, error) {
+	if e.tx == nil || !e.tx.IsActive() {
+		return "", errors.New("no transaction in progress")
+	}
+
+	err := e.tx.ReleaseSavepoint(stmt.Name)
+	if err != nil {
+		return "", err
+	}
+
+	return "RELEASE SAVEPOINT " + stmt.Name, nil
 }
 
 // executeCreateIndex creates a new index on a table column.
@@ -1733,13 +2706,92 @@ func (e *Executor) executeCreateIndex(stmt *CreateIndexStmt) (string, error) {
 		return "", errors.New("table not found: " + stmt.TableName)
 	}
 
+	// Check if index already exists
+	prefix := "_sys_index:" + stmt.TableName + ":" + stmt.ColumnName
+	existing, err := e.store.Scan(prefix)
+	if err == nil && len(existing) > 0 {
+		if stmt.IfNotExists {
+			// IF NOT EXISTS specified, silently succeed
+			return "CREATE INDEX OK", nil
+		}
+		return "", errors.New("index already exists on column: " + stmt.ColumnName)
+	}
+
 	// Create the index
-	err := e.indexMgr.CreateIndex(stmt.TableName, stmt.ColumnName)
+	err = e.indexMgr.CreateIndex(stmt.TableName, stmt.ColumnName)
 	if err != nil {
+		if stmt.IfNotExists && strings.Contains(err.Error(), "already exists") {
+			return "CREATE INDEX OK", nil
+		}
 		return "", err
 	}
 
 	return "CREATE INDEX OK", nil
+}
+
+// executeDropIndex drops an index from a table column.
+func (e *Executor) executeDropIndex(stmt *DropIndexStmt) (string, error) {
+	// Verify the table exists
+	_, ok := e.catalog.GetTable(stmt.TableName)
+	if !ok {
+		if stmt.IfExists {
+			return "DROP INDEX OK", nil
+		}
+		return "", errors.New("table not found: " + stmt.TableName)
+	}
+
+	// The index name format is "table:column", but we need to find the column
+	// from the index name. For now, we'll parse the index name to extract the column.
+	// Convention: index name is typically "idx_<table>_<column>" or just the column name.
+	// We'll look for an index that matches the pattern.
+
+	// First, try to find the index by scanning all indexes for this table
+	if e.indexMgr == nil {
+		return "", errors.New("index manager not initialized")
+	}
+
+	// Drop the index - the IndexManager.DropIndex expects table and column
+	// We need to extract the column from the index name
+	// For simplicity, we'll assume the index name contains the column name
+	// or we can scan for indexes on this table
+
+	// Get all indexes and find the one matching this name
+	prefix := "_sys_index:" + stmt.TableName + ":"
+	indexes, err := e.store.Scan(prefix)
+	if err != nil {
+		return "", err
+	}
+
+	// Find the index with matching name pattern
+	var columnToDelete string
+	for key := range indexes {
+		// Key format: _sys_index:table:column
+		parts := strings.Split(key, ":")
+		if len(parts) >= 3 {
+			column := parts[2]
+			// Check if index name matches (idx_table_column or just column)
+			expectedName := "idx_" + stmt.TableName + "_" + column
+			if stmt.IndexName == expectedName || stmt.IndexName == column {
+				columnToDelete = column
+				break
+			}
+		}
+	}
+
+	if columnToDelete == "" {
+		if stmt.IfExists {
+			return "DROP INDEX OK", nil
+		}
+		return "", errors.New("index not found: " + stmt.IndexName)
+	}
+
+	// Drop the index
+	err = e.indexMgr.DropIndex(stmt.TableName, columnToDelete)
+	if err != nil {
+		return "", err
+	}
+
+	return "DROP INDEX OK", nil
 }
 
 // InTransaction returns true if a transaction is currently active.
@@ -1905,7 +2957,22 @@ func (e *Executor) computeAggregates(stmt *SelectStmt, rows map[string][]byte, r
 					}
 				}
 				state.count++
+			case "GROUP_CONCAT", "STRING_AGG":
+				state.concatValues = append(state.concatValues, strVal)
+				state.count++
 			}
+		}
+	}
+
+	// Build header row from aggregate expressions
+	var headers []string
+	for _, agg := range stmt.Aggregates {
+		if agg.Alias != "" {
+			headers = append(headers, agg.Alias)
+		} else if agg.Column == "*" {
+			headers = append(headers, strings.ToLower(agg.Function))
+		} else {
+			headers = append(headers, fmt.Sprintf("%s(%s)", strings.ToLower(agg.Function), agg.Column))
 		}
 	}
 
@@ -1941,10 +3008,21 @@ func (e *Executor) computeAggregates(stmt *SelectStmt, rows map[string][]byte, r
 			} else {
 				results = append(results, "NULL")
 			}
+		case "GROUP_CONCAT", "STRING_AGG":
+			if len(state.concatValues) > 0 {
+				sep := agg.Separator
+				if sep == "" {
+					sep = ","
+				}
+				results = append(results, strings.Join(state.concatValues, sep))
+			} else {
+				results = append(results, "NULL")
+			}
 		}
 	}
 
-	return fmt.Sprintf("%s\n(1 row)", strings.Join(results, ", ")), nil
+	header := strings.Join(headers, ", ")
+	return fmt.Sprintf("%s\n%s\n(1 row)", header, strings.Join(results, ", ")), nil
 }
 
 // computeGroupedAggregates computes aggregate function results grouped by specified columns.
@@ -2080,6 +3158,9 @@ func (e *Executor) computeGroupedAggregates(stmt *SelectStmt, rows map[string][]
 						}
 					}
 					state.count++
+				case "GROUP_CONCAT", "STRING_AGG":
+					state.concatValues = append(state.concatValues, strVal)
+					state.count++
 				}
 			}
 		}
@@ -2129,17 +3210,45 @@ func (e *Executor) computeGroupedAggregates(stmt *SelectStmt, rows map[string][]
 				} else {
 					rowParts = append(rowParts, "NULL")
 				}
+			case "GROUP_CONCAT", "STRING_AGG":
+				if len(state.concatValues) > 0 {
+					sep := agg.Separator
+					if sep == "" {
+						sep = ","
+					}
+					rowParts = append(rowParts, strings.Join(state.concatValues, sep))
+				} else {
+					rowParts = append(rowParts, "NULL")
+				}
 			}
 		}
 
 		resultRows = append(resultRows, strings.Join(rowParts, ", "))
 	}
 
+	// Build header row: GROUP BY columns + aggregate expressions
+	var headers []string
+
+	// Add GROUP BY column names
+	headers = append(headers, stmt.GroupBy...)
+
+	// Add aggregate column names
+	for _, agg := range stmt.Aggregates {
+		if agg.Alias != "" {
+			headers = append(headers, agg.Alias)
+		} else if agg.Column == "*" {
+			headers = append(headers, strings.ToLower(agg.Function))
+		} else {
+			headers = append(headers, fmt.Sprintf("%s(%s)", strings.ToLower(agg.Function), agg.Column))
+		}
+	}
+
+	header := strings.Join(headers, ", ")
 	rowCount := len(resultRows)
 	if rowCount == 0 {
-		return "(0 rows)", nil
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
 	}
-	return fmt.Sprintf("%s\n(%d rows)", strings.Join(resultRows, "\n"), rowCount), nil
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(resultRows, "\n"), rowCount), nil
 }
 
 // evaluateHaving evaluates a HAVING clause against computed aggregate states.
@@ -2251,8 +3360,9 @@ func (e *Executor) introspectUsers() (string, error) {
 		return "", err
 	}
 
+	header := "username"
 	if len(users) == 0 {
-		return "(0 rows)", nil
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
 	}
 
 	var results []string
@@ -2265,7 +3375,7 @@ func (e *Executor) introspectUsers() (string, error) {
 	// Sort for consistent output
 	sort.Strings(results)
 
-	return fmt.Sprintf("%s\n(%d rows)", strings.Join(results, "\n"), len(results)), nil
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
 }
 
 // introspectServer returns information about the FlyDB server/daemon.
@@ -2284,8 +3394,9 @@ func (e *Executor) introspectServer() (string, error) {
 
 // introspectTables returns information about all tables and their schemas.
 func (e *Executor) introspectTables() (string, error) {
+	header := "table_name, schema"
 	if len(e.catalog.Tables) == 0 {
-		return "(0 rows)", nil
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
 	}
 
 	var results []string
@@ -2308,18 +3419,19 @@ func (e *Executor) introspectTables() (string, error) {
 		results = append(results, result)
 	}
 
-	return fmt.Sprintf("%s\n(%d rows)", strings.Join(results, "\n"), len(results)), nil
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
 }
 
 // introspectIndexes returns information about all indexes.
 func (e *Executor) introspectIndexes() (string, error) {
+	header := "index_name"
 	if e.indexMgr == nil {
-		return "(0 rows)", nil
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
 	}
 
 	indexes := e.indexMgr.ListIndexes()
 	if len(indexes) == 0 {
-		return "(0 rows)", nil
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
 	}
 
 	var results []string
@@ -2330,7 +3442,7 @@ func (e *Executor) introspectIndexes() (string, error) {
 	// Sort for consistent output
 	sort.Strings(results)
 
-	return fmt.Sprintf("%s\n(%d rows)", strings.Join(results, "\n"), len(results)), nil
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
 }
 
 // introspectTable returns detailed information about a specific table.
@@ -2533,6 +3645,21 @@ func (e *Executor) introspectStatus() (string, error) {
 
 // executeCreateProcedure creates a new stored procedure.
 func (e *Executor) executeCreateProcedure(stmt *CreateProcedureStmt) (string, error) {
+	// Check if procedure already exists
+	if _, exists := e.catalog.GetProcedure(stmt.Name); exists {
+		if stmt.OrReplace {
+			// Drop the existing procedure first
+			if err := e.catalog.DropProcedure(stmt.Name); err != nil {
+				return "", err
+			}
+		} else if stmt.IfNotExists {
+			// IF NOT EXISTS specified, silently succeed
+			return "CREATE PROCEDURE OK", nil
+		} else {
+			return "", fmt.Errorf("procedure already exists: %s", stmt.Name)
+		}
+	}
+
 	proc := StoredProcedure{
 		Name:       stmt.Name,
 		Parameters: stmt.Parameters,
@@ -2592,6 +3719,14 @@ func (e *Executor) executeCall(stmt *CallStmt) (string, error) {
 
 // executeDropProcedure removes a stored procedure.
 func (e *Executor) executeDropProcedure(stmt *DropProcedureStmt) (string, error) {
+	// Check if procedure exists
+	if _, exists := e.catalog.GetProcedure(stmt.Name); !exists {
+		if stmt.IfExists {
+			return "DROP PROCEDURE OK", nil
+		}
+		return "", fmt.Errorf("procedure not found: %s", stmt.Name)
+	}
+
 	if err := e.catalog.DropProcedure(stmt.Name); err != nil {
 		return "", err
 	}
@@ -2789,6 +3924,21 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 //
 // Returns "CREATE VIEW OK" on success, or an error.
 func (e *Executor) executeCreateView(stmt *CreateViewStmt) (string, error) {
+	// Check if view already exists
+	if _, exists := e.catalog.GetView(stmt.ViewName); exists {
+		if stmt.OrReplace {
+			// Drop the existing view first
+			if err := e.catalog.DropView(stmt.ViewName); err != nil {
+				return "", err
+			}
+		} else if stmt.IfNotExists {
+			// IF NOT EXISTS specified, silently succeed
+			return "CREATE VIEW OK", nil
+		} else {
+			return "", fmt.Errorf("view already exists: %s", stmt.ViewName)
+		}
+	}
+
 	// Validate that the underlying table(s) exist
 	if stmt.Query.TableName != "" {
 		if _, ok := e.catalog.GetTable(stmt.Query.TableName); !ok {
@@ -2817,6 +3967,14 @@ func (e *Executor) executeCreateView(stmt *CreateViewStmt) (string, error) {
 //
 // Returns "DROP VIEW OK" on success, or an error.
 func (e *Executor) executeDropView(stmt *DropViewStmt) (string, error) {
+	// Check if view exists
+	if _, exists := e.catalog.GetView(stmt.ViewName); !exists {
+		if stmt.IfExists {
+			return "DROP VIEW OK", nil
+		}
+		return "", fmt.Errorf("view not found: %s", stmt.ViewName)
+	}
+
 	if err := e.catalog.DropView(stmt.ViewName); err != nil {
 		return "", err
 	}
@@ -2833,6 +3991,21 @@ func (e *Executor) executeCreateTrigger(stmt *CreateTriggerStmt) (string, error)
 	// Validate that the table exists
 	if _, ok := e.catalog.GetTable(stmt.TableName); !ok {
 		return "", fmt.Errorf("table not found: %s", stmt.TableName)
+	}
+
+	// Check if trigger already exists
+	if e.triggerMgr.TriggerExists(stmt.TableName, stmt.TriggerName) {
+		if stmt.OrReplace {
+			// Drop the existing trigger first
+			if err := e.triggerMgr.DropTrigger(stmt.TableName, stmt.TriggerName); err != nil {
+				return "", err
+			}
+		} else if stmt.IfNotExists {
+			// IF NOT EXISTS specified, silently succeed
+			return "CREATE TRIGGER OK", nil
+		} else {
+			return "", fmt.Errorf("trigger already exists: %s", stmt.TriggerName)
+		}
 	}
 
 	// Create the trigger
@@ -2858,10 +4031,169 @@ func (e *Executor) executeCreateTrigger(stmt *CreateTriggerStmt) (string, error)
 //
 // Returns "DROP TRIGGER OK" on success, or an error.
 func (e *Executor) executeDropTrigger(stmt *DropTriggerStmt) (string, error) {
+	// Check if trigger exists
+	if !e.triggerMgr.TriggerExists(stmt.TableName, stmt.TriggerName) {
+		if stmt.IfExists {
+			return "DROP TRIGGER OK", nil
+		}
+		return "", fmt.Errorf("trigger not found: %s", stmt.TriggerName)
+	}
+
 	if err := e.triggerMgr.DropTrigger(stmt.TableName, stmt.TriggerName); err != nil {
 		return "", err
 	}
 	return "DROP TRIGGER OK", nil
+}
+
+// executeDropTable removes a table and all its data from the database.
+//
+// The drop process:
+//  1. Verify the table exists (unless IF EXISTS is specified)
+//  2. Check for foreign key references from other tables
+//  3. Delete all rows in the table
+//  4. Drop all indexes for the table
+//  5. Drop all triggers for the table
+//  6. Remove the table schema from the catalog
+//
+// Parameters:
+//   - stmt: The parsed DROP TABLE statement
+//
+// Returns "DROP TABLE OK" on success, or an error.
+func (e *Executor) executeDropTable(stmt *DropTableStmt) (string, error) {
+	// Check if table exists
+	table, ok := e.catalog.GetTable(stmt.TableName)
+	if !ok {
+		if stmt.IfExists {
+			return "DROP TABLE OK", nil
+		}
+		return "", errors.New("table not found: " + stmt.TableName)
+	}
+
+	// Check for foreign key references from other tables
+	// We need to ensure no other table references this table
+	for tableName, tableSchema := range e.catalog.Tables {
+		if tableName == stmt.TableName {
+			continue
+		}
+		for _, col := range tableSchema.Columns {
+			for _, constraint := range col.Constraints {
+				if constraint.Type == ConstraintForeignKey && constraint.ForeignKey != nil && constraint.ForeignKey.Table == stmt.TableName {
+					return "", fmt.Errorf("cannot drop table %s: referenced by foreign key in table %s", stmt.TableName, tableName)
+				}
+			}
+		}
+	}
+
+	// Delete all rows in the table
+	prefix := "row:" + stmt.TableName + ":"
+	rows, err := e.store.Scan(prefix)
+	if err != nil {
+		return "", fmt.Errorf("failed to scan table rows: %v", err)
+	}
+
+	for key, rowData := range rows {
+		// Update indexes before deleting
+		if e.indexMgr != nil {
+			var row map[string]interface{}
+			if err := json.Unmarshal(rowData, &row); err == nil {
+				e.indexMgr.OnDelete(stmt.TableName, key, row)
+			}
+		}
+		e.store.Delete(key)
+	}
+
+	// Delete the sequence counter for auto-increment columns
+	for _, col := range table.Columns {
+		if col.Type == "SERIAL" {
+			seqKey := "seq:" + stmt.TableName + ":" + col.Name
+			e.store.Delete(seqKey)
+		}
+	}
+
+	// Drop all indexes for the table
+	if e.indexMgr != nil {
+		e.indexMgr.DropAllIndexesForTable(stmt.TableName)
+	}
+
+	// Drop all triggers for the table
+	if e.triggerMgr != nil {
+		e.triggerMgr.DropAllTriggersForTable(stmt.TableName)
+	}
+
+	// Remove the table schema from the catalog
+	if err := e.catalog.DropTable(stmt.TableName); err != nil {
+		return "", err
+	}
+
+	return "DROP TABLE OK", nil
+}
+
+// executeTruncateTable removes all rows from a table but keeps the table structure.
+//
+// The truncate process:
+//  1. Verify the table exists
+//  2. Check for foreign key references from other tables
+//  3. Delete all rows in the table
+//  4. Reset auto-increment sequences
+//  5. Clear index entries (but keep index definitions)
+//
+// Parameters:
+//   - stmt: The parsed TRUNCATE TABLE statement
+//
+// Returns "TRUNCATE TABLE OK" on success, or an error.
+func (e *Executor) executeTruncateTable(stmt *TruncateTableStmt) (string, error) {
+	// Check if table exists
+	table, ok := e.catalog.GetTable(stmt.TableName)
+	if !ok {
+		return "", errors.New("table not found: " + stmt.TableName)
+	}
+
+	// Check for foreign key references from other tables
+	for tableName, tableSchema := range e.catalog.Tables {
+		if tableName == stmt.TableName {
+			continue
+		}
+		for _, col := range tableSchema.Columns {
+			for _, constraint := range col.Constraints {
+				if constraint.Type == ConstraintForeignKey && constraint.ForeignKey != nil && constraint.ForeignKey.Table == stmt.TableName {
+					// Check if the referencing table has any rows
+					refPrefix := "row:" + tableName + ":"
+					refRows, err := e.store.Scan(refPrefix)
+					if err == nil && len(refRows) > 0 {
+						return "", fmt.Errorf("cannot truncate table %s: referenced by foreign key in table %s with existing data", stmt.TableName, tableName)
+					}
+				}
+			}
+		}
+	}
+
+	// Delete all rows in the table
+	prefix := "row:" + stmt.TableName + ":"
+	rows, err := e.store.Scan(prefix)
+	if err != nil {
+		return "", fmt.Errorf("failed to scan table rows: %v", err)
+	}
+
+	for key, rowData := range rows {
+		// Update indexes before deleting
+		if e.indexMgr != nil {
+			var row map[string]interface{}
+			if err := json.Unmarshal(rowData, &row); err == nil {
+				e.indexMgr.OnDelete(stmt.TableName, key, row)
+			}
+		}
+		e.store.Delete(key)
+	}
+
+	// Reset auto-increment sequences
+	for _, col := range table.Columns {
+		if col.Type == "SERIAL" {
+			seqKey := "seq:" + stmt.TableName + ":" + col.Name
+			e.store.Delete(seqKey)
+		}
+	}
+
+	return "TRUNCATE TABLE OK", nil
 }
 
 // executeTriggers executes all triggers for a table with the specified timing and event.
@@ -2951,6 +4283,11 @@ func reconstructSelectSQL(stmt *SelectStmt) string {
 		sql += fmt.Sprintf(" LIMIT %d", stmt.Limit)
 	}
 
+	// OFFSET clause
+	if stmt.Offset > 0 {
+		sql += fmt.Sprintf(" OFFSET %d", stmt.Offset)
+	}
+
 	return sql
 }
 
@@ -3013,6 +4350,34 @@ func (e *Executor) executeViewQuery(outerStmt *SelectStmt, view ViewDefinition) 
 		viewQuery.Limit = outerStmt.Limit
 	}
 
+	// Apply OFFSET from outer query if specified
+	if outerStmt.Offset > 0 {
+		viewQuery.Offset = outerStmt.Offset
+	}
+
 	// Execute the modified view query
 	return e.executeSelect(viewQuery)
+}
+
+// parseDateTime parses a date/time string in various formats.
+func parseDateTime(s string) (time.Time, error) {
+	formats := []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+		"15:04:05",
+		"2006/01/02 15:04:05",
+		"2006/01/02",
+		"01/02/2006",
+		"01-02-2006",
+		time.RFC3339,
+	}
+
+	for _, format := range formats {
+		if t, err := time.Parse(format, s); err == nil {
+			return t, nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("unable to parse date/time: %s", s)
 }

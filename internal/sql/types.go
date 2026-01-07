@@ -56,15 +56,23 @@ type ColumnType string
 const (
 	TypeINT       ColumnType = "INT"
 	TypeBIGINT    ColumnType = "BIGINT"
+	TypeSMALLINT  ColumnType = "SMALLINT"
 	TypeTEXT      ColumnType = "TEXT"
 	TypeVARCHAR   ColumnType = "VARCHAR"
+	TypeCHAR      ColumnType = "CHAR"
 	TypeBOOLEAN   ColumnType = "BOOLEAN"
 	TypeFLOAT     ColumnType = "FLOAT"
+	TypeDOUBLE    ColumnType = "DOUBLE"
+	TypeREAL      ColumnType = "REAL"
 	TypeDECIMAL   ColumnType = "DECIMAL"
 	TypeTIMESTAMP ColumnType = "TIMESTAMP"
+	TypeDATETIME  ColumnType = "DATETIME"
 	TypeDATE      ColumnType = "DATE"
 	TypeTIME      ColumnType = "TIME"
 	TypeBLOB      ColumnType = "BLOB"
+	TypeBYTEA     ColumnType = "BYTEA"
+	TypeBINARY    ColumnType = "BINARY"
+	TypeVARBINARY ColumnType = "VARBINARY"
 	TypeUUID      ColumnType = "UUID"
 	TypeJSONB     ColumnType = "JSONB"
 	TypeSERIAL    ColumnType = "SERIAL"
@@ -85,19 +93,32 @@ var decimalRegex = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
 // ValidColumnTypes is the set of all valid column type names.
 var ValidColumnTypes = map[string]ColumnType{
 	"INT":       TypeINT,
+	"INTEGER":   TypeINT,   // Alias for INT
 	"BIGINT":    TypeBIGINT,
+	"SMALLINT":  TypeSMALLINT,
+	"TINYINT":   TypeSMALLINT, // Alias for SMALLINT
 	"TEXT":      TypeTEXT,
 	"VARCHAR":   TypeVARCHAR,
+	"CHAR":      TypeCHAR,
+	"CHARACTER": TypeCHAR, // Alias for CHAR
 	"BOOLEAN":   TypeBOOLEAN,
+	"BOOL":      TypeBOOLEAN, // Alias for BOOLEAN
 	"FLOAT":     TypeFLOAT,
+	"DOUBLE":    TypeDOUBLE,
+	"REAL":      TypeREAL,
 	"DECIMAL":   TypeDECIMAL,
 	"NUMERIC":   TypeDECIMAL, // Alias for DECIMAL
 	"TIMESTAMP": TypeTIMESTAMP,
+	"DATETIME":  TypeDATETIME,
 	"DATE":      TypeDATE,
 	"TIME":      TypeTIME,
 	"BLOB":      TypeBLOB,
+	"BYTEA":     TypeBYTEA,
+	"BINARY":    TypeBINARY,
+	"VARBINARY": TypeVARBINARY,
 	"UUID":      TypeUUID,
 	"JSONB":     TypeJSONB,
+	"JSON":      TypeJSONB, // Alias for JSONB
 	"SERIAL":    TypeSERIAL,
 }
 
@@ -110,17 +131,24 @@ func IsValidType(typeName string) bool {
 // ValidateValue checks if a value is valid for the given column type.
 // Returns an error if the value cannot be converted to the type.
 func ValidateValue(typeName string, value string) error {
-	colType := ColumnType(strings.ToUpper(typeName))
-	// Handle NUMERIC as alias for DECIMAL
-	if colType == "NUMERIC" {
-		colType = TypeDECIMAL
+	// Normalize type name using the alias map
+	upperType := strings.ToUpper(typeName)
+	if canonical, ok := ValidColumnTypes[upperType]; ok {
+		upperType = string(canonical)
 	}
+	colType := ColumnType(upperType)
 
 	switch colType {
 	case TypeINT:
 		_, err := strconv.ParseInt(value, 10, 32)
 		if err != nil {
 			return fmt.Errorf("invalid INT value: %s", value)
+		}
+
+	case TypeSMALLINT:
+		_, err := strconv.ParseInt(value, 10, 16)
+		if err != nil {
+			return fmt.Errorf("invalid SMALLINT value: %s", value)
 		}
 
 	case TypeBIGINT:
@@ -136,10 +164,10 @@ func ValidateValue(typeName string, value string) error {
 			return fmt.Errorf("invalid SERIAL value: %s (must be a positive integer)", value)
 		}
 
-	case TypeFLOAT:
+	case TypeFLOAT, TypeDOUBLE, TypeREAL:
 		_, err := strconv.ParseFloat(value, 64)
 		if err != nil {
-			return fmt.Errorf("invalid FLOAT value: %s", value)
+			return fmt.Errorf("invalid %s value: %s", colType, value)
 		}
 
 	case TypeDECIMAL:
@@ -153,7 +181,7 @@ func ValidateValue(typeName string, value string) error {
 			return fmt.Errorf("invalid BOOLEAN value: %s (use TRUE/FALSE)", value)
 		}
 
-	case TypeTIMESTAMP:
+	case TypeTIMESTAMP, TypeDATETIME:
 		_, err := time.Parse(time.RFC3339, value)
 		if err != nil {
 			// Also try common formats
@@ -186,11 +214,11 @@ func ValidateValue(typeName string, value string) error {
 			return fmt.Errorf("invalid UUID value: %s", value)
 		}
 
-	case TypeBLOB:
-		// BLOB values should be base64 encoded
+	case TypeBLOB, TypeBYTEA, TypeBINARY, TypeVARBINARY:
+		// BLOB/BYTEA/BINARY values should be base64 encoded
 		_, err := base64.StdEncoding.DecodeString(value)
 		if err != nil {
-			return fmt.Errorf("invalid BLOB value: must be base64 encoded")
+			return fmt.Errorf("invalid %s value: must be base64 encoded", colType)
 		}
 
 	case TypeJSONB:
@@ -198,8 +226,8 @@ func ValidateValue(typeName string, value string) error {
 			return fmt.Errorf("invalid JSONB value: not valid JSON")
 		}
 
-	case TypeTEXT, TypeVARCHAR:
-		// TEXT and VARCHAR accept any string value
+	case TypeTEXT, TypeVARCHAR, TypeCHAR:
+		// TEXT, VARCHAR, and CHAR accept any string value
 		return nil
 
 	default:
@@ -212,11 +240,12 @@ func ValidateValue(typeName string, value string) error {
 // NormalizeValue converts a value to its canonical form for the given type.
 // This ensures consistent storage and comparison.
 func NormalizeValue(typeName string, value string) (string, error) {
-	colType := ColumnType(strings.ToUpper(typeName))
-	// Handle NUMERIC as alias for DECIMAL
-	if colType == "NUMERIC" {
-		colType = TypeDECIMAL
+	// Normalize type name using the alias map
+	upperType := strings.ToUpper(typeName)
+	if canonical, ok := ValidColumnTypes[upperType]; ok {
+		upperType = string(canonical)
 	}
+	colType := ColumnType(upperType)
 
 	switch colType {
 	case TypeBOOLEAN:
@@ -229,7 +258,7 @@ func NormalizeValue(typeName string, value string) (string, error) {
 		}
 		return "", fmt.Errorf("invalid BOOLEAN value: %s", value)
 
-	case TypeTIMESTAMP:
+	case TypeTIMESTAMP, TypeDATETIME:
 		t, err := time.Parse(time.RFC3339, value)
 		if err != nil {
 			t, err = time.Parse("2006-01-02 15:04:05", value)
@@ -270,7 +299,7 @@ func NormalizeValue(typeName string, value string) (string, error) {
 		return string(compact), nil
 
 	default:
-		// INT, BIGINT, SERIAL, FLOAT, DECIMAL, TEXT, VARCHAR, BLOB - return as-is
+		// INT, SMALLINT, BIGINT, SERIAL, FLOAT, DOUBLE, REAL, DECIMAL, TEXT, VARCHAR, CHAR, BLOB, BYTEA, BINARY, VARBINARY - return as-is
 		return value, nil
 	}
 }
@@ -278,14 +307,15 @@ func NormalizeValue(typeName string, value string) (string, error) {
 // CompareValues compares two values of the given type.
 // Returns -1 if a < b, 0 if a == b, 1 if a > b.
 func CompareValues(typeName string, a, b string) int {
-	colType := ColumnType(strings.ToUpper(typeName))
-	// Handle NUMERIC as alias for DECIMAL
-	if colType == "NUMERIC" {
-		colType = TypeDECIMAL
+	// Normalize type name using the alias map
+	upperType := strings.ToUpper(typeName)
+	if canonical, ok := ValidColumnTypes[upperType]; ok {
+		upperType = string(canonical)
 	}
+	colType := ColumnType(upperType)
 
 	switch colType {
-	case TypeINT, TypeBIGINT, TypeSERIAL:
+	case TypeINT, TypeSMALLINT, TypeBIGINT, TypeSERIAL:
 		ai, _ := strconv.ParseInt(a, 10, 64)
 		bi, _ := strconv.ParseInt(b, 10, 64)
 		if ai < bi {
@@ -296,7 +326,7 @@ func CompareValues(typeName string, a, b string) int {
 		}
 		return 0
 
-	case TypeFLOAT, TypeDECIMAL:
+	case TypeFLOAT, TypeDOUBLE, TypeREAL, TypeDECIMAL:
 		af, _ := strconv.ParseFloat(a, 64)
 		bf, _ := strconv.ParseFloat(b, 64)
 		if af < bf {
@@ -307,7 +337,7 @@ func CompareValues(typeName string, a, b string) int {
 		}
 		return 0
 
-	case TypeTIMESTAMP, TypeDATE, TypeTIME:
+	case TypeTIMESTAMP, TypeDATETIME, TypeDATE, TypeTIME:
 		// Lexicographic comparison works for ISO format dates and times
 		if a < b {
 			return -1
@@ -328,7 +358,7 @@ func CompareValues(typeName string, a, b string) int {
 		return 1
 
 	default:
-		// String comparison for TEXT, VARCHAR, UUID, BLOB, JSONB
+		// String comparison for TEXT, VARCHAR, CHAR, UUID, BLOB, BYTEA, BINARY, VARBINARY, JSONB
 		if a < b {
 			return -1
 		}
