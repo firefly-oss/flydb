@@ -559,7 +559,11 @@ prompt_yes_no() {
         result="$default"
     fi
 
-    case "${result,,}" in
+    # Convert to lowercase using tr for POSIX compatibility (macOS default bash is 3.2)
+    local lower_result
+    lower_result=$(echo "$result" | tr '[:upper:]' '[:lower:]')
+    
+    case "$lower_result" in
         y|yes) return 0 ;;
         *) return 1 ;;
     esac
