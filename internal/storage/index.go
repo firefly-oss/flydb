@@ -169,6 +169,35 @@ func (im *IndexManager) DropIndex(table, column string) error {
 	return im.store.Delete(storageKey)
 }
 
+// DropAllIndexesForTable removes all indexes for a table.
+// This is called when a table is dropped.
+func (im *IndexManager) DropAllIndexesForTable(table string) error {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+
+	prefix := table + ":"
+	var keysToDelete []string
+
+	// Find all indexes for this table
+	for key := range im.indexes {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			keysToDelete = append(keysToDelete, key)
+		}
+	}
+
+	// Delete each index
+	for _, key := range keysToDelete {
+		delete(im.indexes, key)
+		storageKey := indexKeyPrefix + key
+		if err := im.store.Delete(storageKey); err != nil {
+			// Continue deleting other indexes even if one fails
+			continue
+		}
+	}
+
+	return nil
+}
+
 // HasIndex checks if an index exists for the given table and column.
 func (im *IndexManager) HasIndex(table, column string) bool {
 	key := table + ":" + column

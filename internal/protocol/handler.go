@@ -47,13 +47,62 @@ type Authenticator interface {
 	Authenticate(username, password string) bool
 }
 
+// MetadataProvider provides database metadata for drivers.
+type MetadataProvider interface {
+	GetTables(catalog, schema, tablePattern string, tableTypes []string) ([][]interface{}, error)
+	GetColumns(catalog, schema, tablePattern, columnPattern string) ([][]interface{}, error)
+	GetPrimaryKeys(catalog, schema, table string) ([][]interface{}, error)
+	GetForeignKeys(catalog, schema, table string) ([][]interface{}, error)
+	GetIndexes(catalog, schema, table string, unique bool) ([][]interface{}, error)
+	GetTypeInfo() ([][]interface{}, error)
+}
+
+// SessionManager manages session state for connections.
+type SessionManager interface {
+	SetOption(sessionID, option string, value interface{}) error
+	GetOption(sessionID, option string) (interface{}, error)
+	GetServerInfo() *SessionResultMessage
+}
+
+// CursorManager manages server-side cursors.
+type CursorManager interface {
+	OpenCursor(query string, cursorType, concurrency, fetchSize int, params []interface{}) (string, []ColumnMetadata, error)
+	FetchRows(cursorID string, direction int, offset int64, count int) ([][]interface{}, bool, int64, error)
+	CloseCursor(cursorID string) error
+}
+
+// TransactionManager manages transactions.
+type TransactionManager interface {
+	Begin(isolationLevel int, readOnly bool) (string, error)
+	Commit(txID string) error
+	Rollback(txID string) error
+	CreateSavepoint(txID, name string) error
+	ReleaseSavepoint(txID, name string) error
+	RollbackToSavepoint(txID, name string) error
+}
+
+// connectionState holds per-connection state.
+type connectionState struct {
+	authenticated    bool
+	username         string
+	sessionID        string
+	transactionID    string
+	autoCommit       bool
+	isolationLevel   int
+	readOnly         bool
+}
+
 // BinaryHandler handles binary protocol connections.
 type BinaryHandler struct {
 	executor    QueryExecutor
 	prepMgr     PreparedStatementManager
 	auth        Authenticator
+	metadata    MetadataProvider
+	sessions    SessionManager
+	cursors     CursorManager
+	txMgr       TransactionManager
 	mu          sync.RWMutex
-	connections map[net.Conn]bool
+	connections map[net.Conn]*connectionState
 }
 
 // NewBinaryHandler creates a new binary protocol handler.
@@ -62,8 +111,28 @@ func NewBinaryHandler(executor QueryExecutor, prepMgr PreparedStatementManager, 
 		executor:    executor,
 		prepMgr:     prepMgr,
 		auth:        auth,
-		connections: make(map[net.Conn]bool),
+		connections: make(map[net.Conn]*connectionState),
 	}
+}
+
+// SetMetadataProvider sets the metadata provider for driver support.
+func (h *BinaryHandler) SetMetadataProvider(mp MetadataProvider) {
+	h.metadata = mp
+}
+
+// SetSessionManager sets the session manager.
+func (h *BinaryHandler) SetSessionManager(sm SessionManager) {
+	h.sessions = sm
+}
+
+// SetCursorManager sets the cursor manager.
+func (h *BinaryHandler) SetCursorManager(cm CursorManager) {
+	h.cursors = cm
+}
+
+// SetTransactionManager sets the transaction manager.
+func (h *BinaryHandler) SetTransactionManager(tm TransactionManager) {
+	h.txMgr = tm
 }
 
 // HandleConnection handles a single binary protocol connection.
@@ -76,8 +145,15 @@ func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 		"local_addr", conn.LocalAddr().String(),
 	)
 
+	// Initialize connection state
+	connState := &connectionState{
+		authenticated:  false,
+		autoCommit:     true,
+		isolationLevel: 1, // READ COMMITTED
+	}
+
 	h.mu.Lock()
-	h.connections[conn] = true
+	h.connections[conn] = connState
 	activeConns := len(h.connections)
 	h.mu.Unlock()
 
@@ -130,7 +206,7 @@ func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 		var success bool
 		switch msg.Header.Type {
 		case MsgAuth:
-			authenticated = h.handleAuth(writer, msg.Payload, remoteAddr)
+			authenticated = h.handleAuth(writer, msg.Payload, remoteAddr, connState)
 			success = authenticated
 
 		case MsgQuery:
@@ -148,6 +224,46 @@ func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 		case MsgPing:
 			h.handlePing(writer)
 			success = true
+
+		// Cursor operations for ODBC/JDBC driver support
+		case MsgCursorOpen:
+			success = h.handleCursorOpen(writer, msg.Payload, remoteAddr)
+
+		case MsgCursorFetch:
+			success = h.handleCursorFetch(writer, msg.Payload, remoteAddr)
+
+		case MsgCursorClose:
+			success = h.handleCursorClose(writer, msg.Payload, remoteAddr)
+
+		// Metadata operations for ODBC/JDBC driver support
+		case MsgGetTables:
+			success = h.handleGetTables(writer, msg.Payload, remoteAddr)
+
+		case MsgGetColumns:
+			success = h.handleGetColumns(writer, msg.Payload, remoteAddr)
+
+		case MsgGetTypeInfo:
+			success = h.handleGetTypeInfo(writer, remoteAddr)
+
+		// Transaction operations
+		case MsgBeginTx:
+			success = h.handleBeginTx(writer, msg.Payload, remoteAddr, connState)
+
+		case MsgCommitTx:
+			success = h.handleCommitTx(writer, remoteAddr, connState)
+
+		case MsgRollbackTx:
+			success = h.handleRollbackTx(writer, remoteAddr, connState)
+
+		// Session operations
+		case MsgSetOption:
+			success = h.handleSetOption(writer, msg.Payload, remoteAddr, connState)
+
+		case MsgGetOption:
+			success = h.handleGetOption(writer, msg.Payload, remoteAddr, connState)
+
+		case MsgGetServerInfo:
+			success = h.handleGetServerInfo(writer, remoteAddr)
 
 		default:
 			reqCtx.LogError(log, "unknown message type")
@@ -189,13 +305,37 @@ func msgTypeToString(t MessageType) string {
 		return "PING"
 	case MsgPong:
 		return "PONG"
+	case MsgCursorOpen:
+		return "CURSOR_OPEN"
+	case MsgCursorFetch:
+		return "CURSOR_FETCH"
+	case MsgCursorClose:
+		return "CURSOR_CLOSE"
+	case MsgGetTables:
+		return "GET_TABLES"
+	case MsgGetColumns:
+		return "GET_COLUMNS"
+	case MsgGetTypeInfo:
+		return "GET_TYPE_INFO"
+	case MsgBeginTx:
+		return "BEGIN_TX"
+	case MsgCommitTx:
+		return "COMMIT_TX"
+	case MsgRollbackTx:
+		return "ROLLBACK_TX"
+	case MsgSetOption:
+		return "SET_OPTION"
+	case MsgGetOption:
+		return "GET_OPTION"
+	case MsgGetServerInfo:
+		return "GET_SERVER_INFO"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", t)
 	}
 }
 
 // handleAuth handles authentication messages.
-func (h *BinaryHandler) handleAuth(w *bufio.Writer, payload []byte, remoteAddr string) bool {
+func (h *BinaryHandler) handleAuth(w *bufio.Writer, payload []byte, remoteAddr string, state *connectionState) bool {
 	authMsg, err := DecodeAuthMessage(payload)
 	if err != nil {
 		log.Debug("Invalid auth message", "remote_addr", remoteAddr, "error", err)
@@ -212,6 +352,8 @@ func (h *BinaryHandler) handleAuth(w *bufio.Writer, payload []byte, remoteAddr s
 		log.Warn("Binary auth failed", "remote_addr", remoteAddr, "user", authMsg.Username)
 	} else {
 		result.Message = "authenticated"
+		state.authenticated = true
+		state.username = authMsg.Username
 		log.Info("Binary auth success", "remote_addr", remoteAddr, "user", authMsg.Username)
 	}
 
@@ -369,5 +511,415 @@ func (h *BinaryHandler) Close() {
 	for conn := range h.connections {
 		conn.Close()
 	}
+}
+
+// ============================================================================
+// Cursor handlers for ODBC/JDBC driver support
+// ============================================================================
+
+// handleCursorOpen handles cursor open messages.
+func (h *BinaryHandler) handleCursorOpen(w *bufio.Writer, payload []byte, remoteAddr string) bool {
+	if h.cursors == nil {
+		h.sendError(w, 501, "cursors not supported")
+		return false
+	}
+
+	msg, err := DecodeCursorOpenMessage(payload)
+	if err != nil {
+		log.Debug("Invalid cursor open message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid cursor open message")
+		return false
+	}
+
+	cursorID, columns, err := h.cursors.OpenCursor(msg.Query, msg.CursorType, msg.Concurrency, msg.FetchSize, msg.Parameters)
+	if err != nil {
+		log.Debug("Cursor open error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	result := &CursorResultMessage{
+		Success:  true,
+		CursorID: cursorID,
+		Columns:  columns,
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgCursorResult, data)
+	w.Flush()
+	return true
+}
+
+// handleCursorFetch handles cursor fetch messages.
+func (h *BinaryHandler) handleCursorFetch(w *bufio.Writer, payload []byte, remoteAddr string) bool {
+	if h.cursors == nil {
+		h.sendError(w, 501, "cursors not supported")
+		return false
+	}
+
+	msg, err := DecodeCursorFetchMessage(payload)
+	if err != nil {
+		log.Debug("Invalid cursor fetch message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid cursor fetch message")
+		return false
+	}
+
+	rows, hasMore, position, err := h.cursors.FetchRows(msg.CursorID, msg.Direction, msg.Offset, msg.Count)
+	if err != nil {
+		log.Debug("Cursor fetch error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	result := &CursorResultMessage{
+		Success:     true,
+		CursorID:    msg.CursorID,
+		Rows:        rows,
+		RowCount:    len(rows),
+		HasMoreRows: hasMore,
+		Position:    position,
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgCursorResult, data)
+	w.Flush()
+	return true
+}
+
+// handleCursorClose handles cursor close messages.
+func (h *BinaryHandler) handleCursorClose(w *bufio.Writer, payload []byte, remoteAddr string) bool {
+	if h.cursors == nil {
+		h.sendError(w, 501, "cursors not supported")
+		return false
+	}
+
+	msg, err := DecodeCursorCloseMessage(payload)
+	if err != nil {
+		log.Debug("Invalid cursor close message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid cursor close message")
+		return false
+	}
+
+	err = h.cursors.CloseCursor(msg.CursorID)
+	if err != nil {
+		log.Debug("Cursor close error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	result := &CursorResultMessage{
+		Success:  true,
+		CursorID: msg.CursorID,
+		Message:  "cursor closed",
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgCursorResult, data)
+	w.Flush()
+	return true
+}
+
+// ============================================================================
+// Metadata handlers for ODBC/JDBC driver support
+// ============================================================================
+
+// handleGetTables handles get tables metadata messages.
+func (h *BinaryHandler) handleGetTables(w *bufio.Writer, payload []byte, remoteAddr string) bool {
+	if h.metadata == nil {
+		h.sendError(w, 501, "metadata not supported")
+		return false
+	}
+
+	msg, err := DecodeGetTablesMessage(payload)
+	if err != nil {
+		log.Debug("Invalid get tables message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid get tables message")
+		return false
+	}
+
+	rows, err := h.metadata.GetTables(msg.Catalog, msg.Schema, msg.TableName, msg.TableTypes)
+	if err != nil {
+		log.Debug("Get tables error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	result := &MetadataResultMessage{
+		Success:  true,
+		Rows:     rows,
+		RowCount: len(rows),
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgMetadataResult, data)
+	w.Flush()
+	return true
+}
+
+// handleGetColumns handles get columns metadata messages.
+func (h *BinaryHandler) handleGetColumns(w *bufio.Writer, payload []byte, remoteAddr string) bool {
+	if h.metadata == nil {
+		h.sendError(w, 501, "metadata not supported")
+		return false
+	}
+
+	msg, err := DecodeGetColumnsMessage(payload)
+	if err != nil {
+		log.Debug("Invalid get columns message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid get columns message")
+		return false
+	}
+
+	rows, err := h.metadata.GetColumns(msg.Catalog, msg.Schema, msg.TableName, msg.ColumnName)
+	if err != nil {
+		log.Debug("Get columns error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	result := &MetadataResultMessage{
+		Success:  true,
+		Rows:     rows,
+		RowCount: len(rows),
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgMetadataResult, data)
+	w.Flush()
+	return true
+}
+
+// handleGetTypeInfo handles get type info metadata messages.
+func (h *BinaryHandler) handleGetTypeInfo(w *bufio.Writer, remoteAddr string) bool {
+	if h.metadata == nil {
+		h.sendError(w, 501, "metadata not supported")
+		return false
+	}
+
+	rows, err := h.metadata.GetTypeInfo()
+	if err != nil {
+		log.Debug("Get type info error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	result := &MetadataResultMessage{
+		Success:  true,
+		Rows:     rows,
+		RowCount: len(rows),
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgMetadataResult, data)
+	w.Flush()
+	return true
+}
+
+// ============================================================================
+// Transaction handlers
+// ============================================================================
+
+// handleBeginTx handles begin transaction messages.
+func (h *BinaryHandler) handleBeginTx(w *bufio.Writer, payload []byte, remoteAddr string, state *connectionState) bool {
+	if h.txMgr == nil {
+		h.sendError(w, 501, "transactions not supported")
+		return false
+	}
+
+	msg, err := DecodeBeginTxMessage(payload)
+	if err != nil {
+		log.Debug("Invalid begin tx message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid begin tx message")
+		return false
+	}
+
+	txID, err := h.txMgr.Begin(msg.IsolationLevel, msg.ReadOnly)
+	if err != nil {
+		log.Debug("Begin tx error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	state.transactionID = txID
+	result := &TxResultMessage{
+		Success:       true,
+		TransactionID: txID,
+		Message:       "transaction started",
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgTxResult, data)
+	w.Flush()
+	return true
+}
+
+// handleCommitTx handles commit transaction messages.
+func (h *BinaryHandler) handleCommitTx(w *bufio.Writer, remoteAddr string, state *connectionState) bool {
+	if h.txMgr == nil {
+		h.sendError(w, 501, "transactions not supported")
+		return false
+	}
+
+	if state.transactionID == "" {
+		h.sendError(w, 400, "no active transaction")
+		return false
+	}
+
+	err := h.txMgr.Commit(state.transactionID)
+	if err != nil {
+		log.Debug("Commit tx error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	txID := state.transactionID
+	state.transactionID = ""
+	result := &TxResultMessage{
+		Success:       true,
+		TransactionID: txID,
+		Message:       "transaction committed",
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgTxResult, data)
+	w.Flush()
+	return true
+}
+
+// handleRollbackTx handles rollback transaction messages.
+func (h *BinaryHandler) handleRollbackTx(w *bufio.Writer, remoteAddr string, state *connectionState) bool {
+	if h.txMgr == nil {
+		h.sendError(w, 501, "transactions not supported")
+		return false
+	}
+
+	if state.transactionID == "" {
+		h.sendError(w, 400, "no active transaction")
+		return false
+	}
+
+	err := h.txMgr.Rollback(state.transactionID)
+	if err != nil {
+		log.Debug("Rollback tx error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	txID := state.transactionID
+	state.transactionID = ""
+	result := &TxResultMessage{
+		Success:       true,
+		TransactionID: txID,
+		Message:       "transaction rolled back",
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgTxResult, data)
+	w.Flush()
+	return true
+}
+
+// ============================================================================
+// Session handlers
+// ============================================================================
+
+// handleSetOption handles set session option messages.
+func (h *BinaryHandler) handleSetOption(w *bufio.Writer, payload []byte, remoteAddr string, state *connectionState) bool {
+	msg, err := DecodeSetOptionMessage(payload)
+	if err != nil {
+		log.Debug("Invalid set option message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid set option message")
+		return false
+	}
+
+	// Handle common options locally
+	switch msg.Option {
+	case "auto_commit":
+		if v, ok := msg.Value.(bool); ok {
+			state.autoCommit = v
+		}
+	case "isolation_level":
+		if v, ok := msg.Value.(float64); ok {
+			state.isolationLevel = int(v)
+		}
+	case "read_only":
+		if v, ok := msg.Value.(bool); ok {
+			state.readOnly = v
+		}
+	default:
+		// Delegate to session manager if available
+		if h.sessions != nil {
+			err = h.sessions.SetOption(state.sessionID, msg.Option, msg.Value)
+			if err != nil {
+				h.sendError(w, 500, err.Error())
+				return false
+			}
+		}
+	}
+
+	result := &SessionResultMessage{
+		Success: true,
+		Option:  msg.Option,
+		Value:   msg.Value,
+		Message: "option set",
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgSessionResult, data)
+	w.Flush()
+	return true
+}
+
+// handleGetOption handles get session option messages.
+func (h *BinaryHandler) handleGetOption(w *bufio.Writer, payload []byte, remoteAddr string, state *connectionState) bool {
+	msg, err := DecodeGetOptionMessage(payload)
+	if err != nil {
+		log.Debug("Invalid get option message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid get option message")
+		return false
+	}
+
+	var value interface{}
+	switch msg.Option {
+	case "auto_commit":
+		value = state.autoCommit
+	case "isolation_level":
+		value = state.isolationLevel
+	case "read_only":
+		value = state.readOnly
+	case "username":
+		value = state.username
+	default:
+		if h.sessions != nil {
+			value, err = h.sessions.GetOption(state.sessionID, msg.Option)
+			if err != nil {
+				h.sendError(w, 500, err.Error())
+				return false
+			}
+		}
+	}
+
+	result := &SessionResultMessage{
+		Success: true,
+		Option:  msg.Option,
+		Value:   value,
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgSessionResult, data)
+	w.Flush()
+	return true
+}
+
+// handleGetServerInfo handles get server info messages.
+func (h *BinaryHandler) handleGetServerInfo(w *bufio.Writer, remoteAddr string) bool {
+	result := &SessionResultMessage{
+		Success:         true,
+		ServerVersion:   "1.0.0",
+		ProtocolVersion: int(ProtocolVersion),
+		Capabilities:    []string{"sql", "prepared_statements", "transactions", "cursors"},
+		MaxStatementLen: MaxMessageSize,
+	}
+
+	if h.sessions != nil {
+		info := h.sessions.GetServerInfo()
+		if info != nil {
+			result = info
+		}
+	}
+
+	data, _ := result.Encode()
+	WriteMessage(w, MsgSessionResult, data)
+	w.Flush()
+	return true
 }
 

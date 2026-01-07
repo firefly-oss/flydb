@@ -78,17 +78,47 @@ type MessageType byte
 
 // Message type constants.
 const (
-	MsgQuery          MessageType = 0x01
-	MsgQueryResult    MessageType = 0x02
-	MsgError          MessageType = 0x03
-	MsgPrepare        MessageType = 0x04
-	MsgPrepareResult  MessageType = 0x05
-	MsgExecute        MessageType = 0x06
-	MsgDeallocate     MessageType = 0x07
-	MsgAuth           MessageType = 0x08
-	MsgAuthResult     MessageType = 0x09
-	MsgPing           MessageType = 0x0A
-	MsgPong           MessageType = 0x0B
+	// Core messages (0x01-0x0F)
+	MsgQuery         MessageType = 0x01
+	MsgQueryResult   MessageType = 0x02
+	MsgError         MessageType = 0x03
+	MsgPrepare       MessageType = 0x04
+	MsgPrepareResult MessageType = 0x05
+	MsgExecute       MessageType = 0x06
+	MsgDeallocate    MessageType = 0x07
+	MsgAuth          MessageType = 0x08
+	MsgAuthResult    MessageType = 0x09
+	MsgPing          MessageType = 0x0A
+	MsgPong          MessageType = 0x0B
+
+	// Cursor operations (0x10-0x1F)
+	MsgCursorOpen   MessageType = 0x10
+	MsgCursorFetch  MessageType = 0x11
+	MsgCursorClose  MessageType = 0x12
+	MsgCursorScroll MessageType = 0x13
+	MsgCursorResult MessageType = 0x14
+
+	// Metadata operations (0x20-0x2F)
+	MsgGetTables      MessageType = 0x20
+	MsgGetColumns     MessageType = 0x21
+	MsgGetPrimaryKeys MessageType = 0x22
+	MsgGetForeignKeys MessageType = 0x23
+	MsgGetIndexes     MessageType = 0x24
+	MsgGetTypeInfo    MessageType = 0x25
+	MsgMetadataResult MessageType = 0x26
+
+	// Transaction operations (0x30-0x3F)
+	MsgBeginTx     MessageType = 0x30
+	MsgCommitTx    MessageType = 0x31
+	MsgRollbackTx  MessageType = 0x32
+	MsgSavepoint   MessageType = 0x33
+	MsgTxResult    MessageType = 0x34
+
+	// Session operations (0x40-0x4F)
+	MsgSetOption      MessageType = 0x40
+	MsgGetOption      MessageType = 0x41
+	MsgGetServerInfo  MessageType = 0x42
+	MsgSessionResult  MessageType = 0x43
 )
 
 // MessageFlag represents message flags.

@@ -178,11 +178,20 @@ func TestServerSQL(t *testing.T) {
 
 	// Select the row
 	fmt.Fprintln(conn, "SQL SELECT name FROM users WHERE id = 1")
-	if scanner.Scan() {
-		response := scanner.Text()
-		if !strings.Contains(response, "Alice") {
-			t.Errorf("Expected 'Alice' in response, got '%s'", response)
+	// Response is multi-line: header, data, row count
+	// Read all lines until we get the row count line
+	var fullResponse strings.Builder
+	for scanner.Scan() {
+		line := scanner.Text()
+		fullResponse.WriteString(line)
+		fullResponse.WriteString("\n")
+		if strings.HasSuffix(line, "rows)") || strings.HasSuffix(line, "row)") {
+			break
 		}
+	}
+	response := fullResponse.String()
+	if !strings.Contains(response, "Alice") {
+		t.Errorf("Expected 'Alice' in response, got '%s'", response)
 	}
 }
 
