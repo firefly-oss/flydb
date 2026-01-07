@@ -1,0 +1,58 @@
+# Binaries
+fly-cli
+flydb
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug files
+__debug_bin*
+
+# Local environment files
+.env
+.env.local
+.env.*.local
+
+# Log files
+*.log
+logs/
+
+# Data directories (local database files)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Build output
+dist/
+build/
+bin/
+
+# Temporary files
+tmp/
+temp/
+
