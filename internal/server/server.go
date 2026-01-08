@@ -77,8 +77,10 @@ package server
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -119,6 +121,16 @@ type Server struct {
 	// auth handles user authentication and authorization.
 	// It verifies credentials and checks table permissions.
 	auth *auth.AuthManager
+
+	// dbManager manages multiple databases.
+	dbManager *storage.DatabaseManager
+
+	// connDatabases maps connections to their current database name.
+	// Default is "default" for new connections.
+	connDatabases map[net.Conn]string
+
+	// connDbMu protects the connDatabases map from concurrent access.
+	connDbMu sync.Mutex
 
 	// subscribers maps table names to sets of connections watching that table.
 	// When a row is inserted, all subscribers are notified.
@@ -203,6 +215,12 @@ func NewServerWithStoreAndBinary(addr string, binaryAddr string, kv *storage.KVS
 	// Create the authentication manager backed by the same storage.
 	authMgr := auth.NewAuthManager(kv)
 
+	// Initialize built-in RBAC roles (admin, reader, writer, owner).
+	// This is idempotent - roles are only created if they don't exist.
+	if err := authMgr.InitializeBuiltInRoles(); err != nil {
+		log.Error("Failed to initialize built-in roles", "error", err)
+	}
+
 	// Create the SQL executor with storage and auth dependencies.
 	exec := sql.NewExecutor(kv, authMgr)
 
@@ -219,6 +237,76 @@ func NewServerWithStoreAndBinary(addr string, binaryAddr string, kv *storage.KVS
 		auth:          authMgr,
 		subscribers:   make(map[string]map[net.Conn]struct{}),
 		conns:         make(map[net.Conn]string),
+		connDatabases: make(map[net.Conn]string),
+		transactions:  make(map[net.Conn]*storage.Transaction),
+		preparedStmts: prepMgr,
+		listeners:     make([]net.Listener, 0),
+		stopCh:        make(chan struct{}),
+	}
+
+	// Create the binary protocol handler if binary address is specified.
+	if binaryAddr != "" {
+		srv.binaryHandler = protocol.NewBinaryHandler(
+			&serverQueryExecutor{srv: srv},
+			prepMgr,
+			&serverAuthenticator{auth: authMgr},
+		)
+	}
+
+	// Wire up the OnInsert callback for reactive WATCH functionality.
+	// When the executor inserts a row, it calls this callback,
+	// which broadcasts the event to all subscribers of that table.
+	exec.OnInsert = srv.broadcastInsert
+
+	return srv
+}
+
+// NewServerWithDatabaseManager creates a new Server with multi-database support.
+// This constructor uses a DatabaseManager to manage multiple databases.
+//
+// Parameters:
+//   - addr: TCP address for text protocol (e.g., ":8888")
+//   - binaryAddr: TCP address for binary protocol (e.g., ":8889"), empty to disable
+//   - dbManager: Pre-initialized DatabaseManager instance
+//
+// Returns a fully configured Server ready to start.
+func NewServerWithDatabaseManager(addr string, binaryAddr string, dbManager *storage.DatabaseManager) *Server {
+	// Get the default database for initial setup
+	defaultDB, _ := dbManager.GetDatabase(storage.DefaultDatabaseName)
+	kv := defaultDB.Store
+
+	// Get the system database for global authentication
+	systemDB, _ := dbManager.GetSystemDatabase()
+	systemStore := systemDB.Store
+
+	// Create the authentication manager backed by the system database storage.
+	// This ensures users are global across all databases.
+	authMgr := auth.NewAuthManager(systemStore)
+
+	// Initialize built-in RBAC roles (admin, reader, writer, owner).
+	// This is idempotent - roles are only created if they don't exist.
+	if err := authMgr.InitializeBuiltInRoles(); err != nil {
+		log.Error("Failed to initialize built-in roles", "error", err)
+	}
+
+	// Create the SQL executor with storage and auth dependencies.
+	exec := sql.NewExecutor(kv, authMgr)
+
+	// Create the prepared statement manager.
+	prepMgr := sql.NewPreparedStatementManager(exec)
+
+	// Initialize the server with all components.
+	srv := &Server{
+		addr:          addr,
+		binaryAddr:    binaryAddr,
+		executor:      exec,
+		store:         kv,
+		kvStore:       kv,
+		auth:          authMgr,
+		dbManager:     dbManager,
+		subscribers:   make(map[string]map[net.Conn]struct{}),
+		conns:         make(map[net.Conn]string),
+		connDatabases: make(map[net.Conn]string),
 		transactions:  make(map[net.Conn]*storage.Transaction),
 		preparedStmts: prepMgr,
 		listeners:     make([]net.Listener, 0),
@@ -243,18 +331,354 @@ func NewServerWithStoreAndBinary(addr string, binaryAddr string, kv *storage.KVS
 }
 
 // serverQueryExecutor adapts the server for the QueryExecutor interface.
+// It implements both QueryExecutor and DatabaseAwareQueryExecutor.
 type serverQueryExecutor struct {
 	srv *Server
 }
 
+// Execute executes a query using the default database.
 func (e *serverQueryExecutor) Execute(query string) (string, error) {
+	return e.ExecuteInDatabase(query, "")
+}
+
+// ExecuteInDatabase executes a query in the context of a specific database.
+// If database is empty, the default database is used.
+func (e *serverQueryExecutor) ExecuteInDatabase(query, database string) (string, error) {
 	lexer := sql.NewLexer(query)
 	parser := sql.NewParser(lexer)
 	stmt, err := parser.Parse()
 	if err != nil {
 		return "", err
 	}
-	return e.srv.executor.Execute(stmt)
+
+	// Handle database management statements at the server level
+	// These require access to the DatabaseManager which is only available here
+	switch dbStmt := stmt.(type) {
+	case *sql.InspectStmt:
+		if dbStmt.Target == "DATABASES" || dbStmt.Target == "DATABASE" {
+			return e.handleInspectDatabase(dbStmt)
+		}
+		if dbStmt.Target == "USERS" {
+			return e.handleInspectUsers()
+		}
+		// Handle user-related inspection using system database
+		if dbStmt.Target == "USER" || dbStmt.Target == "USER_ROLES" || dbStmt.Target == "USER_PRIVILEGES" {
+			return e.handleInspectUserInfo(dbStmt)
+		}
+		// Handle role-related inspection using system database
+		if dbStmt.Target == "ROLES" || dbStmt.Target == "ROLE" || dbStmt.Target == "PRIVILEGES" {
+			return e.handleInspectRoleInfo(dbStmt)
+		}
+	case *sql.CreateDatabaseStmt:
+		return e.handleCreateDatabase(dbStmt)
+	case *sql.DropDatabaseStmt:
+		return e.handleDropDatabase(dbStmt)
+	case *sql.UseDatabaseStmt:
+		return e.handleUseDatabase(dbStmt)
+	}
+
+	// Get the executor for the specified database
+	executor := e.getExecutorForDatabase(database)
+	return executor.Execute(stmt)
+}
+
+// getExecutorForDatabase returns the executor for the specified database.
+// If database is empty or "default", returns the default executor.
+func (e *serverQueryExecutor) getExecutorForDatabase(database string) *sql.Executor {
+	if e.srv.dbManager == nil {
+		return e.srv.executor
+	}
+
+	if database == "" || database == storage.DefaultDatabaseName {
+		return e.srv.executor
+	}
+
+	db, err := e.srv.dbManager.GetDatabase(database)
+	if err != nil {
+		// Fall back to default executor if database not found
+		return e.srv.executor
+	}
+
+	// Create an executor for this database using the global auth manager
+	// The auth manager is backed by the system database for global user management
+	executor := sql.NewExecutor(db.Store, e.srv.auth)
+	return executor
+}
+
+// handleInspectDatabase handles INSPECT DATABASES and INSPECT DATABASE <name>
+// for the binary protocol path.
+func (e *serverQueryExecutor) handleInspectDatabase(stmt *sql.InspectStmt) (string, error) {
+	if e.srv.dbManager == nil {
+		// If no database manager, return just the default database info
+		if stmt.Target == "DATABASES" {
+			return "name, owner, encoding, locale, collation, tables, size\ndefault, admin, UTF8, en_US, default, 0, 0\n(1 rows)", nil
+		}
+		return "Database: default\nOwner: admin\nEncoding: UTF8\nLocale: en_US\nCollation: default\nStatus: Active\nStorage: WAL-backed", nil
+	}
+
+	if stmt.Target == "DATABASES" {
+		// List all databases with detailed info
+		databases := e.srv.dbManager.ListDatabases()
+		if len(databases) == 0 {
+			return "name, owner, encoding, locale, collation, tables, size\n(0 rows)", nil
+		}
+
+		result := "name, owner, encoding, locale, collation, tables, size\n"
+		count := 0
+		for _, dbName := range databases {
+			// Skip system database - it's internal
+			if dbName == storage.SystemDatabaseName {
+				continue
+			}
+			db, err := e.srv.dbManager.GetDatabase(dbName)
+			if err != nil {
+				continue
+			}
+			size := db.GetSize()
+			sizeStr := formatSize(size)
+			result += fmt.Sprintf("%s, %s, %s, %s, %s, %d, %s\n",
+				db.Name,
+				db.GetOwner(),
+				db.GetEncoding(),
+				db.GetLocale(),
+				db.GetCollation(),
+				db.GetTableCount(),
+				sizeStr,
+			)
+			count++
+		}
+		result += fmt.Sprintf("(%d rows)", count)
+		return result, nil
+	}
+
+	// INSPECT DATABASE <name>
+	db, err := e.srv.dbManager.GetDatabase(stmt.ObjectName)
+	if err != nil {
+		return "", err
+	}
+
+	size := db.GetSize()
+	sizeStr := formatSize(size)
+	createdAt := db.GetCreatedAt()
+	createdStr := "unknown"
+	if !createdAt.IsZero() {
+		createdStr = createdAt.Format("2006-01-02 15:04:05")
+	}
+
+	return fmt.Sprintf("Database: %s\nOwner: %s\nEncoding: %s\nLocale: %s\nCollation: %s\nTables: %d\nSize: %s\nCreated: %s\nPath: %s\nStatus: Active\nStorage: WAL-backed",
+		db.Name, db.GetOwner(), db.GetEncoding(), db.GetLocale(), db.GetCollation(),
+		db.GetTableCount(), sizeStr, createdStr, db.Path), nil
+}
+
+// handleInspectUsers handles INSPECT USERS for the binary protocol path.
+// Users are stored in the system database, so we need to query it directly.
+func (e *serverQueryExecutor) handleInspectUsers() (string, error) {
+	if e.srv.dbManager == nil {
+		return "username, role, created_at, last_login\n(0 rows)", nil
+	}
+
+	systemDB, err := e.srv.dbManager.GetSystemDatabase()
+	if err != nil {
+		return "", err
+	}
+
+	// Scan for all user keys with the _sys_users: prefix
+	users, err := systemDB.Store.Scan("_sys_users:")
+	if err != nil {
+		return "", err
+	}
+
+	header := "username, role, created_at, last_login"
+	if len(users) == 0 {
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
+	}
+
+	// Parse user data to get metadata
+	type userInfo struct {
+		username  string
+		role      string
+		createdAt string
+		lastLogin string
+	}
+	var userInfos []userInfo
+
+	for key, data := range users {
+		username := strings.TrimPrefix(key, "_sys_users:")
+		role := "user"
+
+		// Parse user JSON to get metadata
+		var userData struct {
+			IsAdmin   bool   `json:"is_admin"`
+			CreatedAt string `json:"created_at"`
+			LastLogin string `json:"last_login"`
+		}
+		createdAt := "-"
+		lastLogin := "-"
+		if err := json.Unmarshal(data, &userData); err == nil {
+			if userData.IsAdmin {
+				role = "admin"
+			}
+			if userData.CreatedAt != "" {
+				// Parse and format the timestamp
+				if t, err := time.Parse(time.RFC3339, userData.CreatedAt); err == nil {
+					createdAt = t.Format("2006-01-02 15:04:05")
+				} else {
+					createdAt = userData.CreatedAt
+				}
+			}
+			if userData.LastLogin != "" {
+				if t, err := time.Parse(time.RFC3339, userData.LastLogin); err == nil {
+					lastLogin = t.Format("2006-01-02 15:04:05")
+				} else {
+					lastLogin = userData.LastLogin
+				}
+			}
+		} else if username == "admin" {
+			role = "admin"
+		}
+
+		userInfos = append(userInfos, userInfo{
+			username:  username,
+			role:      role,
+			createdAt: createdAt,
+			lastLogin: lastLogin,
+		})
+	}
+
+	// Sort by username for consistent output
+	sort.Slice(userInfos, func(i, j int) bool {
+		return userInfos[i].username < userInfos[j].username
+	})
+
+	var results []string
+	for _, u := range userInfos {
+		results = append(results, fmt.Sprintf("%s, %s, %s, %s", u.username, u.role, u.createdAt, u.lastLogin))
+	}
+
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
+}
+
+// handleInspectUserInfo handles INSPECT USER, USER_ROLES, USER_PRIVILEGES for binary protocol.
+func (e *serverQueryExecutor) handleInspectUserInfo(stmt *sql.InspectStmt) (string, error) {
+	if e.srv.dbManager == nil {
+		return "", fmt.Errorf("database manager not initialized")
+	}
+
+	systemDB, err := e.srv.dbManager.GetSystemDatabase()
+	if err != nil {
+		return "", err
+	}
+
+	// Create an executor using the system database
+	// Note: User context is managed by the binary protocol handler
+	// These commands require admin privileges which are checked at the protocol level
+	systemExecutor := sql.NewExecutor(systemDB.Store, e.srv.auth)
+
+	return systemExecutor.Execute(stmt)
+}
+
+// handleInspectRoleInfo handles INSPECT ROLES, ROLE, PRIVILEGES for binary protocol.
+func (e *serverQueryExecutor) handleInspectRoleInfo(stmt *sql.InspectStmt) (string, error) {
+	if e.srv.dbManager == nil {
+		return "", fmt.Errorf("database manager not initialized")
+	}
+
+	systemDB, err := e.srv.dbManager.GetSystemDatabase()
+	if err != nil {
+		return "", err
+	}
+
+	// Create an executor using the system database
+	// Note: User context is managed by the binary protocol handler
+	// These commands require admin privileges which are checked at the protocol level
+	systemExecutor := sql.NewExecutor(systemDB.Store, e.srv.auth)
+
+	return systemExecutor.Execute(stmt)
+}
+
+// formatSize formats a byte size into a human-readable string.
+func formatSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.2f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.2f MB", float64(bytes)/float64(MB))
+	case bytes >= KB:
+		return fmt.Sprintf("%.2f KB", float64(bytes)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
+// handleCreateDatabase handles CREATE DATABASE for the binary protocol path.
+func (e *serverQueryExecutor) handleCreateDatabase(stmt *sql.CreateDatabaseStmt) (string, error) {
+	if e.srv.dbManager == nil {
+		err := errors.NewExecutionError("multi-database support not enabled")
+		err.Hint = "Start the server with --data-dir to enable multi-database mode"
+		return "", err
+	}
+
+	// Check if database already exists
+	if e.srv.dbManager.DatabaseExists(stmt.DatabaseName) {
+		if stmt.IfNotExists {
+			return "CREATE DATABASE OK", nil
+		}
+		return "", errors.NewExecutionError(fmt.Sprintf("database '%s' already exists", stmt.DatabaseName))
+	}
+
+	// Create the database
+	if err := e.srv.dbManager.CreateDatabase(stmt.DatabaseName); err != nil {
+		return "", errors.NewExecutionError(err.Error())
+	}
+
+	return "CREATE DATABASE OK", nil
+}
+
+// handleDropDatabase handles DROP DATABASE for the binary protocol path.
+func (e *serverQueryExecutor) handleDropDatabase(stmt *sql.DropDatabaseStmt) (string, error) {
+	if e.srv.dbManager == nil {
+		err := errors.NewExecutionError("multi-database support not enabled")
+		err.Hint = "Start the server with --data-dir to enable multi-database mode"
+		return "", err
+	}
+
+	// Check if database exists
+	if !e.srv.dbManager.DatabaseExists(stmt.DatabaseName) {
+		if stmt.IfExists {
+			return "DROP DATABASE OK", nil
+		}
+		return "", errors.NewExecutionError(fmt.Sprintf("database '%s' does not exist", stmt.DatabaseName))
+	}
+
+	// Drop the database
+	if err := e.srv.dbManager.DropDatabase(stmt.DatabaseName); err != nil {
+		return "", errors.NewExecutionError(err.Error())
+	}
+
+	return "DROP DATABASE OK", nil
+}
+
+// handleUseDatabase handles USE <database> for the binary protocol path.
+func (e *serverQueryExecutor) handleUseDatabase(stmt *sql.UseDatabaseStmt) (string, error) {
+	if e.srv.dbManager == nil {
+		err := errors.NewExecutionError("multi-database support not enabled")
+		err.Hint = "Start the server with --data-dir to enable multi-database mode"
+		return "", err
+	}
+
+	// Check if database exists
+	if !e.srv.dbManager.DatabaseExists(stmt.DatabaseName) {
+		err := errors.NewExecutionError(fmt.Sprintf("database '%s' does not exist", stmt.DatabaseName))
+		err.Hint = "Use INSPECT DATABASES to see available databases"
+		return "", err
+	}
+
+	return fmt.Sprintf("USE %s OK", stmt.DatabaseName), nil
 }
 
 // serverAuthenticator adapts the auth manager for the Authenticator interface.
@@ -786,21 +1210,50 @@ func (s *Server) handleSQL(conn net.Conn, parts []string) string {
 		return syntaxErr.UserMessage()
 	}
 
-	// Set the user context for permission checks.
-	// The executor uses this to enforce table access and RLS.
+	// Get the user context for permission checks.
 	s.connsMu.Lock()
 	user := s.conns[conn]
 	s.connsMu.Unlock()
-	s.executor.SetUser(user)
+
+	// Handle database management statements at the server level
+	switch dbStmt := stmt.(type) {
+	case *sql.UseDatabaseStmt:
+		return s.handleUseDatabase(conn, dbStmt, user)
+	case *sql.CreateDatabaseStmt:
+		return s.handleCreateDatabase(conn, dbStmt, user)
+	case *sql.DropDatabaseStmt:
+		return s.handleDropDatabase(conn, dbStmt, user)
+	case *sql.InspectStmt:
+		if dbStmt.Target == "DATABASES" || dbStmt.Target == "DATABASE" {
+			return s.handleInspectDatabase(conn, dbStmt, user)
+		}
+		if dbStmt.Target == "USERS" {
+			return s.handleInspectUsers(conn, user)
+		}
+		// Handle user-related inspection using system database
+		if dbStmt.Target == "USER" || dbStmt.Target == "USER_ROLES" || dbStmt.Target == "USER_PRIVILEGES" {
+			return s.handleInspectUserInfo(conn, dbStmt, user)
+		}
+		// Handle role-related inspection using system database
+		if dbStmt.Target == "ROLES" || dbStmt.Target == "ROLE" || dbStmt.Target == "PRIVILEGES" {
+			return s.handleInspectRoleInfo(conn, dbStmt, user)
+		}
+	}
+
+	// Get the executor for the current database
+	executor := s.getExecutorForConnection(conn)
+
+	// Set the user context for permission checks.
+	executor.SetUser(user)
 
 	// Set the transaction context for this connection.
 	s.txMu.Lock()
 	tx := s.transactions[conn]
 	s.txMu.Unlock()
-	s.executor.SetTransaction(tx)
+	executor.SetTransaction(tx)
 
 	// Execute the statement and return the result.
-	res, execErr := s.executor.Execute(stmt)
+	res, execErr := executor.Execute(stmt)
 	if execErr != nil {
 		// Wrap execution errors with structured error handling
 		var flyErr *errors.FlyDBError
@@ -826,7 +1279,7 @@ func (s *Server) handleSQL(conn net.Conn, parts []string) string {
 	switch stmt.(type) {
 	case *sql.BeginStmt:
 		s.txMu.Lock()
-		s.transactions[conn] = s.executor.GetTransaction()
+		s.transactions[conn] = executor.GetTransaction()
 		s.txMu.Unlock()
 		log.Debug("Transaction started", "remote_addr", remoteAddr)
 	case *sql.CommitStmt, *sql.RollbackStmt:
@@ -837,4 +1290,403 @@ func (s *Server) handleSQL(conn net.Conn, parts []string) string {
 	}
 
 	return res
+}
+
+// getExecutorForConnection returns the executor for the connection's current database.
+// If no database manager is configured or the connection has no database set,
+// it returns the default executor.
+func (s *Server) getExecutorForConnection(conn net.Conn) *sql.Executor {
+	if s.dbManager == nil {
+		return s.executor
+	}
+
+	s.connDbMu.Lock()
+	dbName := s.connDatabases[conn]
+	s.connDbMu.Unlock()
+
+	if dbName == "" || dbName == storage.DefaultDatabaseName {
+		return s.executor
+	}
+
+	db, err := s.dbManager.GetDatabase(dbName)
+	if err != nil {
+		// Fall back to default executor if database not found
+		return s.executor
+	}
+
+	// Create an executor for this database using the global auth manager
+	// The auth manager is backed by the system database for global user management
+	exec := sql.NewExecutor(db.Store, s.auth)
+
+	// Set collation and encoding from database metadata
+	if db.Metadata != nil {
+		exec.SetCollation(db.Metadata.Collation, db.Metadata.Locale)
+		exec.SetEncoding(db.Metadata.Encoding)
+	}
+
+	return exec
+}
+
+// handleUseDatabase handles the USE <database> statement.
+func (s *Server) handleUseDatabase(conn net.Conn, stmt *sql.UseDatabaseStmt, user string) string {
+	remoteAddr := conn.RemoteAddr().String()
+
+	if s.dbManager == nil {
+		err := errors.NewExecutionError("multi-database support not enabled")
+		err.Hint = "Start the server with --data-dir to enable multi-database mode"
+		return err.UserMessage()
+	}
+
+	// Check if database exists
+	if !s.dbManager.DatabaseExists(stmt.DatabaseName) {
+		err := errors.NewExecutionError(fmt.Sprintf("database '%s' does not exist", stmt.DatabaseName))
+		err.Hint = "Use INSPECT DATABASES to see available databases"
+		return err.UserMessage()
+	}
+
+	// Update the connection's current database
+	s.connDbMu.Lock()
+	s.connDatabases[conn] = stmt.DatabaseName
+	s.connDbMu.Unlock()
+
+	log.Debug("Database switched", "remote_addr", remoteAddr, "database", stmt.DatabaseName)
+	return fmt.Sprintf("USE %s OK", stmt.DatabaseName)
+}
+
+// handleCreateDatabase handles the CREATE DATABASE statement.
+func (s *Server) handleCreateDatabase(conn net.Conn, stmt *sql.CreateDatabaseStmt, user string) string {
+	remoteAddr := conn.RemoteAddr().String()
+
+	// CREATE DATABASE requires admin privileges
+	if user != "" && user != "admin" {
+		err := errors.NewAuthError("permission denied for CREATE DATABASE")
+		err.Hint = "Only admin users can create databases"
+		return err.UserMessage()
+	}
+
+	if s.dbManager == nil {
+		err := errors.NewExecutionError("multi-database support not enabled")
+		err.Hint = "Start the server with --data-dir to enable multi-database mode"
+		return err.UserMessage()
+	}
+
+	// Check if database already exists
+	if s.dbManager.DatabaseExists(stmt.DatabaseName) {
+		if stmt.IfNotExists {
+			return "CREATE DATABASE OK"
+		}
+		err := errors.NewExecutionError(fmt.Sprintf("database '%s' already exists", stmt.DatabaseName))
+		err.Hint = "Use CREATE DATABASE IF NOT EXISTS to avoid this error"
+		return err.UserMessage()
+	}
+
+	// Build options from statement
+	opts := storage.DefaultCreateDatabaseOptions()
+	if stmt.Owner != "" {
+		opts.Owner = stmt.Owner
+	} else {
+		opts.Owner = user
+	}
+	if stmt.Encoding != "" {
+		opts.Encoding = storage.CharacterEncoding(stmt.Encoding)
+	}
+	if stmt.Locale != "" {
+		opts.Locale = stmt.Locale
+	}
+	if stmt.Collation != "" {
+		opts.Collation = storage.Collation(stmt.Collation)
+	}
+	if stmt.Description != "" {
+		opts.Description = stmt.Description
+	}
+
+	// Create the database with options
+	err := s.dbManager.CreateDatabaseWithOptions(stmt.DatabaseName, opts)
+	if err != nil {
+		return errors.NewExecutionError(err.Error()).UserMessage()
+	}
+
+	log.Info("Database created", "remote_addr", remoteAddr, "database", stmt.DatabaseName,
+		"encoding", opts.Encoding, "locale", opts.Locale)
+	return "CREATE DATABASE OK"
+}
+
+// handleDropDatabase handles the DROP DATABASE statement.
+func (s *Server) handleDropDatabase(conn net.Conn, stmt *sql.DropDatabaseStmt, user string) string {
+	remoteAddr := conn.RemoteAddr().String()
+
+	// DROP DATABASE requires admin privileges
+	if user != "" && user != "admin" {
+		err := errors.NewAuthError("permission denied for DROP DATABASE")
+		err.Hint = "Only admin users can drop databases"
+		return err.UserMessage()
+	}
+
+	if s.dbManager == nil {
+		err := errors.NewExecutionError("multi-database support not enabled")
+		err.Hint = "Start the server with --data-dir to enable multi-database mode"
+		return err.UserMessage()
+	}
+
+	// Check if database exists
+	if !s.dbManager.DatabaseExists(stmt.DatabaseName) {
+		if stmt.IfExists {
+			return "DROP DATABASE OK"
+		}
+		err := errors.NewExecutionError(fmt.Sprintf("database '%s' does not exist", stmt.DatabaseName))
+		err.Hint = "Use DROP DATABASE IF EXISTS to avoid this error"
+		return err.UserMessage()
+	}
+
+	// Check if any connection is using this database
+	s.connDbMu.Lock()
+	for c, dbName := range s.connDatabases {
+		if dbName == stmt.DatabaseName && c != conn {
+			s.connDbMu.Unlock()
+			err := errors.NewExecutionError(fmt.Sprintf("database '%s' is in use by other connections", stmt.DatabaseName))
+			err.Hint = "Disconnect other clients from this database first"
+			return err.UserMessage()
+		}
+	}
+	// If this connection is using the database being dropped, switch to default
+	if s.connDatabases[conn] == stmt.DatabaseName {
+		s.connDatabases[conn] = storage.DefaultDatabaseName
+	}
+	s.connDbMu.Unlock()
+
+	// Drop the database
+	err := s.dbManager.DropDatabase(stmt.DatabaseName)
+	if err != nil {
+		return errors.NewExecutionError(err.Error()).UserMessage()
+	}
+
+	log.Info("Database dropped", "remote_addr", remoteAddr, "database", stmt.DatabaseName)
+	return "DROP DATABASE OK"
+}
+
+// handleInspectDatabase handles INSPECT DATABASES and INSPECT DATABASE <name>.
+func (s *Server) handleInspectDatabase(conn net.Conn, stmt *sql.InspectStmt, user string) string {
+	// INSPECT requires admin privileges
+	if user != "" && user != "admin" {
+		err := errors.NewAuthError("permission denied for INSPECT")
+		err.Hint = "Only admin users can inspect databases"
+		return err.UserMessage()
+	}
+
+	if s.dbManager == nil {
+		// If no database manager, return just the default database info
+		if stmt.Target == "DATABASES" {
+			return "name, owner, encoding, locale, collation, tables, size\ndefault, admin, UTF8, en_US, default, 0, 0\n(1 rows)"
+		}
+		return "Database: default\nOwner: admin\nEncoding: UTF8\nLocale: en_US\nCollation: default\nStatus: Active\nStorage: WAL-backed"
+	}
+
+	if stmt.Target == "DATABASES" {
+		// List all databases with detailed info
+		databases := s.dbManager.ListDatabases()
+		if len(databases) == 0 {
+			return "name, owner, encoding, locale, collation, tables, size\n(0 rows)"
+		}
+
+		result := "name, owner, encoding, locale, collation, tables, size\n"
+		for _, dbName := range databases {
+			db, err := s.dbManager.GetDatabase(dbName)
+			if err != nil {
+				continue
+			}
+			size := db.GetSize()
+			sizeStr := formatSize(size)
+			result += fmt.Sprintf("%s, %s, %s, %s, %s, %d, %s\n",
+				db.Name,
+				db.GetOwner(),
+				db.GetEncoding(),
+				db.GetLocale(),
+				db.GetCollation(),
+				db.GetTableCount(),
+				sizeStr,
+			)
+		}
+		result += fmt.Sprintf("(%d rows)", len(databases))
+		return result
+	}
+
+	// INSPECT DATABASE <name>
+	db, err := s.dbManager.GetDatabase(stmt.ObjectName)
+	if err != nil {
+		return errors.NewExecutionError(err.Error()).UserMessage()
+	}
+
+	size := db.GetSize()
+	sizeStr := formatSize(size)
+	createdAt := db.GetCreatedAt()
+	createdStr := "unknown"
+	if !createdAt.IsZero() {
+		createdStr = createdAt.Format("2006-01-02 15:04:05")
+	}
+
+	return fmt.Sprintf("Database: %s\nOwner: %s\nEncoding: %s\nLocale: %s\nCollation: %s\nTables: %d\nSize: %s\nCreated: %s\nPath: %s\nStatus: Active\nStorage: WAL-backed",
+		db.Name, db.GetOwner(), db.GetEncoding(), db.GetLocale(), db.GetCollation(),
+		db.GetTableCount(), sizeStr, createdStr, db.Path)
+}
+
+// handleInspectUsers handles INSPECT USERS.
+// Users are stored in the system database, so we need to query it directly.
+func (s *Server) handleInspectUsers(conn net.Conn, user string) string {
+	// INSPECT requires admin privileges
+	if user != "" && user != "admin" {
+		err := errors.NewAuthError("permission denied for INSPECT")
+		err.Hint = "Only admin users can inspect users"
+		return err.UserMessage()
+	}
+
+	// Get the system database
+	if s.dbManager == nil {
+		return "username, role, created_at, last_login\n(0 rows)"
+	}
+
+	systemDB, err := s.dbManager.GetSystemDatabase()
+	if err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+
+	// Scan for all user keys with the _sys_users: prefix
+	users, err := systemDB.Store.Scan("_sys_users:")
+	if err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+
+	header := "username, role, created_at, last_login"
+	if len(users) == 0 {
+		return fmt.Sprintf("%s\n(0 rows)", header)
+	}
+
+	// Parse user data to get metadata
+	type userInfo struct {
+		username  string
+		role      string
+		createdAt string
+		lastLogin string
+	}
+	var userInfos []userInfo
+
+	for key, data := range users {
+		username := strings.TrimPrefix(key, "_sys_users:")
+		role := "user"
+
+		// Parse user JSON to get metadata
+		var userData struct {
+			IsAdmin   bool   `json:"is_admin"`
+			CreatedAt string `json:"created_at"`
+			LastLogin string `json:"last_login"`
+		}
+		createdAt := "-"
+		lastLogin := "-"
+		if err := json.Unmarshal(data, &userData); err == nil {
+			if userData.IsAdmin {
+				role = "admin"
+			}
+			if userData.CreatedAt != "" {
+				// Parse and format the timestamp
+				if t, err := time.Parse(time.RFC3339, userData.CreatedAt); err == nil {
+					createdAt = t.Format("2006-01-02 15:04:05")
+				} else {
+					createdAt = userData.CreatedAt
+				}
+			}
+			if userData.LastLogin != "" {
+				if t, err := time.Parse(time.RFC3339, userData.LastLogin); err == nil {
+					lastLogin = t.Format("2006-01-02 15:04:05")
+				} else {
+					lastLogin = userData.LastLogin
+				}
+			}
+		} else if username == "admin" {
+			role = "admin"
+		}
+
+		userInfos = append(userInfos, userInfo{
+			username:  username,
+			role:      role,
+			createdAt: createdAt,
+			lastLogin: lastLogin,
+		})
+	}
+
+	// Sort by username for consistent output
+	sort.Slice(userInfos, func(i, j int) bool {
+		return userInfos[i].username < userInfos[j].username
+	})
+
+	var results []string
+	for _, u := range userInfos {
+		results = append(results, fmt.Sprintf("%s, %s, %s, %s", u.username, u.role, u.createdAt, u.lastLogin))
+	}
+
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results))
+}
+
+// handleInspectUserInfo handles INSPECT USER, USER_ROLES, USER_PRIVILEGES.
+// These need to use the system database where users and RBAC data are stored.
+func (s *Server) handleInspectUserInfo(conn net.Conn, stmt *sql.InspectStmt, user string) string {
+	// INSPECT requires admin privileges
+	if user != "" && user != "admin" {
+		err := errors.NewAuthError("permission denied for INSPECT")
+		err.Hint = "Only admin users can inspect user information"
+		return err.UserMessage()
+	}
+
+	// Get the system database
+	if s.dbManager == nil {
+		return "Error: database manager not initialized"
+	}
+
+	systemDB, err := s.dbManager.GetSystemDatabase()
+	if err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+
+	// Create an executor using the system database
+	systemExecutor := sql.NewExecutor(systemDB.Store, s.auth)
+	systemExecutor.SetUser(user)
+
+	// Execute the inspect command
+	result, execErr := systemExecutor.Execute(stmt)
+	if execErr != nil {
+		return fmt.Sprintf("Error: %v", execErr)
+	}
+
+	return result
+}
+
+// handleInspectRoleInfo handles INSPECT ROLES, ROLE, PRIVILEGES.
+// These need to use the system database where RBAC data is stored.
+func (s *Server) handleInspectRoleInfo(conn net.Conn, stmt *sql.InspectStmt, user string) string {
+	// INSPECT requires admin privileges
+	if user != "" && user != "admin" {
+		err := errors.NewAuthError("permission denied for INSPECT")
+		err.Hint = "Only admin users can inspect role information"
+		return err.UserMessage()
+	}
+
+	// Get the system database
+	if s.dbManager == nil {
+		return "Error: database manager not initialized"
+	}
+
+	systemDB, err := s.dbManager.GetSystemDatabase()
+	if err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+
+	// Create an executor using the system database
+	systemExecutor := sql.NewExecutor(systemDB.Store, s.auth)
+	systemExecutor.SetUser(user)
+
+	// Execute the inspect command
+	result, execErr := systemExecutor.Execute(stmt)
+	if execErr != nil {
+		return fmt.Sprintf("Error: %v", execErr)
+	}
+
+	return result
 }

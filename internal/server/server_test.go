@@ -38,7 +38,7 @@ func setupTestServer(t *testing.T) (*Server, string, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	kv, err := storage.NewKVStore(tmpDir + "/test.wal")
+	kv, err := storage.NewKVStore(tmpDir + "/test.fdb")
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		t.Fatalf("Failed to create KVStore: %v", err)
