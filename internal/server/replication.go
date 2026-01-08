@@ -96,8 +96,8 @@ type Replicator struct {
 	// wal is the Write-Ahead Log used for reading/writing operations.
 	wal *storage.WAL
 
-	// kv is the key-value store for applying replicated operations.
-	kv *storage.KVStore
+	// store is the storage engine for applying replicated operations.
+	store storage.Engine
 
 	// isLeader indicates whether this node is the master (true) or slave (false).
 	isLeader bool
@@ -107,12 +107,12 @@ type Replicator struct {
 //
 // Parameters:
 //   - wal: The Write-Ahead Log for reading operations (master) or tracking offset (slave)
-//   - kv: The KVStore for applying replicated operations (slave)
+//   - store: The storage engine for applying replicated operations (slave)
 //   - isLeader: true for master mode, false for slave mode
 //
 // Returns a configured Replicator ready to start.
-func NewReplicator(wal *storage.WAL, kv *storage.KVStore, isLeader bool) *Replicator {
-	return &Replicator{wal: wal, kv: kv, isLeader: isLeader}
+func NewReplicator(wal *storage.WAL, store storage.Engine, isLeader bool) *Replicator {
+	return &Replicator{wal: wal, store: store, isLeader: isLeader}
 }
 
 // StartMaster starts the replication server, listening for slave connections.
@@ -291,16 +291,16 @@ func (r *Replicator) StartSlave(masterAddr string) error {
 			return fmt.Errorf("failed to read value: %w", err)
 		}
 
-		// Apply the operation to the local KVStore.
+		// Apply the operation to the local storage engine.
 		// Note: This writes to the local WAL, which increases our offset.
 		// This is intentional - it ensures the slave's WAL matches the master's.
 		switch op {
 		case storage.OpPut:
-			if err := r.kv.Put(key, valBuf); err != nil {
+			if err := r.store.Put(key, valBuf); err != nil {
 				fmt.Printf("Failed to apply PUT %s: %v\n", key, err)
 			}
 		case storage.OpDelete:
-			if err := r.kv.Delete(key); err != nil {
+			if err := r.store.Delete(key); err != nil {
 				fmt.Printf("Failed to apply DELETE %s: %v\n", key, err)
 			}
 		default:

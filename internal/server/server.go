@@ -111,12 +111,9 @@ type Server struct {
 	// It is shared across all connections but is thread-safe.
 	executor *sql.Executor
 
-	// store is the underlying storage engine (KVStore).
+	// store is the underlying storage engine.
 	// Used for direct access when needed (e.g., replication).
 	store storage.Engine
-
-	// kvStore is the concrete KVStore for transaction support.
-	kvStore *storage.KVStore
 
 	// auth handles user authentication and authorization.
 	// It verifies credentials and checks table permissions.
@@ -183,8 +180,8 @@ type Server struct {
 	stopped bool
 }
 
-// NewServerWithStore creates a new Server using an existing KVStore.
-// This constructor is used when the KVStore is already initialized,
+// NewServerWithStore creates a new Server using an existing storage engine.
+// This constructor is used when the storage engine is already initialized,
 // such as when sharing storage with the replication system.
 //
 // The function performs the following initialization:
@@ -195,11 +192,11 @@ type Server struct {
 //
 // Parameters:
 //   - addr: TCP address to listen on (e.g., ":8888")
-//   - kv: Pre-initialized KVStore instance
+//   - store: Pre-initialized storage engine instance
 //
 // Returns a fully configured Server ready to start.
-func NewServerWithStore(addr string, kv *storage.KVStore) *Server {
-	return NewServerWithStoreAndBinary(addr, "", kv)
+func NewServerWithStore(addr string, store storage.Engine) *Server {
+	return NewServerWithStoreAndBinary(addr, "", store)
 }
 
 // NewServerWithStoreAndBinary creates a new Server with both text and binary protocol support.
@@ -208,12 +205,12 @@ func NewServerWithStore(addr string, kv *storage.KVStore) *Server {
 // Parameters:
 //   - addr: TCP address for text protocol (e.g., ":8888")
 //   - binaryAddr: TCP address for binary protocol (e.g., ":8889"), empty to disable
-//   - kv: Pre-initialized KVStore instance
+//   - store: Pre-initialized storage engine instance
 //
 // Returns a fully configured Server ready to start.
-func NewServerWithStoreAndBinary(addr string, binaryAddr string, kv *storage.KVStore) *Server {
+func NewServerWithStoreAndBinary(addr string, binaryAddr string, store storage.Engine) *Server {
 	// Create the authentication manager backed by the same storage.
-	authMgr := auth.NewAuthManager(kv)
+	authMgr := auth.NewAuthManager(store)
 
 	// Initialize built-in RBAC roles (admin, reader, writer, owner).
 	// This is idempotent - roles are only created if they don't exist.
@@ -222,7 +219,7 @@ func NewServerWithStoreAndBinary(addr string, binaryAddr string, kv *storage.KVS
 	}
 
 	// Create the SQL executor with storage and auth dependencies.
-	exec := sql.NewExecutor(kv, authMgr)
+	exec := sql.NewExecutor(store, authMgr)
 
 	// Create the prepared statement manager.
 	prepMgr := sql.NewPreparedStatementManager(exec)
@@ -232,8 +229,7 @@ func NewServerWithStoreAndBinary(addr string, binaryAddr string, kv *storage.KVS
 		addr:          addr,
 		binaryAddr:    binaryAddr,
 		executor:      exec,
-		store:         kv,
-		kvStore:       kv,
+		store:         store,
 		auth:          authMgr,
 		subscribers:   make(map[string]map[net.Conn]struct{}),
 		conns:         make(map[net.Conn]string),
@@ -273,7 +269,7 @@ func NewServerWithStoreAndBinary(addr string, binaryAddr string, kv *storage.KVS
 func NewServerWithDatabaseManager(addr string, binaryAddr string, dbManager *storage.DatabaseManager) *Server {
 	// Get the default database for initial setup
 	defaultDB, _ := dbManager.GetDatabase(storage.DefaultDatabaseName)
-	kv := defaultDB.Store
+	store := defaultDB.Store
 
 	// Get the system database for global authentication
 	systemDB, _ := dbManager.GetSystemDatabase()
@@ -290,7 +286,7 @@ func NewServerWithDatabaseManager(addr string, binaryAddr string, dbManager *sto
 	}
 
 	// Create the SQL executor with storage and auth dependencies.
-	exec := sql.NewExecutor(kv, authMgr)
+	exec := sql.NewExecutor(store, authMgr)
 
 	// Create the prepared statement manager.
 	prepMgr := sql.NewPreparedStatementManager(exec)
@@ -300,8 +296,7 @@ func NewServerWithDatabaseManager(addr string, binaryAddr string, dbManager *sto
 		addr:          addr,
 		binaryAddr:    binaryAddr,
 		executor:      exec,
-		store:         kv,
-		kvStore:       kv,
+		store:         store,
 		auth:          authMgr,
 		dbManager:     dbManager,
 		subscribers:   make(map[string]map[net.Conn]struct{}),
@@ -693,20 +688,25 @@ func (a *serverAuthenticator) Authenticate(username, password string) bool {
 	return a.auth.Authenticate(username, password)
 }
 
-// NewServer creates a new Server and initializes a new KVStore at storePath.
+// NewServer creates a new Server and initializes a new storage engine at dataDir.
 // This is a convenience constructor for standalone server usage.
 //
 // Parameters:
 //   - addr: TCP address to listen on (e.g., ":8888")
-//   - storePath: Path to the WAL file for persistence
+//   - dataDir: Path to the data directory for persistence
 //
 // Returns the server and any error from storage initialization.
-func NewServer(addr string, storePath string) (*Server, error) {
-	kv, err := storage.NewKVStore(storePath)
+func NewServer(addr string, dataDir string) (*Server, error) {
+	config := storage.StorageConfig{
+		DataDir:            dataDir,
+		BufferPoolSize:     0, // Auto-size
+		CheckpointInterval: 60 * time.Second,
+	}
+	store, err := storage.NewStorageEngine(config)
 	if err != nil {
 		return nil, err
 	}
-	return NewServerWithStore(addr, kv), nil
+	return NewServerWithStore(addr, store), nil
 }
 
 // TLSConfig holds the configuration for TLS connections.

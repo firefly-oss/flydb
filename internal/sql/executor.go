@@ -109,9 +109,6 @@ type Executor struct {
 	// store is the underlying storage engine for data operations.
 	store storage.Engine
 
-	// kvStore is the concrete KVStore for transaction support.
-	kvStore *storage.KVStore
-
 	// catalog manages table schemas.
 	catalog *Catalog
 
@@ -169,12 +166,8 @@ type aggState struct {
 //
 // Returns a fully initialized Executor ready to process statements.
 func NewExecutor(store storage.Engine, auth *auth.AuthManager) *Executor {
-	// Try to get the concrete KVStore for transaction support
-	kvStore, _ := store.(*storage.KVStore)
-
 	exec := &Executor{
 		store:    store,
-		kvStore:  kvStore,
 		catalog:  NewCatalog(store),
 		auth:     auth,
 		collator: storage.GetCollator(storage.CollationDefault, "en_US"),
@@ -2847,11 +2840,7 @@ func (e *Executor) executeBegin() (string, error) {
 		return "", errors.New("transaction already in progress")
 	}
 
-	if e.kvStore == nil {
-		return "", errors.New("transactions not supported with this storage engine")
-	}
-
-	e.tx = storage.NewTransaction(e.kvStore)
+	e.tx = storage.NewTransaction(e.store)
 	return "BEGIN", nil
 }
 
@@ -4291,16 +4280,19 @@ func (e *Executor) inspectStatus() (string, error) {
 	results = append(results, fmt.Sprintf("Total rows: %d", totalRows))
 	results = append(results, fmt.Sprintf("Data size: %d bytes", totalStorageSize))
 
-	// WAL size if available
-	if kvStore, ok := e.store.(*storage.KVStore); ok {
-		if wal := kvStore.WAL(); wal != nil {
+	// WAL size if available - try unified engine first, then KVStore
+	if unified, ok := e.store.(*storage.UnifiedStorageEngine); ok {
+		if wal := unified.WAL(); wal != nil {
 			if walSize, err := wal.Size(); err == nil {
 				results = append(results, fmt.Sprintf("WAL size: %d bytes", walSize))
 			}
 		}
+		stats := unified.BufferPoolStats()
+		results = append(results, fmt.Sprintf("Buffer pool: %d/%d pages (%.1f%% hit rate)",
+			stats.UsedFrames, stats.PoolSize, stats.HitRate))
 	}
 
-	results = append(results, "Storage: WAL-backed")
+	results = append(results, "Storage: Unified Disk Engine")
 	results = append(results, "Status: Active")
 
 	return strings.Join(results, "\n"), nil

@@ -38,16 +38,21 @@ func setupTestServer(t *testing.T) (*Server, string, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	kv, err := storage.NewKVStore(tmpDir + "/test.fdb")
+	config := storage.StorageConfig{
+		DataDir:            tmpDir,
+		BufferPoolSize:     256,
+		CheckpointInterval: 0,
+	}
+	store, err := storage.NewStorageEngine(config)
 	if err != nil {
 		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to create KVStore: %v", err)
+		t.Fatalf("Failed to create storage engine: %v", err)
 	}
 
 	// Initialize admin user for tests
-	authMgr := auth.NewAuthManager(kv)
+	authMgr := auth.NewAuthManager(store)
 	if err := authMgr.InitializeAdmin(testAdminPassword); err != nil {
-		kv.Close()
+		store.Close()
 		os.RemoveAll(tmpDir)
 		t.Fatalf("Failed to initialize admin user: %v", err)
 	}
@@ -55,10 +60,11 @@ func setupTestServer(t *testing.T) (*Server, string, func()) {
 	// Use a random available port
 	port := findAvailablePort(t)
 	addr := fmt.Sprintf(":%d", port)
-	srv := NewServerWithStore(addr, kv)
+	srv := NewServerWithStore(addr, store)
 
 	cleanup := func() {
-		kv.Close()
+		store.Close()
+		time.Sleep(10 * time.Millisecond)
 		os.RemoveAll(tmpDir)
 	}
 

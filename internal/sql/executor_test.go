@@ -20,6 +20,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"flydb/internal/auth"
 	"flydb/internal/storage"
@@ -31,17 +32,23 @@ func setupExecutorTest(t *testing.T) (*Executor, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	kv, err := storage.NewKVStore(tmpDir + "/test.db")
+	config := storage.StorageConfig{
+		DataDir:            tmpDir,
+		BufferPoolSize:     256,
+		CheckpointInterval: 0,
+	}
+	store, err := storage.NewStorageEngine(config)
 	if err != nil {
 		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to create KVStore: %v", err)
+		t.Fatalf("Failed to create storage engine: %v", err)
 	}
 
-	authMgr := auth.NewAuthManager(kv)
-	exec := NewExecutor(kv, authMgr)
+	authMgr := auth.NewAuthManager(store)
+	exec := NewExecutor(store, authMgr)
 
 	cleanup := func() {
-		kv.Close()
+		store.Close()
+		time.Sleep(10 * time.Millisecond)
 		os.RemoveAll(tmpDir)
 	}
 
