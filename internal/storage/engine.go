@@ -15,13 +15,16 @@
  */
 
 /*
-Package storage provides the persistence layer for FlyDB.
+Package storage provides the unified disk-based persistence layer for FlyDB.
 
 Storage Engine Overview:
 ========================
 
-The storage package defines the Engine interface and provides a
-key-value store implementation backed by a Write-Ahead Log (WAL).
+The storage package provides a unified disk-based storage engine that combines:
+  - Page-based disk storage for datasets larger than RAM
+  - Intelligent buffer pool with LRU-K caching
+  - Write-Ahead Log (WAL) for durability and crash recovery
+  - Automatic buffer pool sizing based on available memory
 
 Architecture:
 =============
@@ -38,14 +41,16 @@ Architecture:
 	                         │
 	                         ▼
 	┌─────────────────────────────────────────────────────┐
-	│                     KVStore                         │
-	│              (In-Memory HashMap)                    │
-	└─────────────────────────────────────────────────────┘
-	                         │
-	                         ▼
-	┌─────────────────────────────────────────────────────┐
-	│                Write-Ahead Log (WAL)                │
-	│                  (Disk Persistence)                 │
+	│              UnifiedStorageEngine                   │
+	│   ┌─────────────────────────────────────────────┐   │
+	│   │         Buffer Pool (LRU-K Cache)           │   │
+	│   └─────────────────────────────────────────────┘   │
+	│   ┌─────────────────────────────────────────────┐   │
+	│   │         Page-Based Disk Storage             │   │
+	│   └─────────────────────────────────────────────┘   │
+	│   ┌─────────────────────────────────────────────┐   │
+	│   │         Write-Ahead Log (WAL)               │   │
+	│   └─────────────────────────────────────────────┘   │
 	└─────────────────────────────────────────────────────┘
 
 Key Conventions:
@@ -69,27 +74,19 @@ FlyDB provides durability through the Write-Ahead Log:
 
  1. Every Put/Delete operation is first written to the WAL
  2. The WAL is synced to disk before the operation returns
- 3. On startup, the WAL is replayed to rebuild the in-memory state
+ 3. On startup, the WAL is replayed to recover uncommitted operations
 
 This ensures that committed data survives crashes and restarts.
 
-Thread Safety:
-==============
+Buffer Pool:
+============
 
-The KVStore implementation uses a sync.RWMutex to provide
-thread-safe access to the in-memory data. Multiple readers
-can access data concurrently, but writes are exclusive.
+The buffer pool is automatically sized based on available system memory:
+  - Uses 25% of available RAM
+  - Minimum: 2MB (256 pages)
+  - Maximum: 1GB (131,072 pages)
 
-Implementations:
-================
-
-  - KVStore: The primary implementation using an in-memory HashMap
-    backed by a WAL for persistence.
-
-Future implementations could include:
-  - LSM-tree based storage for better write performance
-  - B-tree based storage for better range query performance
-  - Distributed storage for horizontal scaling
+This provides optimal performance without manual tuning.
 */
 package storage
 

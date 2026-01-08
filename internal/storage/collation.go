@@ -14,6 +14,82 @@
  * limitations under the License.
  */
 
+/*
+Collation Implementation
+=========================
+
+Collation defines how strings are compared and sorted in the database.
+Different collations produce different sort orders for the same data,
+which is essential for internationalization and locale-specific sorting.
+
+What is Collation?
+==================
+
+Collation determines:
+  - How strings are compared (equality and ordering)
+  - How strings are sorted in ORDER BY clauses
+  - How string comparisons work in WHERE clauses
+
+For example, with case-insensitive collation:
+  - "Alice" = "alice" (equal)
+  - "Café" may sort differently than "cafe" depending on locale
+
+Supported Collations:
+=====================
+
+FlyDB supports the following collations:
+
+  1. BINARY (default):
+     - Byte-by-byte comparison
+     - Fastest, but not locale-aware
+     - "A" < "B" < "a" < "b" (ASCII order)
+
+  2. NOCASE:
+     - Case-insensitive comparison
+     - "Alice" = "alice"
+     - Useful for case-insensitive searches
+
+  3. UNICODE:
+     - Unicode-aware comparison using ICU
+     - Proper handling of accented characters
+     - Locale-specific sorting rules
+
+  4. Locale-specific (e.g., "en_US", "de_DE"):
+     - Language-specific sorting rules
+     - German: "ä" sorts with "a"
+     - Swedish: "ä" sorts after "z"
+
+Usage in SQL:
+=============
+
+Collation can be specified in column definitions:
+
+  CREATE TABLE users (
+    name TEXT COLLATE NOCASE,
+    email TEXT COLLATE BINARY
+  );
+
+Or in queries:
+
+  SELECT * FROM users ORDER BY name COLLATE UNICODE;
+
+Performance Considerations:
+===========================
+
+  - BINARY is fastest (simple byte comparison)
+  - NOCASE adds overhead for case conversion
+  - UNICODE/locale collations are slowest but most correct
+
+For indexes, the collation must match the query collation for
+the index to be used effectively.
+
+References:
+===========
+
+  - Unicode Technical Standard #10: Unicode Collation Algorithm
+  - ICU Collation: https://unicode-org.github.io/icu/userguide/collation/
+  - SQLite Collation: https://www.sqlite.org/datatype3.html#collation
+*/
 package storage
 
 import (

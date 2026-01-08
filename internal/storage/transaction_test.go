@@ -20,10 +20,8 @@ import (
 	"testing"
 )
 
-// Note: setupTestKVStore is defined in kv_test.go
-
 func TestTransactionCommit(t *testing.T) {
-	store, _, cleanup := setupTestKVStore(t)
+	store, cleanup := setupTestEngine(t)
 	defer cleanup()
 
 	// Start a transaction
@@ -71,7 +69,7 @@ func TestTransactionCommit(t *testing.T) {
 }
 
 func TestTransactionRollback(t *testing.T) {
-	store, _, cleanup := setupTestKVStore(t)
+	store, cleanup := setupTestEngine(t)
 	defer cleanup()
 
 	// Put some initial data
@@ -109,7 +107,7 @@ func TestTransactionRollback(t *testing.T) {
 }
 
 func TestTransactionDelete(t *testing.T) {
-	store, _, cleanup := setupTestKVStore(t)
+	store, cleanup := setupTestEngine(t)
 	defer cleanup()
 
 	// Put some initial data

@@ -53,10 +53,10 @@ func TestDatabaseManagerCreate(t *testing.T) {
 		t.Error("testdb should exist after creation")
 	}
 
-	// Verify the database file was created
-	dbPath := filepath.Join(tmpDir, "testdb.fdb")
+	// Verify the database directory was created
+	dbPath := filepath.Join(tmpDir, "testdb")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		t.Error("Database file should exist on disk")
+		t.Error("Database directory should exist on disk")
 	}
 }
 

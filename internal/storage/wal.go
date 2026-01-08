@@ -474,6 +474,16 @@ func (w *WAL) Write(op byte, key string, value []byte) error {
 	return err
 }
 
+// Sync flushes all pending writes to the underlying storage.
+// This ensures durability by forcing the OS to write buffered data to disk.
+//
+// Returns an error if the sync fails.
+func (w *WAL) Sync() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.file.Sync()
+}
+
 // Close closes the underlying WAL file.
 // After Close is called, no other methods should be called on this WAL.
 //

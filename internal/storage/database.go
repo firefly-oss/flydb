@@ -151,8 +151,8 @@ func DefaultDatabaseMetadata(name string) *DatabaseMetadata {
 // Database represents a single database instance with its own storage.
 type Database struct {
 	Name      string            // Database name
-	Path      string            // Path to the .fdb file
-	Store     *KVStore          // The underlying key-value store
+	Path      string            // Path to the data directory or .fdb file
+	Store     Engine            // The underlying storage engine (KVStore or UnifiedStorageEngine)
 	Metadata  *DatabaseMetadata // Database configuration and metadata
 	CreatedAt time.Time         // When the database was created (from metadata)
 }
@@ -307,6 +307,18 @@ func NewDatabaseManager(dataDir string, encConfig EncryptionConfig) (*DatabaseMa
 	return mgr, nil
 }
 
+// createStorageEngine creates a storage engine for a database.
+// It uses the unified disk-based storage engine with WAL.
+func (m *DatabaseManager) createStorageEngine(dbPath string) (Engine, error) {
+	config := StorageConfig{
+		DataDir:            dbPath,
+		BufferPoolSize:     0, // Auto-size
+		CheckpointInterval: 60 * time.Second,
+		Encryption:         m.encConfig,
+	}
+	return NewStorageEngine(config)
+}
+
 // ensureDefaultDatabase creates the default and system databases if they don't exist.
 func (m *DatabaseManager) ensureDefaultDatabase() error {
 	// Create system database first (for global users, permissions, etc.)
@@ -330,13 +342,7 @@ func (m *DatabaseManager) ensureDefaultDatabase() error {
 func (m *DatabaseManager) createSystemDatabase() error {
 	dbPath := m.getDatabasePath(SystemDatabaseName)
 
-	var store *KVStore
-	var err error
-	if m.encConfig.Enabled {
-		store, err = NewKVStoreWithEncryption(dbPath, m.encConfig)
-	} else {
-		store, err = NewKVStore(dbPath)
-	}
+	store, err := m.createStorageEngine(dbPath)
 	if err != nil {
 		return err
 	}
@@ -364,7 +370,7 @@ func (m *DatabaseManager) createSystemDatabase() error {
 
 	if err := db.SaveMetadata(); err != nil {
 		store.Close()
-		os.Remove(dbPath)
+		os.RemoveAll(dbPath)
 		return err
 	}
 
@@ -372,9 +378,9 @@ func (m *DatabaseManager) createSystemDatabase() error {
 	return nil
 }
 
-// getDatabasePath returns the file path for a database.
+// getDatabasePath returns the directory path for a database.
 func (m *DatabaseManager) getDatabasePath(name string) string {
-	return filepath.Join(m.dataDir, name+".fdb")
+	return filepath.Join(m.dataDir, name)
 }
 
 // isValidDatabaseNameChar checks if a character is valid in a database name.
@@ -447,14 +453,8 @@ func (m *DatabaseManager) CreateDatabaseWithOptions(name string, opts CreateData
 		return fmt.Errorf("database '%s' already exists", name)
 	}
 
-	// Create the database file by opening a new KVStore
-	var store *KVStore
-	var err error
-	if m.encConfig.Enabled {
-		store, err = NewKVStoreWithEncryption(dbPath, m.encConfig)
-	} else {
-		store, err = NewKVStore(dbPath)
-	}
+	// Create the storage engine
+	store, err := m.createStorageEngine(dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to create database '%s': %w", name, err)
 	}
@@ -485,7 +485,7 @@ func (m *DatabaseManager) CreateDatabaseWithOptions(name string, opts CreateData
 	// Save metadata to the database
 	if err := db.SaveMetadata(); err != nil {
 		store.Close()
-		os.Remove(dbPath)
+		os.RemoveAll(dbPath)
 		return fmt.Errorf("failed to save database metadata: %w", err)
 	}
 
@@ -517,14 +517,8 @@ func (m *DatabaseManager) CreateDatabaseIfNotExistsWithOptions(name string, opts
 		return nil // Already exists, not an error
 	}
 
-	// Create the database file
-	var store *KVStore
-	var err error
-	if m.encConfig.Enabled {
-		store, err = NewKVStoreWithEncryption(dbPath, m.encConfig)
-	} else {
-		store, err = NewKVStore(dbPath)
-	}
+	// Create the storage engine
+	store, err := m.createStorageEngine(dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to create database '%s': %w", name, err)
 	}
@@ -554,7 +548,7 @@ func (m *DatabaseManager) CreateDatabaseIfNotExistsWithOptions(name string, opts
 	// Save metadata
 	if err := db.SaveMetadata(); err != nil {
 		store.Close()
-		os.Remove(dbPath)
+		os.RemoveAll(dbPath)
 		return fmt.Errorf("failed to save database metadata: %w", err)
 	}
 
@@ -563,7 +557,7 @@ func (m *DatabaseManager) CreateDatabaseIfNotExistsWithOptions(name string, opts
 	return nil
 }
 
-// DropDatabase removes a database and deletes its file.
+// DropDatabase removes a database and deletes its directory.
 // Returns an error if the database doesn't exist or is the default database.
 func (m *DatabaseManager) DropDatabase(name string) error {
 	if name == DefaultDatabaseName {
@@ -588,9 +582,9 @@ func (m *DatabaseManager) DropDatabase(name string) error {
 		delete(m.databases, name)
 	}
 
-	// Delete the database file
-	if err := os.Remove(dbPath); err != nil {
-		return fmt.Errorf("failed to delete database file '%s': %w", name, err)
+	// Delete the database directory
+	if err := os.RemoveAll(dbPath); err != nil {
+		return fmt.Errorf("failed to delete database '%s': %w", name, err)
 	}
 
 	return nil
@@ -621,9 +615,9 @@ func (m *DatabaseManager) DropDatabaseIfExists(name string) error {
 		delete(m.databases, name)
 	}
 
-	// Delete the database file
-	if err := os.Remove(dbPath); err != nil {
-		return fmt.Errorf("failed to delete database file '%s': %w", name, err)
+	// Delete the database directory
+	if err := os.RemoveAll(dbPath); err != nil {
+		return fmt.Errorf("failed to delete database '%s': %w", name, err)
 	}
 
 	return nil
@@ -650,19 +644,13 @@ func (m *DatabaseManager) GetDatabase(name string) (*Database, error) {
 
 	dbPath := m.getDatabasePath(name)
 
-	// Check if database file exists
+	// Check if database directory exists
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("database '%s' does not exist", name)
 	}
 
 	// Load the database
-	var store *KVStore
-	var err error
-	if m.encConfig.Enabled {
-		store, err = NewKVStoreWithEncryption(dbPath, m.encConfig)
-	} else {
-		store, err = NewKVStore(dbPath)
-	}
+	store, err := m.createStorageEngine(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load database '%s': %w", name, err)
 	}
@@ -717,7 +705,7 @@ func (m *DatabaseManager) ListDatabases() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Scan the data directory for .fdb files
+	// Scan the data directory for database directories
 	entries, err := os.ReadDir(m.dataDir)
 	if err != nil {
 		return []string{}
@@ -725,12 +713,14 @@ func (m *DatabaseManager) ListDatabases() []string {
 
 	var databases []string
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if !entry.IsDir() {
 			continue
 		}
-		name := entry.Name()
-		if strings.HasSuffix(name, ".fdb") {
-			dbName := strings.TrimSuffix(name, ".fdb")
+		// Each database is a directory containing data.db and wal.fdb
+		dbName := entry.Name()
+		// Check if it looks like a database directory
+		dataPath := filepath.Join(m.dataDir, dbName, "data.db")
+		if _, err := os.Stat(dataPath); err == nil {
 			databases = append(databases, dbName)
 		}
 	}

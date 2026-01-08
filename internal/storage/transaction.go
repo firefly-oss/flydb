@@ -85,7 +85,7 @@ type Savepoint struct {
 // Thread Safety: A single Transaction should only be used by one goroutine.
 // The underlying storage operations are thread-safe.
 type Transaction struct {
-	store      *KVStore
+	store      Engine
 	buffer     []TxOperation
 	readCache  map[string][]byte // Cache of values read/written in this tx
 	deleteSet  map[string]bool   // Keys marked for deletion
@@ -94,9 +94,9 @@ type Transaction struct {
 	mu         sync.Mutex
 }
 
-// NewTransaction creates a new transaction on the given KVStore.
+// NewTransaction creates a new transaction on the given storage engine.
 // The transaction starts in the Active state.
-func NewTransaction(store *KVStore) *Transaction {
+func NewTransaction(store Engine) *Transaction {
 	return &Transaction{
 		store:      store,
 		buffer:     make([]TxOperation, 0),
