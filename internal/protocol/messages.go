@@ -14,6 +14,76 @@
  * limitations under the License.
  */
 
+/*
+Protocol Message Definitions
+=============================
+
+This file defines the message types used in FlyDB's binary wire protocol.
+Each message type corresponds to a specific operation or response.
+
+Message Categories:
+===================
+
+1. Query Messages:
+   - QueryMessage: SQL query request
+   - QueryResultMessage: Query response with rows and columns
+
+2. Error Messages:
+   - ErrorMessage: Error response with code and message
+
+3. Prepared Statement Messages:
+   - PrepareMessage: Prepare a statement for later execution
+   - PrepareResultMessage: Response with statement ID
+   - ExecuteMessage: Execute a prepared statement
+   - DeallocateMessage: Release a prepared statement
+
+4. Authentication Messages:
+   - AuthMessage: Authentication request with credentials
+   - AuthResultMessage: Authentication response
+
+5. Control Messages:
+   - PingMessage: Keep-alive ping
+   - PongMessage: Keep-alive response
+
+Message Encoding:
+=================
+
+All messages are encoded as JSON for simplicity and debuggability.
+The JSON payload is wrapped in the binary message frame defined in
+protocol.go.
+
+Example QueryMessage:
+  {"query": "SELECT * FROM users WHERE id = 1"}
+
+Example QueryResultMessage:
+  {
+    "success": true,
+    "columns": ["id", "name", "email"],
+    "rows": [[1, "Alice", "alice@example.com"]],
+    "row_count": 1
+  }
+
+Example ErrorMessage:
+  {"code": 1001, "message": "Table 'users' not found"}
+
+Design Decisions:
+=================
+
+1. JSON Encoding: Chosen for human readability and easy debugging.
+   Production databases often use more compact binary encodings.
+
+2. Symmetric Encode/Decode: Each message type has both Encode() and
+   Decode*() functions for bidirectional communication.
+
+3. Interface Values: Rows use [][]interface{} to support mixed types
+   (strings, numbers, nulls) in query results.
+
+References:
+===========
+
+  - See protocol.go for the binary message frame format
+  - See handler.go for message processing logic
+*/
 package protocol
 
 import (

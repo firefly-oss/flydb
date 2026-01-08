@@ -14,6 +14,99 @@
  * limitations under the License.
  */
 
+/*
+Protocol Handler Implementation
+================================
+
+The protocol handler is responsible for processing client connections using
+FlyDB's binary wire protocol. It bridges the gap between the network layer
+and the database engine, handling message parsing, authentication, and
+query execution.
+
+Handler Architecture:
+=====================
+
+	┌─────────────────────────────────────────────────────────────┐
+	│                    Client Connection                         │
+	└─────────────────────────────────────────────────────────────┘
+	                              │
+	                              ▼
+	┌─────────────────────────────────────────────────────────────┐
+	│                    Protocol Handler                          │
+	│  ┌─────────────────────────────────────────────────────────┐ │
+	│  │                  Message Parser                          │ │
+	│  │  Reads binary messages, validates headers, decodes JSON  │ │
+	│  └─────────────────────────────────────────────────────────┘ │
+	│  ┌─────────────────────────────────────────────────────────┐ │
+	│  │                  Message Router                          │ │
+	│  │  Routes messages to appropriate handlers by type         │ │
+	│  └─────────────────────────────────────────────────────────┘ │
+	│  ┌─────────────────────────────────────────────────────────┐ │
+	│  │                  Response Encoder                        │ │
+	│  │  Encodes responses and writes to connection              │ │
+	│  └─────────────────────────────────────────────────────────┘ │
+	└─────────────────────────────────────────────────────────────┘
+	                              │
+	                              ▼
+	┌─────────────────────────────────────────────────────────────┐
+	│                    Database Engine                           │
+	└─────────────────────────────────────────────────────────────┘
+
+Dependency Injection:
+=====================
+
+The handler uses interfaces for all its dependencies, enabling:
+  - Easy testing with mock implementations
+  - Flexible configuration for different deployment scenarios
+  - Clean separation of concerns
+
+Key interfaces:
+  - QueryExecutor: Executes SQL queries
+  - Authenticator: Validates user credentials
+  - PreparedStatementManager: Manages prepared statements
+  - CursorManager: Handles server-side cursors
+  - TransactionManager: Manages transactions
+  - MetadataProvider: Provides schema information for drivers
+
+Connection Lifecycle:
+=====================
+
+  1. Client connects (TCP or TLS)
+  2. Handler reads authentication message
+  3. Handler validates credentials via Authenticator
+  4. Handler enters message loop:
+     a. Read message header
+     b. Read message payload
+     c. Route to appropriate handler
+     d. Send response
+  5. Connection closes (client disconnect or error)
+
+Thread Safety:
+==============
+
+Each connection is handled in its own goroutine. The handler maintains
+per-connection state (authenticated user, current database, etc.) that
+is not shared between connections.
+
+Shared resources (query executor, authenticator, etc.) must be thread-safe.
+
+Error Handling:
+===============
+
+Errors are returned to clients as ErrorMessage responses with:
+  - Error code (for programmatic handling)
+  - Error message (for human-readable display)
+
+The handler logs errors for debugging but does not expose internal
+details to clients for security reasons.
+
+References:
+===========
+
+  - See protocol.go for message format specification
+  - See messages.go for message type definitions
+  - See sdk_messages.go for SDK-specific messages
+*/
 package protocol
 
 import (

@@ -14,6 +14,111 @@
  * limitations under the License.
  */
 
+/*
+Server-Side Cursor Implementation
+===================================
+
+Cursors provide a way to iterate through large result sets without loading
+all rows into memory at once. This is essential for handling queries that
+return millions of rows.
+
+What is a Cursor?
+=================
+
+A cursor is a database object that enables traversal over the rows of a
+result set. Think of it as a pointer that can move through the results
+one row (or batch of rows) at a time.
+
+Without cursors:
+  - Query returns all 1 million rows at once
+  - Client must allocate memory for all rows
+  - Network transfer is one large payload
+
+With cursors:
+  - Query executes and cursor is opened
+  - Client fetches 100 rows at a time
+  - Memory usage is bounded
+  - Network transfers are smaller, more frequent
+
+Cursor Types:
+=============
+
+FlyDB supports four cursor types, matching ODBC/JDBC standards:
+
+1. FORWARD_ONLY (default):
+   - Can only move forward (Next)
+   - Most efficient, lowest memory usage
+   - Suitable for simple iteration
+
+2. STATIC:
+   - Creates a snapshot at open time
+   - Scrollable (can move forward, backward, to position)
+   - Does not see changes made after opening
+   - Higher memory usage (stores snapshot)
+
+3. KEYSET:
+   - Stores only the keys at open time
+   - Scrollable
+   - Sees value changes but not new/deleted rows
+   - Medium memory usage
+
+4. DYNAMIC:
+   - Fully dynamic, sees all changes
+   - Scrollable
+   - Most expensive, re-executes query on scroll
+   - Lowest memory usage but highest CPU
+
+Cursor Concurrency:
+===================
+
+Concurrency controls whether the cursor can update data:
+
+1. READ_ONLY: Cannot update through cursor
+2. LOCK: Uses pessimistic locking for updates
+3. OPTIMISTIC: Uses optimistic concurrency control
+
+Fetch Operations:
+=================
+
+Cursors support various fetch directions:
+
+  - FETCH_NEXT: Move to next row
+  - FETCH_PRIOR: Move to previous row (scrollable only)
+  - FETCH_FIRST: Move to first row (scrollable only)
+  - FETCH_LAST: Move to last row (scrollable only)
+  - FETCH_ABSOLUTE: Move to specific row number
+  - FETCH_RELATIVE: Move relative to current position
+
+Lifecycle:
+==========
+
+  1. Open cursor with query and options
+  2. Fetch rows in batches
+  3. Process each batch
+  4. Close cursor to release resources
+
+Example:
+
+  cursor := sdk.NewCursor(query, CursorForwardOnly, ConcurrencyReadOnly)
+  cursor.Open()
+  for cursor.Next() {
+      row := cursor.GetRow()
+      // process row
+  }
+  cursor.Close()
+
+Thread Safety:
+==============
+
+Cursors are NOT thread-safe. Each cursor should be used by a single
+goroutine. For concurrent access, create multiple cursors.
+
+References:
+===========
+
+  - ODBC Cursor Types: https://docs.microsoft.com/en-us/sql/odbc/reference/develop-app/cursor-types
+  - JDBC ResultSet Types: https://docs.oracle.com/javase/tutorial/jdbc/basics/retrieving.html
+*/
 package sdk
 
 import (

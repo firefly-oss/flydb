@@ -14,6 +14,83 @@
  * limitations under the License.
  */
 
+/*
+Result Set and Metadata Implementation
+=======================================
+
+This file defines the structures for representing query results and their
+metadata. These structures are used by ODBC/JDBC drivers and language SDKs
+to provide rich information about query results.
+
+Result Set Metadata:
+====================
+
+Result set metadata describes the structure of query results:
+
+  - Column count and names
+  - Data types and sizes
+  - Nullability and constraints
+  - Source table information
+
+This metadata is essential for:
+  - Building dynamic UIs that adapt to query results
+  - Type-safe data binding in strongly-typed languages
+  - Generating reports with proper formatting
+
+Column Information:
+===================
+
+Each column in a result set has rich metadata:
+
+  Position:
+    - Index: 0-based column position
+
+  Names:
+    - Name: Actual column name from schema
+    - Label: Display label (may differ for aliases)
+    - TableName: Source table
+    - SchemaName: Source schema
+    - CatalogName: Source catalog/database
+
+  Type Information:
+    - Type: FlyDB data type enum
+    - TypeName: Database type string (e.g., "VARCHAR(255)")
+    - Precision: Numeric precision or string max length
+    - Scale: Decimal scale
+    - DisplaySize: Suggested display width
+
+  Constraints:
+    - Nullable: Whether NULL values are allowed
+    - AutoIncrement: Whether column auto-increments
+    - ReadOnly: Whether column is read-only
+    - Writable: Whether column is writable
+    - Searchable: Whether column can be used in WHERE
+    - CaseSensitive: Whether comparisons are case-sensitive
+    - Signed: Whether numeric type is signed
+    - Currency: Whether type represents currency
+
+ODBC/JDBC Compatibility:
+========================
+
+The metadata structures are designed to be compatible with:
+
+  - ODBC SQLDescribeCol and SQLColAttribute
+  - JDBC ResultSetMetaData interface
+
+This enables FlyDB drivers to provide full metadata support.
+
+Thread Safety:
+==============
+
+ResultSetMetadata uses a read-write mutex for thread-safe access.
+Multiple goroutines can read metadata concurrently.
+
+References:
+===========
+
+  - ODBC SQLDescribeCol: https://docs.microsoft.com/en-us/sql/odbc/reference/syntax/sqldescribecol-function
+  - JDBC ResultSetMetaData: https://docs.oracle.com/javase/8/docs/api/java/sql/ResultSetMetaData.html
+*/
 package sdk
 
 import (
