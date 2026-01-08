@@ -217,8 +217,8 @@ func (l *Lexer) NextToken() Token {
 			"COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT", "STRING_AGG",
 			// GROUP BY and HAVING
 			"GROUP", "HAVING",
-			// Introspection
-			"INTROSPECT",
+			// Inspection
+			"INSPECT",
 			// Constraints
 			"PRIMARY", "KEY", "FOREIGN", "REFERENCES", "NOT", "UNIQUE",
 			"AUTO_INCREMENT", "CONSTRAINT", "DEFAULT", "CHECK", "CASCADE",
@@ -254,7 +254,11 @@ func (l *Lexer) NextToken() Token {
 			"COALESCE", "NULLIF", "IFNULL", "NVL", "ISNULL",
 			"CAST", "CONVERT",
 			// UPSERT
-			"CONFLICT", "NOTHING":
+			"CONFLICT", "NOTHING",
+			// Database management
+			"DATABASE", "USE", "DATABASES",
+			// RBAC keywords
+			"ROLE", "ROLES", "PRIVILEGES", "DESCRIPTION", "WITH":
 			return Token{Type: TokenKeyword, Value: upper}
 		}
 

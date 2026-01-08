@@ -5,18 +5,21 @@ echo "Building flydb..."
 go build -o flydb ./cmd/flydb
 
 # Cleanup
-rm -f master.wal slave.wal
+rm -f master.fdb slave.fdb
 
 # Set admin password via environment variable for testing
 export FLYDB_ADMIN_PASSWORD="testadmin123"
 
+# Set encryption passphrase (encryption is enabled by default)
+export FLYDB_ENCRYPTION_PASSPHRASE="test-encryption-passphrase"
+
 echo "Starting Master..."
-./flydb -port 8081 -repl-port 9091 -role master -db master.wal > master.log 2>&1 &
+./flydb -port 8081 -repl-port 9091 -role master -db master.fdb > master.log 2>&1 &
 MASTER_PID=$!
 sleep 2
 
 echo "Starting Slave..."
-./flydb -port 8082 -role slave -master localhost:9091 -db slave.wal > slave.log 2>&1 &
+./flydb -port 8082 -role slave -master localhost:9091 -db slave.fdb > slave.log 2>&1 &
 SLAVE_PID=$!
 sleep 2
 

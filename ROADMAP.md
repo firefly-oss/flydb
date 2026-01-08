@@ -2,8 +2,8 @@
 
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
-**Version:** 01.26.1
-**Last Updated:** January 7, 2026
+**Version:** 01.26.7
+**Last Updated:** January 8, 2026
 
 ---
 
@@ -44,9 +44,15 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Views | Virtual tables (CREATE VIEW, DROP VIEW) | 01.26.1 |
 | Triggers | Automatic actions on INSERT/UPDATE/DELETE (BEFORE/AFTER) | 01.26.1 |
 | ALTER TABLE | ADD/DROP/RENAME/MODIFY COLUMN | 01.26.1 |
-| INTROSPECT Command | Database metadata inspection (USERS, TABLES, TABLE, INDEXES, SERVER, STATUS) | 01.26.1 |
+| INSPECT Command | Database metadata inspection (USERS, TABLES, TABLE, INDEXES, SERVER, STATUS) | 01.26.1 |
 | Row Count Information | All queries return affected row counts | 01.26.1 |
 | Pretty Table Formatting | Formatted table output in CLI | 01.26.1 |
+| Multi-Database Default | Multi-database mode always enabled, no single-database mode | 01.26.4 |
+| Enhanced INSPECT | Detailed output with columns, rows, sizes, timestamps | 01.26.4 |
+| CLI Database Flag | `-d` flag and `FLYDB_DATABASE` env var for database selection | 01.26.4 |
+| Data Directory Config | `FLYDB_DATA_DIR` env var, default `/var/lib/flydb` | 01.26.4 |
+| Role-Based Access Control | CREATE/DROP ROLE, GRANT/REVOKE ROLE, built-in roles | 01.26.5 |
+| RBAC Inspection | INSPECT ROLES, ROLE, USER, USER ROLES, USER PRIVILEGES | 01.26.5 |
 
 ### INSERT Enhancements
 
@@ -197,6 +203,12 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | ANSI-aware Formatting | Color output with proper terminal handling | 01.26.1 |
 | Multiple Output Formats | Table, JSON, and plain text output | 01.26.1 |
 | Progress Indicators | Spinners and progress bars for long operations | 01.26.1 |
+| Database Selection Flag | `-d` flag to specify database on CLI startup | 01.26.4 |
+| Database Prompt | Prompt shows current database (e.g., `flydb:mydb>`) | 01.26.4 |
+| Connect Shortcut | `\c <database>` command to switch databases | 01.26.4 |
+| Semicolon Statement Termination | SQL statements require `;` to execute (like psql/mysql) | 01.26.7 |
+| Smart Multi-line Continuation | Automatic `->` prompt for incomplete SQL statements | 01.26.7 |
+| Multi-line Cancel | Ctrl+C cancels multi-line input | 01.26.7 |
 
 ---
 
@@ -421,6 +433,11 @@ storage:
 
 | Version | Release Date | Highlights |
 |---------|--------------|------------|
+| 01.26.7 | January 2026 | Professional multi-line editing with semicolon termination (like psql/mysql) |
+| 01.26.6 | January 2026 | Role-Based Access Control (RBAC), built-in roles, mandatory authentication |
+| 01.26.4 | January 2026 | Multi-database mode default, enhanced INSPECT, CLI database selection, `/var/lib/flydb` default |
+| 01.26.3 | January 2026 | Interactive passphrase setup in wizard, encryption env var fix |
+| 01.26.2 | January 2026 | Encryption enabled by default (breaking change) |
 | 01.26.1 | January 2026 | Initial public release with full SQL support, triggers, replication, security, and encryption |
 
 ---

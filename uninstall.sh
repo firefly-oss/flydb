@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-readonly SCRIPT_VERSION="01.26.1"
+readonly SCRIPT_VERSION="01.26.4"
 
 PREFIX=""
 AUTO_CONFIRM=false
@@ -216,8 +216,11 @@ find_installations() {
         if [[ -x "$dir/flydb" ]]; then
             FOUND_BINARIES+=("$dir/flydb")
         fi
-        if [[ -x "$dir/fly-cli" ]]; then
-            FOUND_BINARIES+=("$dir/fly-cli")
+        if [[ -x "$dir/flydb-shell" ]]; then
+            FOUND_BINARIES+=("$dir/flydb-shell")
+        fi
+        if [[ -L "$dir/fsql" ]] || [[ -x "$dir/fsql" ]]; then
+            FOUND_BINARIES+=("$dir/fsql")
         fi
     done
 

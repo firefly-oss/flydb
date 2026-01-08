@@ -5,11 +5,15 @@
 # Licensed under the Apache License, Version 2.0
 #
 # A best-in-class installation experience with both interactive wizard
-# and non-interactive CLI modes.
+# and non-interactive CLI modes. Supports both local source builds and
+# remote installation via pre-built binaries.
 #
 # Usage:
+#   Remote install:  curl -sSL https://get.flydb.dev | bash
+#   With options:    curl -sSL https://get.flydb.dev | bash -s -- --prefix ~/.local --yes
 #   Interactive:     ./install.sh
 #   Non-interactive: ./install.sh --prefix /usr/local --yes
+#   From source:     ./install.sh --from-source
 #   Uninstall:       ./install.sh --uninstall
 #
 
@@ -19,8 +23,8 @@ set -euo pipefail
 # Configuration and Defaults
 # =============================================================================
 
-readonly SCRIPT_VERSION="01.26.1"
-readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.1}"
+readonly SCRIPT_VERSION="01.26.4"
+readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.4}"
 readonly GITHUB_REPO="firefly-software/flydb"
 readonly DOWNLOAD_BASE_URL="https://github.com/${GITHUB_REPO}/releases/download"
 
@@ -33,7 +37,10 @@ AUTO_CONFIRM=false
 UNINSTALL=false
 SPECIFIC_VERSION=""
 INTERACTIVE=true
-BUILD_FROM_SOURCE=true
+# Installation mode: "auto" (detect), "source" (build from source), "binary" (download pre-built)
+INSTALL_MODE="auto"
+# Temporary directory for downloads
+TEMP_DIR=""
 
 # Detected system info
 OS=""
@@ -45,6 +52,9 @@ INIT_SYSTEM=""
 declare -a INSTALLED_FILES=()
 declare -a CREATED_DIRS=()
 INSTALL_STARTED=false
+
+# Resolved installation mode after detection
+RESOLVED_INSTALL_MODE=""
 
 # =============================================================================
 # Colors and Formatting (matching pkg/cli/colors.go)
@@ -224,9 +234,18 @@ print_help() {
     echo -e "${BOLD}USAGE:${RESET}"
     echo "    $0 [OPTIONS]"
     echo ""
+    echo "    # Remote installation (download pre-built binaries)"
+    echo "    curl -sSL https://get.flydb.dev | bash"
+    echo ""
     echo -e "${BOLD}MODES:${RESET}"
     echo "    Interactive (default):  Run without arguments for guided installation"
     echo "    Non-interactive:        Use --yes with other options for scripted installs"
+    echo ""
+    echo -e "${BOLD}INSTALLATION SOURCE:${RESET}"
+    echo "    By default, the script auto-detects whether to build from source or"
+    echo "    download pre-built binaries:"
+    echo "    - If run from a FlyDB source directory with Go installed: builds from source"
+    echo "    - Otherwise: downloads pre-built binaries from GitHub releases"
     echo ""
     echo -e "${BOLD}OPTIONS:${RESET}"
     echo -e "    ${BOLD}--prefix <path>${RESET}"
@@ -236,6 +255,14 @@ print_help() {
     echo -e "    ${BOLD}--version <version>${RESET}"
     echo "        Specific FlyDB version to install"
     echo "        Default: latest (${FLYDB_VERSION})"
+    echo ""
+    echo -e "    ${BOLD}--from-source${RESET}"
+    echo "        Force building from source (requires Go 1.21+)"
+    echo "        Must be run from the FlyDB source directory"
+    echo ""
+    echo -e "    ${BOLD}--from-binary${RESET}"
+    echo "        Force downloading pre-built binaries from GitHub"
+    echo "        Useful when you want to skip building even in a source directory"
     echo ""
     echo -e "    ${BOLD}--no-service${RESET}"
     echo "        Skip system service installation (systemd/launchd)"
@@ -256,23 +283,32 @@ print_help() {
     echo "        Show this help message"
     echo ""
     echo -e "${BOLD}EXAMPLES:${RESET}"
-    echo "    # Interactive installation (recommended for first-time users)"
-    echo "    $0"
+    echo "    # Remote installation (recommended for most users)"
+    echo "    curl -sSL https://get.flydb.dev | bash"
+    echo ""
+    echo "    # Remote installation with options"
+    echo "    curl -sSL https://get.flydb.dev | bash -s -- --prefix ~/.local --yes"
+    echo ""
+    echo "    # Interactive installation from source directory"
+    echo "    ./install.sh"
     echo ""
     echo "    # Quick install with defaults, no prompts"
-    echo "    $0 --yes"
+    echo "    ./install.sh --yes"
     echo ""
     echo "    # Install to custom location"
-    echo "    $0 --prefix /opt/flydb --yes"
+    echo "    ./install.sh --prefix /opt/flydb --yes"
     echo ""
     echo "    # Install specific version without service"
-    echo "    $0 --version 01.26.0 --no-service --yes"
+    echo "    ./install.sh --version 01.26.0 --no-service --yes"
+    echo ""
+    echo "    # Force download binaries even in source directory"
+    echo "    ./install.sh --from-binary --yes"
     echo ""
     echo "    # User-local installation (no sudo required)"
-    echo "    $0 --prefix ~/.local --yes"
+    echo "    ./install.sh --prefix ~/.local --yes"
     echo ""
     echo "    # Uninstall FlyDB"
-    echo "    $0 --uninstall"
+    echo "    ./install.sh --uninstall"
     echo ""
     echo -e "${BOLD}ENVIRONMENT VARIABLES:${RESET}"
     echo "    FLYDB_VERSION     Override the default version to install"
@@ -402,6 +438,186 @@ get_available_disk_space() {
 }
 
 # =============================================================================
+# Installation Mode Detection
+# =============================================================================
+
+# Detect if we're running from a local source directory or remotely
+detect_install_mode() {
+    if [[ "$INSTALL_MODE" == "source" ]]; then
+        RESOLVED_INSTALL_MODE="source"
+        return
+    fi
+
+    if [[ "$INSTALL_MODE" == "binary" ]]; then
+        RESOLVED_INSTALL_MODE="binary"
+        return
+    fi
+
+    # Auto-detect: check if we're in a FlyDB source directory
+    if [[ -f "go.mod" ]] && grep -q "flydb" go.mod 2>/dev/null; then
+        # We're in a source directory
+        if command -v go &>/dev/null; then
+            RESOLVED_INSTALL_MODE="source"
+            print_info "Detected local source directory - will build from source"
+        else
+            print_warning "Source directory detected but Go not found - will download binaries"
+            RESOLVED_INSTALL_MODE="binary"
+        fi
+    else
+        # Not in source directory - download pre-built binaries
+        RESOLVED_INSTALL_MODE="binary"
+        print_info "Will download pre-built binaries from GitHub"
+    fi
+}
+
+# Get the download URL for the release archive
+get_download_url() {
+    local version="${SPECIFIC_VERSION:-$FLYDB_VERSION}"
+
+    # Remove 'v' prefix if present for consistency
+    version="${version#v}"
+
+    # Construct the archive name: flydb_<version>_<os>_<arch>.tar.gz
+    local archive_name="flydb_${version}_${OS}_${ARCH}.tar.gz"
+
+    echo "${DOWNLOAD_BASE_URL}/v${version}/${archive_name}"
+}
+
+# Create a temporary directory for downloads
+create_temp_dir() {
+    TEMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'flydb-install')
+    if [[ ! -d "$TEMP_DIR" ]]; then
+        print_error "Failed to create temporary directory"
+        exit 1
+    fi
+}
+
+# Clean up temporary directory
+cleanup_temp_dir() {
+    if [[ -n "$TEMP_DIR" ]] && [[ -d "$TEMP_DIR" ]]; then
+        rm -rf "$TEMP_DIR"
+        TEMP_DIR=""
+    fi
+}
+
+# Download and extract pre-built binaries
+download_binaries() {
+    print_step "Downloading FlyDB binaries..."
+
+    local version="${SPECIFIC_VERSION:-$FLYDB_VERSION}"
+    version="${version#v}"
+
+    local download_url
+    download_url=$(get_download_url)
+
+    create_temp_dir
+
+    local archive_path="$TEMP_DIR/flydb.tar.gz"
+
+    spinner_start "Downloading FlyDB v${version} for ${OS}/${ARCH}"
+
+    local http_code
+    http_code=$(curl -fsSL -w "%{http_code}" -o "$archive_path" "$download_url" 2>/dev/null) || true
+
+    if [[ "$http_code" != "200" ]] || [[ ! -f "$archive_path" ]]; then
+        spinner_error "Failed to download binaries (HTTP $http_code)"
+        echo ""
+        print_error "Could not download from: $download_url"
+        echo ""
+        print_info "Possible solutions:"
+        echo "  1. Check if version v${version} exists for ${OS}/${ARCH}"
+        echo "  2. Check your internet connection"
+        echo "  3. Build from source: git clone https://github.com/${GITHUB_REPO}.git && cd flydb && ./install.sh --from-source"
+        cleanup_temp_dir
+        exit 1
+    fi
+
+    spinner_success "Downloaded FlyDB v${version}"
+
+    spinner_start "Extracting binaries"
+
+    if ! tar -xzf "$archive_path" -C "$TEMP_DIR" 2>/dev/null; then
+        spinner_error "Failed to extract archive"
+        cleanup_temp_dir
+        exit 1
+    fi
+
+    # Verify extracted binaries exist
+    if [[ ! -f "$TEMP_DIR/flydb" ]] || [[ ! -f "$TEMP_DIR/flydb-shell" ]]; then
+        spinner_error "Archive does not contain expected binaries"
+        cleanup_temp_dir
+        exit 1
+    fi
+
+    spinner_success "Extracted binaries"
+    echo ""
+}
+
+# Install binaries from downloaded files
+install_downloaded_binaries() {
+    print_step "Installing binaries..."
+
+    INSTALL_STARTED=true
+
+    local bin_dir="${PREFIX}/bin"
+    local sudo_cmd
+    sudo_cmd=$(get_sudo_cmd "$bin_dir")
+
+    # Create bin directory
+    if [[ ! -d "$bin_dir" ]]; then
+        spinner_start "Creating directory $bin_dir"
+        if $sudo_cmd mkdir -p "$bin_dir" 2>/dev/null; then
+            spinner_success "Created $bin_dir"
+            CREATED_DIRS+=("$bin_dir")
+        else
+            spinner_error "Failed to create $bin_dir"
+            cleanup_temp_dir
+            exit 1
+        fi
+    else
+        print_substep "Directory exists: $bin_dir"
+    fi
+
+    # Install flydb
+    spinner_start "Installing flydb"
+    if $sudo_cmd cp "$TEMP_DIR/flydb" "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb"; then
+        spinner_success "Installed ${bin_dir}/flydb"
+        INSTALLED_FILES+=("$bin_dir/flydb")
+    else
+        spinner_error "Failed to install flydb"
+        cleanup_temp_dir
+        rollback
+        exit 1
+    fi
+
+    # Install flydb-shell
+    spinner_start "Installing flydb-shell"
+    if $sudo_cmd cp "$TEMP_DIR/flydb-shell" "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb-shell"; then
+        spinner_success "Installed ${bin_dir}/flydb-shell"
+        INSTALLED_FILES+=("$bin_dir/flydb-shell")
+    else
+        spinner_error "Failed to install flydb-shell"
+        cleanup_temp_dir
+        rollback
+        exit 1
+    fi
+
+    # Create fsql symlink for convenience
+    spinner_start "Creating fsql symlink"
+    if $sudo_cmd ln -sf "$bin_dir/flydb-shell" "$bin_dir/fsql"; then
+        spinner_success "Created ${bin_dir}/fsql symlink"
+        INSTALLED_FILES+=("$bin_dir/fsql")
+    else
+        spinner_error "Failed to create fsql symlink"
+    fi
+
+    # Clean up temp directory
+    cleanup_temp_dir
+
+    echo ""
+}
+
+# =============================================================================
 # Prerequisite Checks
 # =============================================================================
 
@@ -410,9 +626,9 @@ check_prerequisites() {
 
     local errors=0
 
-    # Check for required commands
+    # Check for required commands based on installation mode
     local required_commands=("curl" "tar")
-    if [[ "$BUILD_FROM_SOURCE" == true ]]; then
+    if [[ "$RESOLVED_INSTALL_MODE" == "source" ]]; then
         required_commands+=("go")
     fi
 
@@ -426,7 +642,7 @@ check_prerequisites() {
     done
 
     # Check Go version if building from source
-    if [[ "$BUILD_FROM_SOURCE" == true ]] && command -v go &>/dev/null; then
+    if [[ "$RESOLVED_INSTALL_MODE" == "source" ]] && command -v go &>/dev/null; then
         local go_version
         go_version=$(go version | grep -oE 'go[0-9]+\.[0-9]+' | sed 's/go//')
         local go_major go_minor
@@ -717,10 +933,19 @@ print_installation_summary() {
     double_separator 60
     echo ""
 
-    print_kv "FlyDB Version" "$FLYDB_VERSION"
+    local version="${SPECIFIC_VERSION:-$FLYDB_VERSION}"
+    version="${version#v}"
+    print_kv "FlyDB Version" "$version"
     print_kv "Operating System" "$OS ($DISTRO)"
     print_kv "Architecture" "$ARCH"
     print_kv "Install Directory" "${PREFIX}/bin"
+
+    # Show installation mode
+    if [[ "$RESOLVED_INSTALL_MODE" == "source" ]]; then
+        print_kv "Install Method" "${CYAN}Build from source${RESET}"
+    else
+        print_kv "Install Method" "${CYAN}Download binaries${RESET}"
+    fi
 
     if [[ "$INSTALL_SERVICE" == true ]]; then
         print_kv "System Service" "${GREEN}Yes${RESET} ($INIT_SYSTEM)"
@@ -867,12 +1092,12 @@ build_binaries() {
         exit 1
     fi
 
-    spinner_start "Building fly-cli client"
-    if go build -o fly-cli ./cmd/fly-cli 2>/dev/null; then
-        spinner_success "Built fly-cli client"
-        INSTALLED_FILES+=("./fly-cli")
+    spinner_start "Building flydb-shell client"
+    if go build -o flydb-shell ./cmd/flydb-shell 2>/dev/null; then
+        spinner_success "Built flydb-shell client"
+        INSTALLED_FILES+=("./flydb-shell")
     else
-        spinner_error "Failed to build fly-cli client"
+        spinner_error "Failed to build flydb-shell client"
         exit 1
     fi
 
@@ -913,15 +1138,24 @@ install_binaries() {
         exit 1
     fi
 
-    # Install fly-cli
-    spinner_start "Installing fly-cli"
-    if $sudo_cmd cp fly-cli "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/fly-cli"; then
-        spinner_success "Installed ${bin_dir}/fly-cli"
-        INSTALLED_FILES+=("$bin_dir/fly-cli")
+    # Install flydb-shell
+    spinner_start "Installing flydb-shell"
+    if $sudo_cmd cp flydb-shell "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb-shell"; then
+        spinner_success "Installed ${bin_dir}/flydb-shell"
+        INSTALLED_FILES+=("$bin_dir/flydb-shell")
     else
-        spinner_error "Failed to install fly-cli"
+        spinner_error "Failed to install flydb-shell"
         rollback
         exit 1
+    fi
+
+    # Create fsql symlink for convenience
+    spinner_start "Creating fsql symlink"
+    if $sudo_cmd ln -sf "$bin_dir/flydb-shell" "$bin_dir/fsql"; then
+        spinner_success "Created ${bin_dir}/fsql symlink"
+        INSTALLED_FILES+=("$bin_dir/fsql")
+    else
+        spinner_error "Failed to create fsql symlink"
     fi
 
     echo ""
@@ -996,10 +1230,11 @@ create_config_file() {
 #   FLYDB_REPL_PORT     - Replication port
 #   FLYDB_ROLE          - Server role (standalone, master, slave)
 #   FLYDB_MASTER_ADDR   - Master address for slave mode
-#   FLYDB_DB_PATH       - Path to database file
+#   FLYDB_DATA_DIR      - Data directory for database storage
 #   FLYDB_LOG_LEVEL     - Log level (debug, info, warn, error)
 #   FLYDB_LOG_JSON      - Enable JSON logging (true/false)
 #   FLYDB_ADMIN_PASSWORD - Initial admin password (first-time setup only)
+#   FLYDB_ENCRYPTION_PASSPHRASE - Encryption passphrase (required if encryption enabled)
 #   FLYDB_CONFIG_FILE   - Path to this configuration file
 
 # Server role: standalone, master, or slave
@@ -1011,7 +1246,7 @@ role = \"standalone\"
 # Network ports
 # Text protocol port (for nc/telnet connections)
 port = 8888
-# Binary protocol port (for fly-cli connections)
+# Binary protocol port (for fsql connections)
 binary_port = 8889
 # Replication port (master mode only)
 replication_port = 9999
@@ -1021,10 +1256,10 @@ replication_port = 9999
 # master_addr = \"localhost:9999\"
 
 # Storage
-# Path to the WAL (Write-Ahead Log) database file
-# User installations: ~/.local/share/flydb/flydb.wal
-# System installations: /var/lib/flydb/flydb.wal
-db_path = \"$data_dir/flydb.wal\"
+# Data directory for multi-database storage
+# User installations: ~/.local/share/flydb
+# System installations: /var/lib/flydb
+data_dir = \"$data_dir\"
 
 # Logging
 # Available levels: debug, info, warn, error
@@ -1228,14 +1463,21 @@ verify_installation() {
         ((errors++))
     fi
 
-    # Check fly-cli binary
-    if [[ -x "$bin_dir/fly-cli" ]]; then
+    # Check flydb-shell binary
+    if [[ -x "$bin_dir/flydb-shell" ]]; then
         local version
-        version=$("$bin_dir/fly-cli" --version 2>/dev/null | head -1 || echo "unknown")
-        print_substep "${GREEN}${ICON_SUCCESS}${RESET} fly-cli: $version"
+        version=$("$bin_dir/flydb-shell" --version 2>/dev/null | head -1 || echo "unknown")
+        print_substep "${GREEN}${ICON_SUCCESS}${RESET} flydb-shell: $version"
     else
-        print_substep "${RED}${ICON_ERROR}${RESET} fly-cli: not found or not executable"
+        print_substep "${RED}${ICON_ERROR}${RESET} flydb-shell: not found or not executable"
         ((errors++))
+    fi
+
+    # Check fsql symlink
+    if [[ -x "$bin_dir/fsql" ]]; then
+        print_substep "${GREEN}${ICON_SUCCESS}${RESET} fsql: symlink OK"
+    else
+        print_substep "${YELLOW}${ICON_WARNING}${RESET} fsql: symlink not found"
     fi
 
     echo ""
@@ -1265,7 +1507,7 @@ run_uninstall() {
     fi
 
     for dir in "${locations[@]}"; do
-        if [[ -x "$dir/flydb" ]] || [[ -x "$dir/fly-cli" ]]; then
+        if [[ -x "$dir/flydb" ]] || [[ -x "$dir/flydb-shell" ]]; then
             print_info "Found FlyDB installation in $dir"
             found=true
 
@@ -1287,12 +1529,21 @@ run_uninstall() {
                 fi
             fi
 
-            if [[ -x "$dir/fly-cli" ]]; then
-                spinner_start "Removing fly-cli"
-                if $sudo_cmd rm -f "$dir/fly-cli" 2>/dev/null; then
-                    spinner_success "Removed $dir/fly-cli"
+            if [[ -x "$dir/flydb-shell" ]]; then
+                spinner_start "Removing flydb-shell"
+                if $sudo_cmd rm -f "$dir/flydb-shell" 2>/dev/null; then
+                    spinner_success "Removed $dir/flydb-shell"
                 else
-                    spinner_error "Failed to remove $dir/fly-cli"
+                    spinner_error "Failed to remove $dir/flydb-shell"
+                fi
+            fi
+
+            if [[ -L "$dir/fsql" ]] || [[ -x "$dir/fsql" ]]; then
+                spinner_start "Removing fsql symlink"
+                if $sudo_cmd rm -f "$dir/fsql" 2>/dev/null; then
+                    spinner_success "Removed $dir/fsql"
+                else
+                    spinner_error "Failed to remove $dir/fsql"
                 fi
             fi
         fi
@@ -1477,9 +1728,9 @@ print_post_install() {
     echo -e "  ${YELLOW}${step_num}. Connect with the CLI client:${RESET}"
     echo ""
     if [[ "$in_path" == true ]]; then
-        echo -e "     ${CYAN}fly-cli${RESET}"
+        echo -e "     ${CYAN}fsql${RESET}"
     else
-        echo -e "     ${CYAN}${bin_dir}/fly-cli${RESET}"
+        echo -e "     ${CYAN}${bin_dir}/fsql${RESET}"
     fi
 
     echo ""
@@ -1536,6 +1787,14 @@ parse_args() {
                 INIT_DATABASE=true
                 shift
                 ;;
+            --from-source)
+                INSTALL_MODE="source"
+                shift
+                ;;
+            --from-binary)
+                INSTALL_MODE="binary"
+                shift
+                ;;
             --yes|-y)
                 AUTO_CONFIRM=true
                 INTERACTIVE=false
@@ -1561,7 +1820,8 @@ parse_args() {
     # If any argument was provided, assume non-interactive unless it's just --uninstall
     if [[ -n "$PREFIX" ]] || [[ -n "$SPECIFIC_VERSION" ]] || \
        [[ "$INSTALL_SERVICE" == false ]] || [[ "$CREATE_CONFIG" == false ]] || \
-       [[ "$INIT_DATABASE" == true ]] || [[ "$AUTO_CONFIRM" == true ]]; then
+       [[ "$INIT_DATABASE" == true ]] || [[ "$AUTO_CONFIRM" == true ]] || \
+       [[ "$INSTALL_MODE" != "auto" ]]; then
         INTERACTIVE=false
     fi
 }
@@ -1578,6 +1838,9 @@ cleanup() {
 
     # Stop sudo keepalive background process
     stop_sudo_keepalive
+
+    # Clean up temporary directory
+    cleanup_temp_dir
 
     # Only rollback if we were in the middle of installation and there was an error
     if [[ "$INSTALL_STARTED" == true ]] && [[ $exit_code -ne 0 ]]; then
@@ -1611,6 +1874,9 @@ main() {
     detect_arch
     detect_init_system
 
+    # Detect installation mode (source vs binary)
+    detect_install_mode
+
     # Set default prefix if not specified
     if [[ -z "$PREFIX" ]]; then
         PREFIX=$(get_default_prefix)
@@ -1640,11 +1906,18 @@ main() {
         exit 1
     fi
 
-    # Build from source
-    build_binaries
-
-    # Install binaries
-    install_binaries
+    # Build or download binaries based on installation mode
+    if [[ "$RESOLVED_INSTALL_MODE" == "source" ]]; then
+        # Build from source
+        build_binaries
+        # Install binaries from local build
+        install_binaries
+    else
+        # Download pre-built binaries
+        download_binaries
+        # Install downloaded binaries
+        install_downloaded_binaries
+    fi
 
     # Create config file
     create_config_file

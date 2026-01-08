@@ -29,7 +29,7 @@ func setupCatalogTest(t *testing.T) (*Catalog, string, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	walPath := tmpDir + "/test.wal"
+	walPath := tmpDir + "/test.fdb"
 	store, err := storage.NewKVStore(walPath)
 	if err != nil {
 		os.RemoveAll(tmpDir)
@@ -108,7 +108,7 @@ func TestCatalogPersistence(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	walPath := tmpDir + "/test.wal"
+	walPath := tmpDir + "/test.fdb"
 
 	// Create store and catalog, add a table
 	store1, err := storage.NewKVStore(walPath)

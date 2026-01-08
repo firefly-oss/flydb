@@ -5,13 +5,16 @@ echo "Building flydb..."
 go build -o flydb ./cmd/flydb
 
 # Cleanup
-rm -f auth.wal
+rm -f auth.fdb
 
 # Set admin password via environment variable for testing
 export FLYDB_ADMIN_PASSWORD="testadmin123"
 
+# Set encryption passphrase (encryption is enabled by default)
+export FLYDB_ENCRYPTION_PASSPHRASE="test-encryption-passphrase"
+
 echo "Starting Server..."
-./flydb -port 8085 -db auth.wal > auth.log 2>&1 &
+./flydb -port 8085 -db auth.fdb > auth.log 2>&1 &
 PID=$!
 sleep 2
 
@@ -74,5 +77,5 @@ fi
 # Cleanup
 kill $PID
 wait $PID 2>/dev/null || true
-rm -f auth.wal
+rm -f auth.fdb
 echo "Auth & RLS Tests Passed!"

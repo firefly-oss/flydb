@@ -67,6 +67,8 @@ package sql
 import (
 	"encoding/json"
 	"errors"
+	"time"
+
 	"flydb/internal/storage"
 )
 
@@ -117,6 +119,9 @@ type TableSchema struct {
 	Columns     []ColumnDef       // Ordered list of column definitions
 	Constraints []TableConstraint // Table-level constraints (composite keys, etc.)
 	AutoIncSeq  map[string]int64  // Auto-increment sequence values per column
+	CreatedAt   time.Time         `json:"created_at,omitempty"`  // When the table was created
+	ModifiedAt  time.Time         `json:"modified_at,omitempty"` // When the table was last modified
+	Owner       string            `json:"owner,omitempty"`       // User who created the table
 }
 
 // GetPrimaryKeyColumns returns the names of all primary key columns.
@@ -335,11 +340,14 @@ func (c *Catalog) CreateTableWithConstraints(name string, cols []ColumnDef, cons
 	}
 
 	// Create the schema and add to the in-memory cache.
+	now := time.Now()
 	schema := TableSchema{
 		Name:        name,
 		Columns:     cols,
 		Constraints: constraints,
 		AutoIncSeq:  autoIncSeq,
+		CreatedAt:   now,
+		ModifiedAt:  now,
 	}
 	c.Tables[name] = schema
 
@@ -535,6 +543,9 @@ func (c *Catalog) AddColumn(tableName string, col ColumnDef) error {
 		schema.AutoIncSeq[col.Name] = 0
 	}
 
+	// Update modification time
+	schema.ModifiedAt = time.Now()
+
 	// Update the cache
 	c.Tables[tableName] = schema
 
@@ -588,6 +599,9 @@ func (c *Catalog) DropColumn(tableName, columnName string) error {
 	if schema.AutoIncSeq != nil {
 		delete(schema.AutoIncSeq, columnName)
 	}
+
+	// Update modification time
+	schema.ModifiedAt = time.Now()
 
 	// Update the cache
 	c.Tables[tableName] = schema
@@ -647,6 +661,9 @@ func (c *Catalog) RenameColumn(tableName, oldName, newName string) error {
 		}
 	}
 
+	// Update modification time
+	schema.ModifiedAt = time.Now()
+
 	// Update the cache
 	c.Tables[tableName] = schema
 
@@ -702,6 +719,9 @@ func (c *Catalog) ModifyColumn(tableName, columnName, newType string, newConstra
 	if !found {
 		return errors.New("column not found: " + columnName)
 	}
+
+	// Update modification time
+	schema.ModifiedAt = time.Now()
 
 	// Update the cache
 	c.Tables[tableName] = schema

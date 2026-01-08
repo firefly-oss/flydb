@@ -28,7 +28,7 @@ func setupIndexTest(t *testing.T) (*IndexManager, *KVStore, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	store, err := NewKVStore(tmpDir + "/test.wal")
+	store, err := NewKVStore(tmpDir + "/test.fdb")
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		t.Fatalf("Failed to create KVStore: %v", err)
