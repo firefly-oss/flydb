@@ -32,8 +32,19 @@ Interactive Flow:
 
  1. Display welcome message and mode selection
  2. Prompt for mode-specific configuration
- 3. Validate inputs and display summary
- 4. Return configuration for server startup
+ 3. Configure encryption and passphrase
+ 4. Validate inputs and display summary
+ 5. Return configuration for server startup
+
+Encryption Passphrase:
+======================
+
+When encryption is enabled (the default), the wizard handles passphrase configuration:
+
+  - If FLYDB_ENCRYPTION_PASSPHRASE environment variable is set, it is used automatically
+  - Otherwise, the user is prompted to enter a passphrase interactively
+  - User can skip by pressing Enter (must set env var before starting)
+  - The passphrase is stored in memory only, never written to config files
 */
 package wizard
 
@@ -45,8 +56,10 @@ import (
 	"strconv"
 	"strings"
 
+	"flydb/internal/auth"
 	"flydb/internal/banner"
 	"flydb/internal/config"
+	"flydb/internal/storage"
 	"flydb/pkg/cli"
 )
 
@@ -66,53 +79,67 @@ const (
 
 // Config holds the configuration collected by the wizard.
 type Config struct {
-	Port          string
-	BinaryPort    string
-	ReplPort      string
-	Role          string
-	MasterAddr    string
-	DBPath        string
-	LogLevel      string
-	LogJSON       bool
-	AdminPassword string // Admin password for first-time setup (empty = generate random)
-	IsFirstSetup  bool   // True if this is a first-time setup requiring admin initialization
-	ConfigFile    string // Path to the configuration file (if loaded or saved)
-	SaveConfig    bool   // Whether to save the configuration to a file
+	Port                 string
+	BinaryPort           string
+	ReplPort             string
+	Role                 string
+	MasterAddr           string
+	DBPath               string
+	DataDir              string // Directory for multi-database storage
+	MultiDBEnabled       bool   // Enable multi-database mode
+	EncryptionEnabled    bool   // Enable data-at-rest encryption
+	EncryptionPassphrase string // Passphrase for encryption (not stored in config file)
+	GeneratedPassphrase  string // Auto-generated passphrase (for display only)
+	LogLevel             string
+	LogJSON              bool
+	AdminPassword        string // Admin password for first-time setup (empty = generate random)
+	IsFirstSetup         bool   // True if this is a first-time setup requiring admin initialization
+	ConfigFile           string // Path to the configuration file (if loaded or saved)
+	SaveConfig           bool   // Whether to save the configuration to a file
 }
 
 // DefaultConfig returns the default configuration values.
+// Note: Encryption is enabled by default for security. Users must provide a passphrase
+// via the FLYDB_ENCRYPTION_PASSPHRASE environment variable.
 func DefaultConfig() Config {
 	return Config{
-		Port:          "8888",
-		BinaryPort:    "8889",
-		ReplPort:      "9999",
-		Role:          "standalone",
-		MasterAddr:    "",
-		DBPath:        "flydb.wal",
-		LogLevel:      "info",
-		LogJSON:       false,
-		AdminPassword: "",
-		IsFirstSetup:  false,
-		ConfigFile:    "",
-		SaveConfig:    false,
+		Port:              "8888",
+		BinaryPort:        "8889",
+		ReplPort:          "9999",
+		Role:              "standalone",
+		MasterAddr:        "",
+		DBPath:            "flydb.fdb",
+		DataDir:           config.GetDefaultDataDir(),
+		MultiDBEnabled:    true, // Multi-database mode is always enabled
+		EncryptionEnabled: true, // Encryption enabled by default for security
+		LogLevel:          "info",
+		LogJSON:           false,
+		AdminPassword:     "",
+		IsFirstSetup:      false,
+		ConfigFile:        "",
+		SaveConfig:        false,
 	}
 }
 
 // FromConfig creates a wizard Config from a config.Config.
 func FromConfig(cfg *config.Config) Config {
 	return Config{
-		Port:          strconv.Itoa(cfg.Port),
-		BinaryPort:    strconv.Itoa(cfg.BinaryPort),
-		ReplPort:      strconv.Itoa(cfg.ReplPort),
-		Role:          cfg.Role,
-		MasterAddr:    cfg.MasterAddr,
-		DBPath:        cfg.DBPath,
-		LogLevel:      cfg.LogLevel,
-		LogJSON:       cfg.LogJSON,
-		AdminPassword: cfg.AdminPassword,
-		IsFirstSetup:  false,
-		ConfigFile:    cfg.ConfigFile,
-		SaveConfig:    false,
+		Port:                 strconv.Itoa(cfg.Port),
+		BinaryPort:           strconv.Itoa(cfg.BinaryPort),
+		ReplPort:             strconv.Itoa(cfg.ReplPort),
+		Role:                 cfg.Role,
+		MasterAddr:           cfg.MasterAddr,
+		DBPath:               cfg.DBPath,
+		DataDir:              cfg.DataDir,
+		MultiDBEnabled:       cfg.DataDir != "",
+		EncryptionEnabled:    cfg.EncryptionEnabled,
+		EncryptionPassphrase: cfg.EncryptionPassphrase,
+		LogLevel:             cfg.LogLevel,
+		LogJSON:              cfg.LogJSON,
+		AdminPassword:        cfg.AdminPassword,
+		IsFirstSetup:         false,
+		ConfigFile:           cfg.ConfigFile,
+		SaveConfig:           false,
 	}
 }
 
@@ -122,17 +149,25 @@ func (c *Config) ToConfig() *config.Config {
 	binaryPort, _ := strconv.Atoi(c.BinaryPort)
 	replPort, _ := strconv.Atoi(c.ReplPort)
 
+	dataDir := c.DataDir
+	if !c.MultiDBEnabled {
+		dataDir = ""
+	}
+
 	return &config.Config{
-		Port:          port,
-		BinaryPort:    binaryPort,
-		ReplPort:      replPort,
-		Role:          c.Role,
-		MasterAddr:    c.MasterAddr,
-		DBPath:        c.DBPath,
-		LogLevel:      c.LogLevel,
-		LogJSON:       c.LogJSON,
-		AdminPassword: c.AdminPassword,
-		ConfigFile:    c.ConfigFile,
+		Port:                 port,
+		BinaryPort:           binaryPort,
+		ReplPort:             replPort,
+		Role:                 c.Role,
+		MasterAddr:           c.MasterAddr,
+		DBPath:               c.DBPath,
+		DataDir:              dataDir,
+		EncryptionEnabled:    c.EncryptionEnabled,
+		EncryptionPassphrase: c.EncryptionPassphrase,
+		LogLevel:             c.LogLevel,
+		LogJSON:              c.LogJSON,
+		AdminPassword:        c.AdminPassword,
+		ConfigFile:           c.ConfigFile,
 	}
 }
 
@@ -187,31 +222,36 @@ func DisplayExistingConfig(cfg *config.Config, configPath string) {
 
 	// Role display with color and icon
 	var roleDisplay string
-	var roleIcon string
 	switch cfg.Role {
 	case "standalone":
 		roleDisplay = "Standalone"
-		roleIcon = "◉"
 	case "master":
 		roleDisplay = "Master"
-		roleIcon = "★"
 	case "slave":
 		roleDisplay = "Slave"
-		roleIcon = "◎"
 	default:
 		roleDisplay = cfg.Role
-		roleIcon = "○"
 	}
 
-	fmt.Printf("    %s %-20s %s %s\n", cli.Dimmed("Role:"), roleDisplay, cli.Dimmed(roleIcon), cli.Dimmed(getRoleDescription(cfg.Role)))
-	fmt.Printf("    %s %-20s %s\n", cli.Dimmed("Ports:"), fmt.Sprintf("%d (text), %d (binary)", cfg.Port, cfg.BinaryPort), cli.Dimmed(fmt.Sprintf("repl: %d", cfg.ReplPort)))
+	fmt.Printf("    %-16s %s %s\n", cli.Dimmed("Role:"), roleDisplay, cli.Dimmed(getRoleDescription(cfg.Role)))
+	fmt.Printf("    %-16s %d\n", cli.Dimmed("Text Port:"), cfg.Port)
+	fmt.Printf("    %-16s %d\n", cli.Dimmed("Binary Port:"), cfg.BinaryPort)
+	if cfg.Role == "master" {
+		fmt.Printf("    %-16s %d\n", cli.Dimmed("Repl Port:"), cfg.ReplPort)
+	}
 
 	if cfg.Role == "slave" && cfg.MasterAddr != "" {
-		fmt.Printf("    %s %s\n", cli.Dimmed("Master:"), cfg.MasterAddr)
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Master:"), cfg.MasterAddr)
 	}
 
-	fmt.Printf("    %s %s\n", cli.Dimmed("Database:"), cfg.DBPath)
-	fmt.Printf("    %s %s %s\n", cli.Dimmed("Logging:"), cfg.LogLevel, formatJSONLogging(cfg.LogJSON))
+	// Storage
+	fmt.Printf("    %-16s %s\n", cli.Dimmed("Data Directory:"), cfg.DataDir)
+
+	// Encryption
+	fmt.Printf("    %-16s %s\n", cli.Dimmed("Encryption:"), formatEncryptionWithPassphrase(cfg.EncryptionEnabled, cfg.EncryptionPassphrase))
+
+	// Logging
+	fmt.Printf("    %-16s %s%s\n", cli.Dimmed("Log Level:"), cfg.LogLevel, formatJSONLogging(cfg.LogJSON))
 	fmt.Println()
 }
 
@@ -235,6 +275,25 @@ func formatJSONLogging(enabled bool) string {
 		return cli.Dimmed("(JSON output)")
 	}
 	return ""
+}
+
+// formatEncryption formats the encryption setting.
+func formatEncryption(enabled bool) string {
+	if enabled {
+		return cli.Success("enabled")
+	}
+	return cli.Dimmed("disabled")
+}
+
+// formatEncryptionWithPassphrase formats the encryption setting with passphrase status.
+func formatEncryptionWithPassphrase(enabled bool, passphrase string) string {
+	if !enabled {
+		return cli.Dimmed("disabled")
+	}
+	if passphrase != "" {
+		return cli.Success("enabled") + " " + cli.Success("(passphrase set)")
+	}
+	return cli.Success("enabled") + " " + cli.Warning("(passphrase required)")
 }
 
 // PromptConfigChoice asks the user what they want to do with the existing configuration.
@@ -333,6 +392,73 @@ func RunWithOptions(needsAdminSetup bool) *Config {
 			wizardCfg = FromConfig(existingCfg)
 			wizardCfg.IsFirstSetup = needsAdminSetup
 			fmt.Println()
+
+			// Handle encryption passphrase if encryption is enabled
+			if wizardCfg.EncryptionEnabled {
+				envPassphrase := os.Getenv(config.EnvEncryptionPassphrase)
+				if envPassphrase != "" {
+					wizardCfg.EncryptionPassphrase = envPassphrase
+					fmt.Printf("    %s Encryption passphrase loaded from %s\n", cli.Success("✓"), cli.Highlight("FLYDB_ENCRYPTION_PASSPHRASE"))
+					fmt.Println()
+				} else {
+					// Check if this is first-time setup (no data exists yet)
+					isFirstTimeSetup := !storage.DataDirectoryHasData(wizardCfg.DataDir)
+					if isFirstTimeSetup {
+						// Auto-generate passphrase for first-time setup
+						generatedPassphrase, err := auth.GenerateSecurePassword(24)
+						if err != nil {
+							cli.PrintError("Failed to generate passphrase: %s", err.Error())
+							return nil
+						}
+						wizardCfg.EncryptionPassphrase = generatedPassphrase
+						wizardCfg.GeneratedPassphrase = generatedPassphrase
+
+						fmt.Println()
+						fmt.Println("  " + cli.Warning("═══════════════════════════════════════════════════════════"))
+						fmt.Println("  " + cli.Warning("  FIRST-TIME SETUP: Encryption Passphrase Generated"))
+						fmt.Println("  " + cli.Warning("═══════════════════════════════════════════════════════════"))
+						fmt.Println()
+						fmt.Printf("    %s %s\n", cli.Dimmed("Passphrase:"), cli.Highlight(generatedPassphrase))
+						fmt.Println()
+						fmt.Println("  " + cli.Warning("IMPORTANT: Save this passphrase securely!"))
+						fmt.Println("  " + cli.Warning("Data cannot be recovered without it!"))
+						fmt.Println()
+						fmt.Printf("    %s\n", cli.Dimmed("Set this environment variable before starting:"))
+						fmt.Printf("    %s\n", cli.Info("export FLYDB_ENCRYPTION_PASSPHRASE=\""+generatedPassphrase+"\""))
+						fmt.Println()
+						fmt.Println("  " + cli.Warning("═══════════════════════════════════════════════════════════"))
+						fmt.Println()
+					} else {
+						// Existing data but no passphrase - MUST prompt for it
+						fmt.Println()
+						cli.PrintError("Encryption is enabled but no passphrase was provided.")
+						fmt.Println()
+						fmt.Println("  " + cli.Warning("Existing encrypted data was found in: ") + cli.Highlight(wizardCfg.DataDir))
+						fmt.Println()
+						fmt.Println("  " + cli.Highlight("You MUST provide the original passphrase to access your data."))
+						fmt.Println()
+						fmt.Println("  " + cli.Dimmed("Options:"))
+						fmt.Println("    1. Set the environment variable and restart:")
+						fmt.Println("       " + cli.Info("export FLYDB_ENCRYPTION_PASSPHRASE=\"your-passphrase\""))
+						fmt.Println()
+						fmt.Println("    2. Enter the passphrase now:")
+						fmt.Println()
+						passphrase := promptPassword(reader, "  Encryption passphrase")
+						if passphrase == "" {
+							fmt.Println()
+							cli.PrintError("Passphrase is required to access encrypted data.")
+							fmt.Println()
+							fmt.Println("  " + cli.Warning("If you have lost your passphrase, your data cannot be recovered."))
+							fmt.Println()
+							return nil
+						}
+						wizardCfg.EncryptionPassphrase = passphrase
+						fmt.Println()
+						fmt.Printf("    %s Passphrase set\n", cli.Success("✓"))
+						fmt.Println()
+					}
+				}
+			}
 
 			// Still need to handle admin setup if required
 			if needsAdminSetup {
@@ -502,8 +628,71 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 	// Configure storage
 	printStepHeader(stepNum, "Storage")
 	fmt.Println()
-	cfg.DBPath = promptWithDefault(reader, "  Database file path", cfg.DBPath)
+
+	// FlyDB always uses multi-database mode - ask for data directory
+	defaultDataDir := config.GetDefaultDataDir()
+	fmt.Printf("    %s FlyDB stores each database in a separate directory\n", cli.Dimmed("•"))
+	fmt.Printf("    %s Supports CREATE DATABASE, DROP DATABASE, USE commands\n", cli.Dimmed("•"))
+	fmt.Printf("    %s Default location: %s\n", cli.Dimmed("•"), cli.Info(defaultDataDir))
 	fmt.Println()
+
+	if cfg.DataDir == "" {
+		cfg.DataDir = defaultDataDir
+	}
+	cfg.DataDir = promptWithDefault(reader, "  Data directory for databases", cfg.DataDir)
+	cfg.MultiDBEnabled = true // Always enabled
+	fmt.Println()
+
+	// Configure encryption
+	stepNum++
+	printStepHeader(stepNum, "Data-at-Rest Encryption")
+	fmt.Println()
+	fmt.Printf("    %s Encrypts WAL data on disk using AES-256-GCM\n", cli.Dimmed("•"))
+	fmt.Printf("    %s %s\n", cli.Dimmed("•"), cli.Warning("Encryption is enabled by default for security"))
+	fmt.Printf("    %s %s\n", cli.Dimmed("•"), cli.Warning("Keep your passphrase safe - data cannot be recovered without it!"))
+	fmt.Println()
+	defaultEncryption := "y" // Encryption enabled by default
+	if !cfg.EncryptionEnabled {
+		defaultEncryption = "n"
+	}
+	encryptionChoice := promptWithDefault(reader, "  Enable encryption? (y/n)", defaultEncryption)
+	cfg.EncryptionEnabled = strings.ToLower(encryptionChoice) == "y" || strings.ToLower(encryptionChoice) == "yes"
+	fmt.Println()
+
+	// If encryption is enabled, prompt for passphrase
+	if cfg.EncryptionEnabled {
+		// Check if passphrase is already set via environment variable
+		envPassphrase := os.Getenv(config.EnvEncryptionPassphrase)
+		if envPassphrase != "" {
+			cfg.EncryptionPassphrase = envPassphrase
+			fmt.Printf("    %s Passphrase detected from %s environment variable\n", cli.Success("✓"), cli.Highlight("FLYDB_ENCRYPTION_PASSPHRASE"))
+			fmt.Println()
+		} else {
+			// Prompt for passphrase
+			fmt.Printf("    %s Enter a passphrase, or press %s for auto-generated\n", cli.Dimmed("•"), cli.Highlight("Enter"))
+			fmt.Println()
+			passphrase := promptPassword(reader, "  Encryption passphrase")
+			if passphrase != "" {
+				cfg.EncryptionPassphrase = passphrase
+				fmt.Println()
+				fmt.Printf("    %s Passphrase set successfully\n", cli.Success("✓"))
+			} else {
+				// Auto-generate passphrase
+				generatedPassphrase, err := auth.GenerateSecurePassword(24)
+				if err != nil {
+					fmt.Println()
+					cli.PrintError("  Failed to generate passphrase: %s", err.Error())
+					fmt.Println()
+				} else {
+					cfg.EncryptionPassphrase = generatedPassphrase
+					cfg.GeneratedPassphrase = generatedPassphrase // Store for display
+					fmt.Println()
+					fmt.Printf("    %s Passphrase auto-generated\n", cli.Success("✓"))
+				}
+			}
+			fmt.Println()
+		}
+	}
 
 	// Configure logging
 	stepNum++
@@ -613,32 +802,56 @@ func printSummary(cfg *Config) {
 	// Role display
 	roleDisplay := cfg.Role
 	roleDesc := getRoleDescription(cfg.Role)
-	fmt.Printf("    %s %s %s\n", cli.Dimmed("Role:"), roleDisplay, cli.Dimmed(roleDesc))
+	fmt.Printf("    %-16s %s %s\n", cli.Dimmed("Role:"), roleDisplay, cli.Dimmed(roleDesc))
 
 	// Ports
-	ports := fmt.Sprintf("%s (text), %s (binary)", cfg.Port, cfg.BinaryPort)
+	fmt.Printf("    %-16s %s\n", cli.Dimmed("Text Port:"), cfg.Port)
+	fmt.Printf("    %-16s %s\n", cli.Dimmed("Binary Port:"), cfg.BinaryPort)
 	if cfg.Role == "master" {
-		ports += fmt.Sprintf(", %s (repl)", cfg.ReplPort)
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Repl Port:"), cfg.ReplPort)
 	}
-	fmt.Printf("    %s %s\n", cli.Dimmed("Ports:"), ports)
 
 	if cfg.Role == "slave" {
-		fmt.Printf("    %s %s\n", cli.Dimmed("Master:"), cfg.MasterAddr)
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Master:"), cfg.MasterAddr)
 	}
 
-	fmt.Printf("    %s %s\n", cli.Dimmed("Database:"), cfg.DBPath)
-	fmt.Printf("    %s %s\n", cli.Dimmed("Logging:"), cfg.LogLevel+formatJSONLogging(cfg.LogJSON))
+	// Storage
+	fmt.Printf("    %-16s %s\n", cli.Dimmed("Data Directory:"), cfg.DataDir)
 
+	// Encryption
+	encStatus := formatEncryptionWithPassphrase(cfg.EncryptionEnabled, cfg.EncryptionPassphrase)
+	fmt.Printf("    %-16s %s\n", cli.Dimmed("Encryption:"), encStatus)
+
+	// Show generated passphrase if applicable
+	if cfg.GeneratedPassphrase != "" {
+		fmt.Println()
+		fmt.Println("  " + cli.Warning("═══════════════════════════════════════════════════════"))
+		fmt.Println("  " + cli.Warning("  IMPORTANT: Save this encryption passphrase securely!"))
+		fmt.Println("  " + cli.Warning("═══════════════════════════════════════════════════════"))
+		fmt.Println()
+		fmt.Printf("    %s %s\n", cli.Dimmed("Passphrase:"), cli.Highlight(cfg.GeneratedPassphrase))
+		fmt.Println()
+		fmt.Printf("    %s\n", cli.Dimmed("Set this environment variable before starting:"))
+		fmt.Printf("    %s\n", cli.Info("export FLYDB_ENCRYPTION_PASSPHRASE=\""+cfg.GeneratedPassphrase+"\""))
+		fmt.Println()
+		fmt.Println("  " + cli.Warning("═══════════════════════════════════════════════════════"))
+	}
+
+	// Logging
+	fmt.Printf("    %-16s %s%s\n", cli.Dimmed("Log Level:"), cfg.LogLevel, formatJSONLogging(cfg.LogJSON))
+
+	// Admin password
 	if cfg.IsFirstSetup {
 		if cfg.AdminPassword == "" {
-			fmt.Printf("    %s %s\n", cli.Dimmed("Admin:"), cli.Warning("auto-generated"))
+			fmt.Printf("    %-16s %s\n", cli.Dimmed("Admin Password:"), cli.Warning("auto-generated (will be displayed at startup)"))
 		} else {
-			fmt.Printf("    %s %s\n", cli.Dimmed("Admin:"), cli.Success("user-specified"))
+			fmt.Printf("    %-16s %s\n", cli.Dimmed("Admin Password:"), cli.Success("user-specified"))
 		}
 	}
 
+	// Config file
 	if cfg.SaveConfig && cfg.ConfigFile != "" {
-		fmt.Printf("    %s %s\n", cli.Dimmed("Config:"), cli.Success(cfg.ConfigFile))
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Config File:"), cli.Success(cfg.ConfigFile))
 	}
 	fmt.Println()
 }

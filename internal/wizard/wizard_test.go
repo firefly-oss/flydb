@@ -39,8 +39,12 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Role != "standalone" {
 		t.Errorf("Expected default role 'standalone', got '%s'", cfg.Role)
 	}
-	if cfg.DBPath != "flydb.wal" {
-		t.Errorf("Expected default db_path 'flydb.wal', got '%s'", cfg.DBPath)
+	if cfg.DBPath != "flydb.fdb" {
+		t.Errorf("Expected default db_path 'flydb.fdb', got '%s'", cfg.DBPath)
+	}
+	// Encryption is enabled by default for security
+	if cfg.EncryptionEnabled != true {
+		t.Errorf("Expected default encryption_enabled true (security default), got %v", cfg.EncryptionEnabled)
 	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("Expected default log_level 'info', got '%s'", cfg.LogLevel)
@@ -52,15 +56,16 @@ func TestDefaultConfig(t *testing.T) {
 
 func TestFromConfig(t *testing.T) {
 	cfg := &config.Config{
-		Port:       9000,
-		BinaryPort: 9001,
-		ReplPort:   9002,
-		Role:       "master",
-		MasterAddr: "localhost:9999",
-		DBPath:     "/tmp/test.wal",
-		LogLevel:   "debug",
-		LogJSON:    true,
-		ConfigFile: "/etc/flydb/flydb.conf",
+		Port:              9000,
+		BinaryPort:        9001,
+		ReplPort:          9002,
+		Role:              "master",
+		MasterAddr:        "localhost:9999",
+		DBPath:            "/tmp/test.fdb",
+		EncryptionEnabled: true,
+		LogLevel:          "debug",
+		LogJSON:           true,
+		ConfigFile:        "/etc/flydb/flydb.conf",
 	}
 
 	wizardCfg := FromConfig(cfg)
@@ -80,8 +85,11 @@ func TestFromConfig(t *testing.T) {
 	if wizardCfg.MasterAddr != "localhost:9999" {
 		t.Errorf("Expected master_addr 'localhost:9999', got '%s'", wizardCfg.MasterAddr)
 	}
-	if wizardCfg.DBPath != "/tmp/test.wal" {
-		t.Errorf("Expected db_path '/tmp/test.wal', got '%s'", wizardCfg.DBPath)
+	if wizardCfg.DBPath != "/tmp/test.fdb" {
+		t.Errorf("Expected db_path '/tmp/test.fdb', got '%s'", wizardCfg.DBPath)
+	}
+	if wizardCfg.EncryptionEnabled != true {
+		t.Errorf("Expected encryption_enabled true, got %v", wizardCfg.EncryptionEnabled)
 	}
 	if wizardCfg.LogLevel != "debug" {
 		t.Errorf("Expected log_level 'debug', got '%s'", wizardCfg.LogLevel)
@@ -96,15 +104,16 @@ func TestFromConfig(t *testing.T) {
 
 func TestToConfig(t *testing.T) {
 	wizardCfg := &Config{
-		Port:       "9000",
-		BinaryPort: "9001",
-		ReplPort:   "9002",
-		Role:       "slave",
-		MasterAddr: "master.example.com:9999",
-		DBPath:     "/var/lib/flydb/data.wal",
-		LogLevel:   "warn",
-		LogJSON:    true,
-		ConfigFile: "./flydb.conf",
+		Port:              "9000",
+		BinaryPort:        "9001",
+		ReplPort:          "9002",
+		Role:              "slave",
+		MasterAddr:        "master.example.com:9999",
+		DBPath:            "/var/lib/flydb/data.fdb",
+		EncryptionEnabled: true,
+		LogLevel:          "warn",
+		LogJSON:           true,
+		ConfigFile:        "./flydb.conf",
 	}
 
 	cfg := wizardCfg.ToConfig()
@@ -124,8 +133,11 @@ func TestToConfig(t *testing.T) {
 	if cfg.MasterAddr != "master.example.com:9999" {
 		t.Errorf("Expected master_addr 'master.example.com:9999', got '%s'", cfg.MasterAddr)
 	}
-	if cfg.DBPath != "/var/lib/flydb/data.wal" {
-		t.Errorf("Expected db_path '/var/lib/flydb/data.wal', got '%s'", cfg.DBPath)
+	if cfg.DBPath != "/var/lib/flydb/data.fdb" {
+		t.Errorf("Expected db_path '/var/lib/flydb/data.fdb', got '%s'", cfg.DBPath)
+	}
+	if cfg.EncryptionEnabled != true {
+		t.Errorf("Expected encryption_enabled true, got %v", cfg.EncryptionEnabled)
 	}
 	if cfg.LogLevel != "warn" {
 		t.Errorf("Expected log_level 'warn', got '%s'", cfg.LogLevel)
@@ -174,7 +186,7 @@ func TestSaveConfigToFile(t *testing.T) {
 		ReplPort:   "7779",
 		Role:       "master",
 		MasterAddr: "",
-		DBPath:     "/tmp/test.wal",
+		DBPath:     "/tmp/test.fdb",
 		LogLevel:   "debug",
 		LogJSON:    true,
 	}
@@ -220,7 +232,7 @@ func TestLoadExistingConfig(t *testing.T) {
 port = 9000
 binary_port = 9001
 replication_port = 9002
-db_path = "/tmp/test.wal"
+db_path = "/tmp/test.fdb"
 log_level = "debug"
 `
 
@@ -253,14 +265,15 @@ log_level = "debug"
 func TestRoundTrip(t *testing.T) {
 	// Test that FromConfig -> ToConfig preserves values
 	original := &config.Config{
-		Port:       8888,
-		BinaryPort: 8889,
-		ReplPort:   9999,
-		Role:       "standalone",
-		MasterAddr: "",
-		DBPath:     "flydb.wal",
-		LogLevel:   "info",
-		LogJSON:    false,
+		Port:              8888,
+		BinaryPort:        8889,
+		ReplPort:          9999,
+		Role:              "standalone",
+		MasterAddr:        "",
+		DBPath:            "flydb.fdb",
+		EncryptionEnabled: true,
+		LogLevel:          "info",
+		LogJSON:           false,
 	}
 
 	wizardCfg := FromConfig(original)
@@ -281,6 +294,9 @@ func TestRoundTrip(t *testing.T) {
 	if result.DBPath != original.DBPath {
 		t.Errorf("DBPath mismatch: got %s, want %s", result.DBPath, original.DBPath)
 	}
+	if result.EncryptionEnabled != original.EncryptionEnabled {
+		t.Errorf("EncryptionEnabled mismatch: got %v, want %v", result.EncryptionEnabled, original.EncryptionEnabled)
+	}
 	if result.LogLevel != original.LogLevel {
 		t.Errorf("LogLevel mismatch: got %s, want %s", result.LogLevel, original.LogLevel)
 	}
@@ -288,4 +304,3 @@ func TestRoundTrip(t *testing.T) {
 		t.Errorf("LogJSON mismatch: got %v, want %v", result.LogJSON, original.LogJSON)
 	}
 }
-
