@@ -3,6 +3,7 @@ package sql
 import (
 	"os"
 	"testing"
+	"time"
 
 	"flydb/internal/auth"
 	"flydb/internal/storage"
@@ -16,14 +17,19 @@ func setupTestExecutor(t *testing.T) (*Executor, func()) {
 	}
 
 	// Create a temporary storage
-	kv, err := storage.NewKVStore(tmpDir + "/test.db")
+	config := storage.StorageConfig{
+		DataDir:            tmpDir,
+		BufferPoolSize:     256,
+		CheckpointInterval: 0,
+	}
+	store, err := storage.NewStorageEngine(config)
 	if err != nil {
 		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to create KVStore: %v", err)
+		t.Fatalf("Failed to create storage engine: %v", err)
 	}
 
-	authMgr := auth.NewAuthManager(kv)
-	exec := NewExecutor(kv, authMgr)
+	authMgr := auth.NewAuthManager(store)
+	exec := NewExecutor(store, authMgr)
 
 	// Create a test table
 	createStmt := &CreateTableStmt{
@@ -36,13 +42,14 @@ func setupTestExecutor(t *testing.T) (*Executor, func()) {
 	}
 	_, err = exec.Execute(createStmt)
 	if err != nil {
-		kv.Close()
+		store.Close()
 		os.RemoveAll(tmpDir)
 		t.Fatalf("Failed to create test table: %v", err)
 	}
 
 	cleanup := func() {
-		kv.Close()
+		store.Close()
+		time.Sleep(10 * time.Millisecond)
 		os.RemoveAll(tmpDir)
 	}
 

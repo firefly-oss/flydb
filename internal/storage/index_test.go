@@ -18,29 +18,12 @@ package storage
 
 import (
 	"encoding/json"
-	"os"
 	"testing"
 )
 
-func setupIndexTest(t *testing.T) (*IndexManager, *KVStore, func()) {
-	tmpDir, err := os.MkdirTemp("", "flydb_index_test_*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-
-	store, err := NewKVStore(tmpDir + "/test.fdb")
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to create KVStore: %v", err)
-	}
-
+func setupIndexTest(t *testing.T) (*IndexManager, Engine, func()) {
+	store, cleanup := setupTestEngine(t)
 	indexMgr := NewIndexManager(store)
-
-	cleanup := func() {
-		store.Close()
-		os.RemoveAll(tmpDir)
-	}
-
 	return indexMgr, store, cleanup
 }
 

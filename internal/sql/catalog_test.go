@@ -19,6 +19,7 @@ package sql
 import (
 	"os"
 	"testing"
+	"time"
 
 	"flydb/internal/storage"
 )
@@ -29,21 +30,26 @@ func setupCatalogTest(t *testing.T) (*Catalog, string, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	walPath := tmpDir + "/test.fdb"
-	store, err := storage.NewKVStore(walPath)
+	config := storage.StorageConfig{
+		DataDir:            tmpDir,
+		BufferPoolSize:     256,
+		CheckpointInterval: 0,
+	}
+	store, err := storage.NewStorageEngine(config)
 	if err != nil {
 		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to create KVStore: %v", err)
+		t.Fatalf("Failed to create storage engine: %v", err)
 	}
 
 	catalog := NewCatalog(store)
 
 	cleanup := func() {
 		store.Close()
+		time.Sleep(10 * time.Millisecond)
 		os.RemoveAll(tmpDir)
 	}
 
-	return catalog, walPath, cleanup
+	return catalog, tmpDir, cleanup
 }
 
 func TestCatalogCreateTable(t *testing.T) {
@@ -108,21 +114,26 @@ func TestCatalogPersistence(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	walPath := tmpDir + "/test.fdb"
+	config := storage.StorageConfig{
+		DataDir:            tmpDir,
+		BufferPoolSize:     256,
+		CheckpointInterval: 0,
+	}
 
 	// Create store and catalog, add a table
-	store1, err := storage.NewKVStore(walPath)
+	store1, err := storage.NewStorageEngine(config)
 	if err != nil {
-		t.Fatalf("Failed to create KVStore: %v", err)
+		t.Fatalf("Failed to create storage engine: %v", err)
 	}
 	catalog1 := NewCatalog(store1)
 	catalog1.CreateTable("persistent_table", []ColumnDef{{Name: "data", Type: "TEXT"}})
 	store1.Close()
+	time.Sleep(10 * time.Millisecond)
 
 	// Reopen store and catalog, verify table persisted
-	store2, err := storage.NewKVStore(walPath)
+	store2, err := storage.NewStorageEngine(config)
 	if err != nil {
-		t.Fatalf("Failed to reopen KVStore: %v", err)
+		t.Fatalf("Failed to reopen storage engine: %v", err)
 	}
 	defer store2.Close()
 

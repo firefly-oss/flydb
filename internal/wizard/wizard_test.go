@@ -241,10 +241,11 @@ log_level = "debug"
 		t.Fatalf("Failed to write config file: %v", err)
 	}
 
-	// Change to temp directory to test local config discovery
-	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	// Use environment variable to specify config file path
+	// This is more reliable than changing working directory
+	oldEnv := os.Getenv(config.EnvConfigFile)
+	os.Setenv(config.EnvConfigFile, configPath)
+	defer os.Setenv(config.EnvConfigFile, oldEnv)
 
 	cfg, path := LoadExistingConfig()
 	if cfg == nil {

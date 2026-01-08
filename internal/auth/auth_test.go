@@ -21,6 +21,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"flydb/internal/storage"
 )
@@ -31,16 +32,23 @@ func setupTestAuthManager(t *testing.T) (*AuthManager, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	store, err := storage.NewKVStore(tmpDir + "/test.db")
+	config := storage.StorageConfig{
+		DataDir:            tmpDir,
+		BufferPoolSize:     256,
+		CheckpointInterval: 0,
+	}
+	store, err := storage.NewStorageEngine(config)
 	if err != nil {
 		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to create KVStore: %v", err)
+		t.Fatalf("Failed to create storage engine: %v", err)
 	}
 
 	authMgr := NewAuthManager(store)
 
 	cleanup := func() {
 		store.Close()
+		// Give a moment for file handles to be released
+		time.Sleep(10 * time.Millisecond)
 		os.RemoveAll(tmpDir)
 	}
 
@@ -219,9 +227,14 @@ func TestPasswordIsHashed(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	store, err := storage.NewKVStore(tmpDir + "/test.db")
+	config := storage.StorageConfig{
+		DataDir:            tmpDir,
+		BufferPoolSize:     256,
+		CheckpointInterval: 0,
+	}
+	store, err := storage.NewStorageEngine(config)
 	if err != nil {
-		t.Fatalf("Failed to create KVStore: %v", err)
+		t.Fatalf("Failed to create storage engine: %v", err)
 	}
 	defer store.Close()
 
