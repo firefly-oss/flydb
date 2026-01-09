@@ -158,8 +158,9 @@ func TestIsValidType(t *testing.T) {
 		"TIMESTAMP", "DATETIME", "DATE", "TIME",
 		"BLOB", "BYTEA", "BINARY", "VARBINARY",
 		"UUID", "JSONB", "JSON", "SERIAL",
+		"MONEY", "INTERVAL", "CLOB", "NCHAR", "NVARCHAR", "NTEXT",
 	}
-	invalidTypes := []string{"INVALID", "ARRAY", "CLOB", "INTERVAL"}
+	invalidTypes := []string{"INVALID", "ARRAY", "ENUM", "SET"}
 
 	for _, typeName := range validTypes {
 		if !IsValidType(typeName) {

@@ -76,6 +76,12 @@ const (
 	TypeUUID      ColumnType = "UUID"
 	TypeJSONB     ColumnType = "JSONB"
 	TypeSERIAL    ColumnType = "SERIAL"
+	TypeMONEY     ColumnType = "MONEY"
+	TypeINTERVAL  ColumnType = "INTERVAL"
+	TypeCLOB      ColumnType = "CLOB"
+	TypeNCHAR     ColumnType = "NCHAR"
+	TypeNVARCHAR  ColumnType = "NVARCHAR"
+	TypeNTEXT     ColumnType = "NTEXT"
 )
 
 // uuidRegex matches valid UUID format (RFC 4122).
@@ -120,6 +126,12 @@ var ValidColumnTypes = map[string]ColumnType{
 	"JSONB":     TypeJSONB,
 	"JSON":      TypeJSONB, // Alias for JSONB
 	"SERIAL":    TypeSERIAL,
+	"MONEY":     TypeMONEY,
+	"INTERVAL":  TypeINTERVAL,
+	"CLOB":      TypeCLOB,
+	"NCHAR":     TypeNCHAR,
+	"NVARCHAR":  TypeNVARCHAR,
+	"NTEXT":     TypeNTEXT,
 }
 
 // IsValidType checks if a type name is a valid column type.
@@ -226,8 +238,27 @@ func ValidateValue(typeName string, value string) error {
 			return fmt.Errorf("invalid JSONB value: not valid JSON")
 		}
 
-	case TypeTEXT, TypeVARCHAR, TypeCHAR:
-		// TEXT, VARCHAR, and CHAR accept any string value
+	case TypeTEXT, TypeVARCHAR, TypeCHAR, TypeCLOB, TypeNCHAR, TypeNVARCHAR, TypeNTEXT:
+		// TEXT, VARCHAR, CHAR, CLOB, and Unicode variants accept any string value
+		return nil
+
+	case TypeMONEY:
+		// MONEY accepts decimal values (may have currency symbol prefix)
+		cleanValue := strings.TrimPrefix(value, "$")
+		cleanValue = strings.TrimPrefix(cleanValue, "€")
+		cleanValue = strings.TrimPrefix(cleanValue, "£")
+		cleanValue = strings.ReplaceAll(cleanValue, ",", "")
+		if !decimalRegex.MatchString(cleanValue) {
+			return fmt.Errorf("invalid MONEY value: %s", value)
+		}
+
+	case TypeINTERVAL:
+		// INTERVAL accepts various interval formats (simplified validation)
+		// Examples: '1 day', '2 hours', '3 months', 'P1D' (ISO 8601)
+		if value == "" {
+			return fmt.Errorf("invalid INTERVAL value: empty string")
+		}
+		// Accept any non-empty string for now (full interval parsing is complex)
 		return nil
 
 	default:
