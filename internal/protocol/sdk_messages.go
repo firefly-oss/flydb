@@ -187,6 +187,89 @@ func DecodeGetColumnsMessage(data []byte) (*GetColumnsMessage, error) {
 	return &m, nil
 }
 
+// GetPrimaryKeysMessage requests primary key metadata.
+type GetPrimaryKeysMessage struct {
+	Catalog   string `json:"catalog,omitempty"`
+	Schema    string `json:"schema,omitempty"`
+	TableName string `json:"table_name"`
+}
+
+// Encode encodes the message to bytes.
+func (m *GetPrimaryKeysMessage) Encode() ([]byte, error) {
+	return json.Marshal(m)
+}
+
+// DecodeGetPrimaryKeysMessage decodes a get primary keys message.
+func DecodeGetPrimaryKeysMessage(data []byte) (*GetPrimaryKeysMessage, error) {
+	var m GetPrimaryKeysMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// GetForeignKeysMessage requests foreign key metadata.
+type GetForeignKeysMessage struct {
+	Catalog   string `json:"catalog,omitempty"`
+	Schema    string `json:"schema,omitempty"`
+	TableName string `json:"table_name"`
+}
+
+// Encode encodes the message to bytes.
+func (m *GetForeignKeysMessage) Encode() ([]byte, error) {
+	return json.Marshal(m)
+}
+
+// DecodeGetForeignKeysMessage decodes a get foreign keys message.
+func DecodeGetForeignKeysMessage(data []byte) (*GetForeignKeysMessage, error) {
+	var m GetForeignKeysMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// GetIndexesMessage requests index metadata.
+type GetIndexesMessage struct {
+	Catalog   string `json:"catalog,omitempty"`
+	Schema    string `json:"schema,omitempty"`
+	TableName string `json:"table_name"`
+	Unique    bool   `json:"unique"` // If true, return only unique indexes
+}
+
+// Encode encodes the message to bytes.
+func (m *GetIndexesMessage) Encode() ([]byte, error) {
+	return json.Marshal(m)
+}
+
+// DecodeGetIndexesMessage decodes a get indexes message.
+func DecodeGetIndexesMessage(data []byte) (*GetIndexesMessage, error) {
+	var m GetIndexesMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// GetTypeInfoMessage requests type information.
+type GetTypeInfoMessage struct {
+	DataType int `json:"data_type,omitempty"` // 0 = all types, otherwise specific type
+}
+
+// Encode encodes the message to bytes.
+func (m *GetTypeInfoMessage) Encode() ([]byte, error) {
+	return json.Marshal(m)
+}
+
+// DecodeGetTypeInfoMessage decodes a get type info message.
+func DecodeGetTypeInfoMessage(data []byte) (*GetTypeInfoMessage, error) {
+	var m GetTypeInfoMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 // MetadataResultMessage is the response for metadata queries.
 type MetadataResultMessage struct {
 	Success  bool              `json:"success"`

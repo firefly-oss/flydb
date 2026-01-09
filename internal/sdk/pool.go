@@ -170,3 +170,114 @@ func (p *ConnectionPool) Acquire(ctx context.Context) (*PooledConnection, error)
 	}
 }
 
+// Release returns a connection to the pool.
+func (p *ConnectionPool) Release(conn *PooledConnection) {
+	if conn == nil {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return
+	}
+
+	// Check if connection is still valid
+	if time.Since(conn.CreatedAt) > p.config.MaxLifetime {
+		p.removeConnection(conn)
+		return
+	}
+
+	conn.InUse = false
+	conn.LastUsedAt = time.Now()
+
+	select {
+	case p.available <- conn:
+		// Connection returned to pool
+	default:
+		// Pool is full, close the connection
+		p.removeConnection(conn)
+	}
+}
+
+// Close closes the connection pool and all connections.
+func (p *ConnectionPool) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return nil
+	}
+
+	p.closed = true
+	close(p.closedCh)
+
+	// Close all connections
+	for _, conn := range p.connections {
+		if conn.Session != nil {
+			conn.Session.Close()
+		}
+	}
+	p.connections = nil
+	p.totalCount = 0
+
+	return nil
+}
+
+// Stats returns pool statistics.
+func (p *ConnectionPool) Stats() PoolStats {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	inUse := 0
+	for _, conn := range p.connections {
+		if conn.InUse {
+			inUse++
+		}
+	}
+
+	return PoolStats{
+		TotalConnections: p.totalCount,
+		IdleConnections:  p.totalCount - inUse,
+		InUseConnections: inUse,
+		MaxConnections:   p.config.MaxConnections,
+	}
+}
+
+// PoolStats contains connection pool statistics.
+type PoolStats struct {
+	TotalConnections int
+	IdleConnections  int
+	InUseConnections int
+	MaxConnections   int
+}
+
+// createConnection creates a new pooled connection.
+func (p *ConnectionPool) createConnection() *PooledConnection {
+	conn := &PooledConnection{
+		ID:         generateID("conn"),
+		Session:    NewSession(p.config.ConnectionConfig.Username, p.config.ConnectionConfig.Database),
+		CreatedAt:  time.Now(),
+		LastUsedAt: time.Now(),
+		InUse:      true,
+	}
+	p.connections = append(p.connections, conn)
+	p.totalCount++
+	return conn
+}
+
+// removeConnection removes a connection from the pool.
+func (p *ConnectionPool) removeConnection(conn *PooledConnection) {
+	for i, c := range p.connections {
+		if c.ID == conn.ID {
+			p.connections = append(p.connections[:i], p.connections[i+1:]...)
+			p.totalCount--
+			if conn.Session != nil {
+				conn.Session.Close()
+			}
+			break
+		}
+	}
+}
+

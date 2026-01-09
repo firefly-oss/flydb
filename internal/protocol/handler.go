@@ -363,6 +363,15 @@ func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 		case MsgGetColumns:
 			success = h.handleGetColumns(writer, msg.Payload, remoteAddr)
 
+		case MsgGetPrimaryKeys:
+			success = h.handleGetPrimaryKeys(writer, msg.Payload, remoteAddr)
+
+		case MsgGetForeignKeys:
+			success = h.handleGetForeignKeys(writer, msg.Payload, remoteAddr)
+
+		case MsgGetIndexes:
+			success = h.handleGetIndexes(writer, msg.Payload, remoteAddr)
+
 		case MsgGetTypeInfo:
 			success = h.handleGetTypeInfo(writer, remoteAddr)
 
@@ -443,6 +452,12 @@ func msgTypeToString(t MessageType) string {
 		return "GET_TABLES"
 	case MsgGetColumns:
 		return "GET_COLUMNS"
+	case MsgGetPrimaryKeys:
+		return "GET_PRIMARY_KEYS"
+	case MsgGetForeignKeys:
+		return "GET_FOREIGN_KEYS"
+	case MsgGetIndexes:
+		return "GET_INDEXES"
 	case MsgGetTypeInfo:
 		return "GET_TYPE_INFO"
 	case MsgBeginTx:
@@ -872,6 +887,102 @@ func (h *BinaryHandler) handleGetTypeInfo(w *bufio.Writer, remoteAddr string) bo
 	rows, err := h.metadata.GetTypeInfo()
 	if err != nil {
 		log.Debug("Get type info error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	result := &MetadataResultMessage{
+		Success:  true,
+		Rows:     rows,
+		RowCount: len(rows),
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgMetadataResult, data)
+	w.Flush()
+	return true
+}
+
+// handleGetPrimaryKeys handles get primary keys metadata messages.
+func (h *BinaryHandler) handleGetPrimaryKeys(w *bufio.Writer, payload []byte, remoteAddr string) bool {
+	if h.metadata == nil {
+		h.sendError(w, 501, "metadata not supported")
+		return false
+	}
+
+	msg, err := DecodeGetPrimaryKeysMessage(payload)
+	if err != nil {
+		log.Debug("Invalid get primary keys message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid get primary keys message")
+		return false
+	}
+
+	rows, err := h.metadata.GetPrimaryKeys(msg.Catalog, msg.Schema, msg.TableName)
+	if err != nil {
+		log.Debug("Get primary keys error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	result := &MetadataResultMessage{
+		Success:  true,
+		Rows:     rows,
+		RowCount: len(rows),
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgMetadataResult, data)
+	w.Flush()
+	return true
+}
+
+// handleGetForeignKeys handles get foreign keys metadata messages.
+func (h *BinaryHandler) handleGetForeignKeys(w *bufio.Writer, payload []byte, remoteAddr string) bool {
+	if h.metadata == nil {
+		h.sendError(w, 501, "metadata not supported")
+		return false
+	}
+
+	msg, err := DecodeGetForeignKeysMessage(payload)
+	if err != nil {
+		log.Debug("Invalid get foreign keys message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid get foreign keys message")
+		return false
+	}
+
+	rows, err := h.metadata.GetForeignKeys(msg.Catalog, msg.Schema, msg.TableName)
+	if err != nil {
+		log.Debug("Get foreign keys error", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 500, err.Error())
+		return false
+	}
+
+	result := &MetadataResultMessage{
+		Success:  true,
+		Rows:     rows,
+		RowCount: len(rows),
+	}
+	data, _ := result.Encode()
+	WriteMessage(w, MsgMetadataResult, data)
+	w.Flush()
+	return true
+}
+
+// handleGetIndexes handles get indexes metadata messages.
+func (h *BinaryHandler) handleGetIndexes(w *bufio.Writer, payload []byte, remoteAddr string) bool {
+	if h.metadata == nil {
+		h.sendError(w, 501, "metadata not supported")
+		return false
+	}
+
+	msg, err := DecodeGetIndexesMessage(payload)
+	if err != nil {
+		log.Debug("Invalid get indexes message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid get indexes message")
+		return false
+	}
+
+	rows, err := h.metadata.GetIndexes(msg.Catalog, msg.Schema, msg.TableName, msg.Unique)
+	if err != nil {
+		log.Debug("Get indexes error", "remote_addr", remoteAddr, "error", err)
 		h.sendError(w, 500, err.Error())
 		return false
 	}
