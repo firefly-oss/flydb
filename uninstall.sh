@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-readonly SCRIPT_VERSION="01.26.4"
+readonly SCRIPT_VERSION="01.26.9"
 
 PREFIX=""
 AUTO_CONFIRM=false

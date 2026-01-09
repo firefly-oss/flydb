@@ -23,8 +23,8 @@ set -euo pipefail
 # Configuration and Defaults
 # =============================================================================
 
-readonly SCRIPT_VERSION="01.26.4"
-readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.4}"
+readonly SCRIPT_VERSION="01.26.9"
+readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.9}"
 readonly GITHUB_REPO="firefly-software/flydb"
 readonly DOWNLOAD_BASE_URL="https://github.com/${GITHUB_REPO}/releases/download"
 
@@ -313,6 +313,18 @@ print_help() {
     echo -e "${BOLD}ENVIRONMENT VARIABLES:${RESET}"
     echo "    FLYDB_VERSION     Override the default version to install"
     echo "    NO_COLOR          Disable colored output"
+    echo ""
+    echo -e "${BOLD}SERVER ROLES:${RESET}"
+    echo "    standalone        Single server mode (default, no replication)"
+    echo "    master            Leader node that accepts writes and replicates to slaves"
+    echo "    slave             Follower node that receives replication from master"
+    echo "    cluster           Automatic failover cluster with leader election"
+    echo ""
+    echo -e "${BOLD}CLUSTER CONFIGURATION:${RESET}"
+    echo "    After installation, configure cluster mode via:"
+    echo "    - Configuration file: /etc/flydb/flydb.conf or ~/.config/flydb/flydb.conf"
+    echo "    - Environment variables: FLYDB_ROLE, FLYDB_CLUSTER_PEERS, etc."
+    echo "    - Command-line flags: -role cluster -cluster-peers node2:9998,node3:9998"
     echo ""
     echo -e "${BOLD}MORE INFORMATION:${RESET}"
     echo "    Documentation:    https://flydb.dev/docs"
@@ -1228,7 +1240,7 @@ create_config_file() {
 #   FLYDB_PORT          - Server port for text protocol
 #   FLYDB_BINARY_PORT   - Server port for binary protocol
 #   FLYDB_REPL_PORT     - Replication port
-#   FLYDB_ROLE          - Server role (standalone, master, slave)
+#   FLYDB_ROLE          - Server role (standalone, master, slave, cluster)
 #   FLYDB_MASTER_ADDR   - Master address for slave mode
 #   FLYDB_DATA_DIR      - Data directory for database storage
 #   FLYDB_LOG_LEVEL     - Log level (debug, info, warn, error)
@@ -1236,11 +1248,21 @@ create_config_file() {
 #   FLYDB_ADMIN_PASSWORD - Initial admin password (first-time setup only)
 #   FLYDB_ENCRYPTION_PASSPHRASE - Encryption passphrase (required if encryption enabled)
 #   FLYDB_CONFIG_FILE   - Path to this configuration file
+#
+# Cluster Environment Variables:
+#   FLYDB_CLUSTER_PORT        - Port for cluster communication (default: 9998)
+#   FLYDB_CLUSTER_PEERS       - Comma-separated list of peer addresses
+#   FLYDB_REPLICATION_MODE    - Replication mode: async, semi_sync, sync
+#   FLYDB_HEARTBEAT_INTERVAL_MS - Heartbeat interval in milliseconds
+#   FLYDB_HEARTBEAT_TIMEOUT_MS  - Heartbeat timeout in milliseconds
+#   FLYDB_ELECTION_TIMEOUT_MS   - Election timeout in milliseconds
+#   FLYDB_MIN_QUORUM          - Minimum quorum size for cluster decisions
 
-# Server role: standalone, master, or slave
+# Server role: standalone, master, slave, or cluster
 # - standalone: Single server mode (no replication)
 # - master: Leader node that accepts writes and replicates to slaves
 # - slave: Follower node that receives replication from master
+# - cluster: Automatic failover cluster with leader election
 role = \"standalone\"
 
 # Network ports
@@ -1271,6 +1293,45 @@ log_json = false
 # Note: Admin password is set on first run via:
 #   - FLYDB_ADMIN_PASSWORD environment variable, or
 #   - Interactive wizard (if no env var set)
+
+# =============================================================================
+# Cluster Configuration (for role = \"cluster\")
+# =============================================================================
+
+# Cluster communication port
+# cluster_port = 9998
+
+# Comma-separated list of peer node addresses (host:port)
+# Example: cluster_peers = [\"node2:9998\", \"node3:9998\"]
+# cluster_peers = []
+
+# Replication mode: async, semi_sync, or sync
+# - async: Best performance, eventual consistency
+# - semi_sync: At least one replica acknowledges before commit
+# - sync: All replicas must acknowledge (strongest consistency)
+replication_mode = \"async\"
+
+# Heartbeat interval in milliseconds (how often to send heartbeats)
+heartbeat_interval_ms = 1000
+
+# Heartbeat timeout in milliseconds (when to consider a node dead)
+heartbeat_timeout_ms = 5000
+
+# Election timeout in milliseconds (when to start a new election)
+election_timeout_ms = 10000
+
+# Minimum quorum size for cluster decisions
+# Set to 0 for automatic calculation (majority of nodes)
+min_quorum = 0
+
+# Enable pre-vote protocol to prevent disruptions from partitioned nodes
+enable_pre_vote = true
+
+# Sync timeout in milliseconds (for sync replication mode)
+sync_timeout_ms = 5000
+
+# Maximum replication lag in bytes before a replica is considered unhealthy
+max_replication_lag = 10485760
 "
 
     if echo "$config_content" | $sudo_cmd tee "$config_file" >/dev/null 2>&1; then
@@ -1732,6 +1793,21 @@ print_post_install() {
     else
         echo -e "     ${CYAN}${bin_dir}/fsql${RESET}"
     fi
+    ((step_num++))
+
+    # Step: Cluster mode (optional)
+    echo ""
+    echo -e "  ${YELLOW}${step_num}. Set up a cluster (optional):${RESET}"
+    echo ""
+    echo -e "     ${DIM}# Start a 3-node cluster with automatic failover:${RESET}"
+    if [[ "$in_path" == true ]]; then
+        echo -e "     ${CYAN}flydb -role cluster -cluster-peers node2:9998,node3:9998${RESET}"
+    else
+        echo -e "     ${CYAN}${bin_dir}/flydb -role cluster -cluster-peers node2:9998,node3:9998${RESET}"
+    fi
+    echo ""
+    echo -e "     ${DIM}# Or use environment variables:${RESET}"
+    echo -e "     ${CYAN}FLYDB_ROLE=cluster FLYDB_CLUSTER_PEERS=node2:9998,node3:9998 flydb${RESET}"
 
     echo ""
     separator 60
