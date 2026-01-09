@@ -111,19 +111,28 @@ type TokenType int
 // Token type constants.
 // These are used to identify what kind of token was recognized.
 const (
-	TokenEOF       TokenType = iota // End of input
-	TokenIdent                      // Identifier (table name, column name)
-	TokenString                     // String literal ('hello')
-	TokenNumber                     // Numeric literal (123)
-	TokenKeyword                    // SQL keyword (SELECT, FROM, etc.)
-	TokenComma                      // Comma (,)
-	TokenLParen                     // Left parenthesis (()
-	TokenRParen                     // Right parenthesis ())
-	TokenEqual                      // Equals sign (=)
-	TokenLessThan                   // Less than (<)
-	TokenGreaterThan                // Greater than (>)
-	TokenLessEqual                  // Less than or equal (<=)
-	TokenGreaterEqual               // Greater than or equal (>=)
+	TokenEOF          TokenType = iota // End of input
+	TokenIdent                         // Identifier (table name, column name)
+	TokenString                        // String literal ('hello')
+	TokenNumber                        // Numeric literal (123)
+	TokenKeyword                       // SQL keyword (SELECT, FROM, etc.)
+	TokenComma                         // Comma (,)
+	TokenLParen                        // Left parenthesis (()
+	TokenRParen                        // Right parenthesis ())
+	TokenEqual                         // Equals sign (=)
+	TokenLessThan                      // Less than (<)
+	TokenGreaterThan                   // Greater than (>)
+	TokenLessEqual                     // Less than or equal (<=)
+	TokenGreaterEqual                  // Greater than or equal (>=)
+	TokenNotEqual                      // Not equal (<> or !=)
+	TokenPlus                          // Plus (+)
+	TokenMinus                         // Minus (-)
+	TokenStar                          // Asterisk/multiply (*)
+	TokenSlash                         // Divide (/)
+	TokenPercent                       // Modulo (%)
+	TokenConcat                        // String concatenation (||)
+	TokenSemicolon                     // Semicolon (;)
+	TokenDot                           // Dot (.)
 )
 
 // Token represents a single lexical unit from the input.
@@ -209,6 +218,7 @@ func (l *Lexer) NextToken() Token {
 			"DATE", "BLOB", "BYTEA", "BINARY", "VARBINARY", "UUID", "JSONB", "JSON",
 			"BIGINT", "SMALLINT", "TINYINT", "INTEGER", "DECIMAL", "NUMERIC",
 			"TIME", "VARCHAR", "CHAR", "CHARACTER", "SERIAL",
+			"MONEY", "CLOB", "NCHAR", "NVARCHAR", "NTEXT",
 			// Boolean literals
 			"TRUE", "FALSE",
 			// Prepared statements
@@ -241,7 +251,7 @@ func (l *Lexer) NextToken() Token {
 			// TRUNCATE
 			"TRUNCATE",
 			// JOIN types
-			"LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS",
+			"LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "NATURAL",
 			// Transaction control
 			"SAVEPOINT", "RELEASE",
 			// SQL functions
@@ -258,7 +268,24 @@ func (l *Lexer) NextToken() Token {
 			// Database management
 			"DATABASE", "USE", "DATABASES",
 			// RBAC keywords
-			"ROLE", "ROLES", "PRIVILEGES", "DESCRIPTION", "WITH":
+			"ROLE", "ROLES", "PRIVILEGES", "DESCRIPTION", "WITH",
+			// CASE expressions
+			"CASE", "WHEN",
+			// Window functions
+			"OVER", "PARTITION", "WINDOW", "ROWS", "RANGE", "UNBOUNDED", "PRECEDING", "FOLLOWING", "CURRENT",
+			// ORDER BY extensions
+			"NULLS", "FIRST", "LAST",
+			// Additional aggregate functions (window functions)
+			"FIRST_VALUE", "LAST_VALUE", "NTH_VALUE", "LAG", "LEAD", "ROW_NUMBER", "RANK", "DENSE_RANK", "NTILE",
+			// Additional string functions (LEFT already defined in JOIN types)
+			"POSITION", "LOCATE", "INSTR", "LPAD", "RPAD", "SPACE", "ASCII", "CHAR_LENGTH", "CHARACTER_LENGTH",
+			// Additional math functions (TRUNCATE already defined above)
+			"SIGN", "EXP", "LOG", "LOG10", "LOG2", "LN", "PI", "RAND", "RANDOM",
+			// Additional date functions
+			"DATE_FORMAT", "TIME_FORMAT", "STRFTIME", "TO_CHAR", "TO_DATE", "TO_TIMESTAMP",
+			"DATE_TRUNC", "DATE_PART", "INTERVAL",
+			// Type casting
+			"TYPEOF", "TYPE":
 			return Token{Type: TokenKeyword, Value: upper}
 		}
 
@@ -330,9 +357,15 @@ func (l *Lexer) NextToken() Token {
 	// Multi-character operators (check before single-character).
 	if ch == '<' {
 		l.pos++
-		if l.pos < len(l.input) && l.input[l.pos] == '=' {
-			l.pos++
-			return Token{Type: TokenLessEqual, Value: "<="}
+		if l.pos < len(l.input) {
+			switch l.input[l.pos] {
+			case '=':
+				l.pos++
+				return Token{Type: TokenLessEqual, Value: "<="}
+			case '>':
+				l.pos++
+				return Token{Type: TokenNotEqual, Value: "<>"}
+			}
 		}
 		return Token{Type: TokenLessThan, Value: "<"}
 	}
@@ -343,6 +376,57 @@ func (l *Lexer) NextToken() Token {
 			return Token{Type: TokenGreaterEqual, Value: ">="}
 		}
 		return Token{Type: TokenGreaterThan, Value: ">"}
+	}
+	if ch == '!' {
+		l.pos++
+		if l.pos < len(l.input) && l.input[l.pos] == '=' {
+			l.pos++
+			return Token{Type: TokenNotEqual, Value: "!="}
+		}
+		// Single ! is not a valid SQL operator, return EOF
+		return Token{Type: TokenEOF}
+	}
+	if ch == '|' {
+		l.pos++
+		if l.pos < len(l.input) && l.input[l.pos] == '|' {
+			l.pos++
+			return Token{Type: TokenConcat, Value: "||"}
+		}
+		// Single | is not commonly used in SQL, return EOF
+		return Token{Type: TokenEOF}
+	}
+	// Handle comments
+	if ch == '-' {
+		if l.pos+1 < len(l.input) && l.input[l.pos+1] == '-' {
+			// Single-line comment: skip until end of line
+			l.pos += 2
+			for l.pos < len(l.input) && l.input[l.pos] != '\n' {
+				l.pos++
+			}
+			// Skip the newline and continue lexing
+			if l.pos < len(l.input) {
+				l.pos++
+			}
+			return l.NextToken()
+		}
+		l.pos++
+		return Token{Type: TokenMinus, Value: "-"}
+	}
+	if ch == '/' {
+		if l.pos+1 < len(l.input) && l.input[l.pos+1] == '*' {
+			// Multi-line comment: skip until */
+			l.pos += 2
+			for l.pos+1 < len(l.input) {
+				if l.input[l.pos] == '*' && l.input[l.pos+1] == '/' {
+					l.pos += 2
+					break
+				}
+				l.pos++
+			}
+			return l.NextToken()
+		}
+		l.pos++
+		return Token{Type: TokenSlash, Value: "/"}
 	}
 
 	// Single-character tokens.
@@ -356,6 +440,16 @@ func (l *Lexer) NextToken() Token {
 		return Token{Type: TokenRParen, Value: ")"}
 	case '=':
 		return Token{Type: TokenEqual, Value: "="}
+	case '+':
+		return Token{Type: TokenPlus, Value: "+"}
+	case '*':
+		return Token{Type: TokenStar, Value: "*"}
+	case '%':
+		return Token{Type: TokenPercent, Value: "%"}
+	case ';':
+		return Token{Type: TokenSemicolon, Value: ";"}
+	case '.':
+		return Token{Type: TokenDot, Value: "."}
 	}
 
 	// Unknown character - return EOF.
