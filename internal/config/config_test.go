@@ -52,6 +52,13 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+// validTestConfig returns a valid config with all required fields set
+func validTestConfig() *Config {
+	cfg := DefaultConfig()
+	cfg.DBPath = "test.fdb"
+	return cfg
+}
+
 func TestConfigValidation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -65,112 +72,115 @@ func TestConfigValidation(t *testing.T) {
 		},
 		{
 			name: "valid master config",
-			cfg: &Config{
-				Port:       8888,
-				BinaryPort: 8889,
-				ReplPort:   9999,
-				Role:       "master",
-				DBPath:     "test.fdb",
-				LogLevel:   "info",
-			},
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.Role = "master"
+				return cfg
+			}(),
 			wantErr: false,
 		},
 		{
 			name: "valid slave config",
-			cfg: &Config{
-				Port:       8888,
-				BinaryPort: 8889,
-				ReplPort:   9999,
-				Role:       "slave",
-				MasterAddr: "localhost:9999",
-				DBPath:     "test.fdb",
-				LogLevel:   "info",
-			},
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.Role = "slave"
+				cfg.MasterAddr = "localhost:9999"
+				return cfg
+			}(),
 			wantErr: false,
 		},
 		{
 			name: "invalid port - zero",
-			cfg: &Config{
-				Port:       0,
-				BinaryPort: 8889,
-				ReplPort:   9999,
-				Role:       "standalone",
-				DBPath:     "test.fdb",
-				LogLevel:   "info",
-			},
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.Port = 0
+				return cfg
+			}(),
 			wantErr: true,
 		},
 		{
 			name: "invalid port - too high",
-			cfg: &Config{
-				Port:       70000,
-				BinaryPort: 8889,
-				ReplPort:   9999,
-				Role:       "standalone",
-				DBPath:     "test.fdb",
-				LogLevel:   "info",
-			},
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.Port = 70000
+				return cfg
+			}(),
 			wantErr: true,
 		},
 		{
 			name: "port conflict",
-			cfg: &Config{
-				Port:       8888,
-				BinaryPort: 8888,
-				ReplPort:   9999,
-				Role:       "standalone",
-				DBPath:     "test.fdb",
-				LogLevel:   "info",
-			},
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.Port = 8888
+				cfg.BinaryPort = 8888
+				return cfg
+			}(),
 			wantErr: true,
 		},
 		{
 			name: "invalid role",
-			cfg: &Config{
-				Port:       8888,
-				BinaryPort: 8889,
-				ReplPort:   9999,
-				Role:       "invalid",
-				DBPath:     "test.fdb",
-				LogLevel:   "info",
-			},
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.Role = "invalid"
+				return cfg
+			}(),
 			wantErr: true,
 		},
 		{
 			name: "slave without master_addr",
-			cfg: &Config{
-				Port:       8888,
-				BinaryPort: 8889,
-				ReplPort:   9999,
-				Role:       "slave",
-				MasterAddr: "",
-				DBPath:     "test.fdb",
-				LogLevel:   "info",
-			},
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.Role = "slave"
+				cfg.MasterAddr = ""
+				return cfg
+			}(),
 			wantErr: true,
 		},
 		{
 			name: "invalid log level",
-			cfg: &Config{
-				Port:       8888,
-				BinaryPort: 8889,
-				ReplPort:   9999,
-				Role:       "standalone",
-				DBPath:     "test.fdb",
-				LogLevel:   "invalid",
-			},
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.LogLevel = "invalid"
+				return cfg
+			}(),
 			wantErr: true,
 		},
 		{
 			name: "empty db_path",
-			cfg: &Config{
-				Port:       8888,
-				BinaryPort: 8889,
-				ReplPort:   9999,
-				Role:       "standalone",
-				DBPath:     "",
-				LogLevel:   "info",
-			},
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.DBPath = ""
+				return cfg
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "valid cluster config",
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.Role = "cluster"
+				cfg.ClusterPeers = []string{"node2:9998", "node3:9998"}
+				return cfg
+			}(),
+			wantErr: false,
+		},
+		{
+			name: "cluster without peers",
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.Role = "cluster"
+				cfg.ClusterPeers = []string{}
+				return cfg
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "invalid replication mode",
+			cfg: func() *Config {
+				cfg := validTestConfig()
+				cfg.ReplicationMode = "invalid"
+				return cfg
+			}(),
 			wantErr: true,
 		},
 	}

@@ -83,8 +83,10 @@ const (
 	EnvPort                 = "FLYDB_PORT"
 	EnvBinaryPort           = "FLYDB_BINARY_PORT"
 	EnvReplPort             = "FLYDB_REPL_PORT"
+	EnvClusterPort          = "FLYDB_CLUSTER_PORT"
 	EnvRole                 = "FLYDB_ROLE"
 	EnvMasterAddr           = "FLYDB_MASTER_ADDR"
+	EnvClusterPeers         = "FLYDB_CLUSTER_PEERS"
 	EnvDBPath               = "FLYDB_DB_PATH"
 	EnvDataDir              = "FLYDB_DATA_DIR"
 	EnvStorageEngine        = "FLYDB_STORAGE_ENGINE"
@@ -96,6 +98,11 @@ const (
 	EnvConfigFile           = "FLYDB_CONFIG_FILE"
 	EnvEncryptionEnabled    = "FLYDB_ENCRYPTION_ENABLED"
 	EnvEncryptionPassphrase = "FLYDB_ENCRYPTION_PASSPHRASE"
+	EnvReplicationMode      = "FLYDB_REPLICATION_MODE"
+	EnvHeartbeatInterval    = "FLYDB_HEARTBEAT_INTERVAL_MS"
+	EnvHeartbeatTimeout     = "FLYDB_HEARTBEAT_TIMEOUT_MS"
+	EnvElectionTimeout      = "FLYDB_ELECTION_TIMEOUT_MS"
+	EnvMinQuorum            = "FLYDB_MIN_QUORUM"
 )
 
 // GetDefaultDataDir returns the default directory for database storage.
@@ -131,8 +138,22 @@ type Config struct {
 	Port       int    `toml:"port" json:"port"`
 	BinaryPort int    `toml:"binary_port" json:"binary_port"`
 	ReplPort   int    `toml:"replication_port" json:"replication_port"`
+	ClusterPort int   `toml:"cluster_port" json:"cluster_port"`
 	Role       string `toml:"role" json:"role"`
 	MasterAddr string `toml:"master_addr" json:"master_addr"`
+
+	// Cluster configuration
+	ClusterPeers      []string `toml:"cluster_peers" json:"cluster_peers"`           // List of peer addresses for cluster mode
+	HeartbeatInterval int      `toml:"heartbeat_interval_ms" json:"heartbeat_interval_ms"` // Heartbeat interval in milliseconds
+	HeartbeatTimeout  int      `toml:"heartbeat_timeout_ms" json:"heartbeat_timeout_ms"`   // Heartbeat timeout in milliseconds
+	ElectionTimeout   int      `toml:"election_timeout_ms" json:"election_timeout_ms"`     // Election timeout in milliseconds
+	MinQuorum         int      `toml:"min_quorum" json:"min_quorum"`                       // Minimum nodes for quorum (0 = auto)
+	EnablePreVote     bool     `toml:"enable_pre_vote" json:"enable_pre_vote"`             // Enable pre-vote protocol
+
+	// Replication configuration
+	ReplicationMode   string `toml:"replication_mode" json:"replication_mode"`       // async, semi_sync, or sync
+	SyncTimeout       int    `toml:"sync_timeout_ms" json:"sync_timeout_ms"`         // Timeout for sync replication in ms
+	MaxReplicationLag int    `toml:"max_replication_lag_ms" json:"max_replication_lag_ms"` // Max acceptable replication lag in ms
 
 	// Storage configuration
 	DBPath         string `toml:"db_path" json:"db_path"`
@@ -168,24 +189,47 @@ type Config struct {
 // encryption by setting encryption_enabled = false in the config file.
 func DefaultConfig() *Config {
 	return &Config{
-		Port:                 8888,
-		BinaryPort:           8889,
-		ReplPort:             9999,
-		Role:                 "standalone",
-		MasterAddr:           "",
-		DBPath:               "flydb.fdb",
-		DataDir:              GetDefaultDataDir(),
-		StorageEngine:        "disk", // FlyDB uses disk storage exclusively
-		BufferPoolSize:       0,      // 0 = auto-size based on available memory
-		CheckpointSecs:       60,     // 1 minute
-		DefaultDatabase:      "default",
-		DefaultEncoding:      "UTF8",
-		DefaultLocale:        "en_US",
-		DefaultCollation:     "default",
+		// Server
+		Port:        8888,
+		BinaryPort:  8889,
+		ReplPort:    9999,
+		ClusterPort: 9998,
+		Role:        "standalone",
+		MasterAddr:  "",
+
+		// Cluster
+		ClusterPeers:      []string{},
+		HeartbeatInterval: 500,  // 500ms
+		HeartbeatTimeout:  2000, // 2s
+		ElectionTimeout:   1000, // 1s
+		MinQuorum:         0,    // 0 = auto-calculate based on cluster size
+		EnablePreVote:     true,
+
+		// Replication
+		ReplicationMode:   "async",
+		SyncTimeout:       5000,  // 5s
+		MaxReplicationLag: 10000, // 10s
+
+		// Storage
+		DBPath:         "flydb.fdb",
+		DataDir:        GetDefaultDataDir(),
+		StorageEngine:  "disk", // FlyDB uses disk storage exclusively
+		BufferPoolSize: 0,      // 0 = auto-size based on available memory
+		CheckpointSecs: 60,     // 1 minute
+
+		// Multi-database
+		DefaultDatabase:  "default",
+		DefaultEncoding:  "UTF8",
+		DefaultLocale:    "en_US",
+		DefaultCollation: "default",
+
+		// Encryption
 		EncryptionEnabled:    true, // Encryption enabled by default for security
 		EncryptionPassphrase: "",
-		LogLevel:             "info",
-		LogJSON:              false,
+
+		// Logging
+		LogLevel: "info",
+		LogJSON:  false,
 	}
 }
 
@@ -264,6 +308,9 @@ func (c *Config) Validate() error {
 	if c.ReplPort < 1 || c.ReplPort > 65535 {
 		errs = append(errs, fmt.Sprintf("invalid replication_port: %d (must be 1-65535)", c.ReplPort))
 	}
+	if c.ClusterPort < 1 || c.ClusterPort > 65535 {
+		errs = append(errs, fmt.Sprintf("invalid cluster_port: %d (must be 1-65535)", c.ClusterPort))
+	}
 
 	// Check for port conflicts
 	if c.Port == c.BinaryPort {
@@ -272,18 +319,48 @@ func (c *Config) Validate() error {
 	if c.Role == "master" && (c.Port == c.ReplPort || c.BinaryPort == c.ReplPort) {
 		errs = append(errs, "replication_port must be different from port and binary_port")
 	}
+	if c.Role == "cluster" {
+		ports := map[int]string{c.Port: "port", c.BinaryPort: "binary_port", c.ReplPort: "replication_port", c.ClusterPort: "cluster_port"}
+		if len(ports) < 4 {
+			errs = append(errs, "all ports (port, binary_port, replication_port, cluster_port) must be different in cluster mode")
+		}
+	}
 
 	// Validate role
 	switch c.Role {
-	case "standalone", "master", "slave":
+	case "standalone", "master", "slave", "cluster":
 		// Valid roles
 	default:
-		errs = append(errs, fmt.Sprintf("invalid role: %s (must be standalone, master, or slave)", c.Role))
+		errs = append(errs, fmt.Sprintf("invalid role: %s (must be standalone, master, slave, or cluster)", c.Role))
 	}
 
 	// Validate slave configuration
 	if c.Role == "slave" && c.MasterAddr == "" {
 		errs = append(errs, "master_addr is required for slave role")
+	}
+
+	// Validate cluster configuration
+	if c.Role == "cluster" && len(c.ClusterPeers) == 0 {
+		errs = append(errs, "cluster_peers is required for cluster role (at least one peer)")
+	}
+
+	// Validate replication mode
+	switch strings.ToLower(c.ReplicationMode) {
+	case "async", "semi_sync", "sync":
+		// Valid modes
+	default:
+		errs = append(errs, fmt.Sprintf("invalid replication_mode: %s (must be async, semi_sync, or sync)", c.ReplicationMode))
+	}
+
+	// Validate timing values
+	if c.HeartbeatInterval < 100 {
+		errs = append(errs, "heartbeat_interval_ms must be at least 100ms")
+	}
+	if c.HeartbeatTimeout < c.HeartbeatInterval*2 {
+		errs = append(errs, "heartbeat_timeout_ms should be at least 2x heartbeat_interval_ms")
+	}
+	if c.ElectionTimeout < 500 {
+		errs = append(errs, "election_timeout_ms must be at least 500ms")
 	}
 
 	// Validate log level
@@ -391,6 +468,47 @@ func (m *Manager) LoadFromEnv() {
 	}
 	if v := os.Getenv(EnvEncryptionPassphrase); v != "" {
 		cfg.EncryptionPassphrase = v
+	}
+
+	// Cluster configuration
+	if v := os.Getenv(EnvClusterPort); v != "" {
+		if port, err := strconv.Atoi(v); err == nil {
+			cfg.ClusterPort = port
+		}
+	}
+	if v := os.Getenv(EnvClusterPeers); v != "" {
+		// Parse comma-separated list of peers
+		peers := strings.Split(v, ",")
+		cfg.ClusterPeers = make([]string, 0, len(peers))
+		for _, peer := range peers {
+			peer = strings.TrimSpace(peer)
+			if peer != "" {
+				cfg.ClusterPeers = append(cfg.ClusterPeers, peer)
+			}
+		}
+	}
+	if v := os.Getenv(EnvReplicationMode); v != "" {
+		cfg.ReplicationMode = strings.ToLower(v)
+	}
+	if v := os.Getenv(EnvHeartbeatInterval); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil {
+			cfg.HeartbeatInterval = ms
+		}
+	}
+	if v := os.Getenv(EnvHeartbeatTimeout); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil {
+			cfg.HeartbeatTimeout = ms
+		}
+	}
+	if v := os.Getenv(EnvElectionTimeout); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil {
+			cfg.ElectionTimeout = ms
+		}
+	}
+	if v := os.Getenv(EnvMinQuorum); v != "" {
+		if q, err := strconv.Atoi(v); err == nil {
+			cfg.MinQuorum = q
+		}
 	}
 
 	m.Set(cfg)
@@ -555,6 +673,71 @@ func applyConfigValue(cfg *Config, key, value string) error {
 		cfg.LogJSON = strings.ToLower(value) == "true" || value == "1"
 	case "encryption_enabled":
 		cfg.EncryptionEnabled = strings.ToLower(value) == "true" || value == "1"
+
+	// Cluster configuration
+	case "cluster_port":
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid cluster_port value: %s", value)
+		}
+		cfg.ClusterPort = port
+	case "cluster_peers":
+		// Parse as array: ["addr1", "addr2"] or comma-separated
+		value = strings.TrimSpace(value)
+		if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
+			// Array format
+			value = value[1 : len(value)-1]
+		}
+		peers := strings.Split(value, ",")
+		cfg.ClusterPeers = make([]string, 0, len(peers))
+		for _, peer := range peers {
+			peer = strings.TrimSpace(peer)
+			peer = strings.Trim(peer, "\"'")
+			if peer != "" {
+				cfg.ClusterPeers = append(cfg.ClusterPeers, peer)
+			}
+		}
+	case "heartbeat_interval_ms":
+		ms, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid heartbeat_interval_ms value: %s", value)
+		}
+		cfg.HeartbeatInterval = ms
+	case "heartbeat_timeout_ms":
+		ms, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid heartbeat_timeout_ms value: %s", value)
+		}
+		cfg.HeartbeatTimeout = ms
+	case "election_timeout_ms":
+		ms, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid election_timeout_ms value: %s", value)
+		}
+		cfg.ElectionTimeout = ms
+	case "min_quorum":
+		q, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid min_quorum value: %s", value)
+		}
+		cfg.MinQuorum = q
+	case "enable_pre_vote":
+		cfg.EnablePreVote = strings.ToLower(value) == "true" || value == "1"
+	case "replication_mode":
+		cfg.ReplicationMode = strings.ToLower(value)
+	case "sync_timeout_ms":
+		ms, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid sync_timeout_ms value: %s", value)
+		}
+		cfg.SyncTimeout = ms
+	case "max_replication_lag_ms":
+		ms, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid max_replication_lag_ms value: %s", value)
+		}
+		cfg.MaxReplicationLag = ms
+
 	default:
 		// Ignore unknown keys for forward compatibility
 	}
@@ -570,6 +753,11 @@ func (c *Config) String() string {
 	sb.WriteString(fmt.Sprintf("  Port:             %d\n", c.Port))
 	sb.WriteString(fmt.Sprintf("  Binary Port:      %d\n", c.BinaryPort))
 	sb.WriteString(fmt.Sprintf("  Replication Port: %d\n", c.ReplPort))
+	if c.Role == "cluster" {
+		sb.WriteString(fmt.Sprintf("  Cluster Port:     %d\n", c.ClusterPort))
+		sb.WriteString(fmt.Sprintf("  Cluster Peers:    %v\n", c.ClusterPeers))
+		sb.WriteString(fmt.Sprintf("  Replication Mode: %s\n", c.ReplicationMode))
+	}
 	if c.MasterAddr != "" {
 		sb.WriteString(fmt.Sprintf("  Master Address:   %s\n", c.MasterAddr))
 	}
@@ -593,24 +781,59 @@ func (c *Config) ToTOML() string {
 	var sb strings.Builder
 	sb.WriteString("# FlyDB Configuration File\n")
 	sb.WriteString("# Generated by FlyDB\n\n")
-	sb.WriteString(fmt.Sprintf("# Server role: standalone, master, or slave\n"))
+	sb.WriteString("# Server role: standalone, master, slave, or cluster\n")
 	sb.WriteString(fmt.Sprintf("role = \"%s\"\n\n", c.Role))
-	sb.WriteString(fmt.Sprintf("# Network ports\n"))
+	sb.WriteString("# Network ports\n")
 	sb.WriteString(fmt.Sprintf("port = %d\n", c.Port))
 	sb.WriteString(fmt.Sprintf("binary_port = %d\n", c.BinaryPort))
-	sb.WriteString(fmt.Sprintf("replication_port = %d\n\n", c.ReplPort))
+	sb.WriteString(fmt.Sprintf("replication_port = %d\n", c.ReplPort))
+	sb.WriteString(fmt.Sprintf("cluster_port = %d\n\n", c.ClusterPort))
+
 	if c.MasterAddr != "" {
-		sb.WriteString(fmt.Sprintf("# Master address for slave mode\n"))
+		sb.WriteString("# Master address for slave mode\n")
 		sb.WriteString(fmt.Sprintf("master_addr = \"%s\"\n\n", c.MasterAddr))
 	}
-	sb.WriteString(fmt.Sprintf("# Storage\n"))
+
+	// Cluster configuration
+	if c.Role == "cluster" || len(c.ClusterPeers) > 0 {
+		sb.WriteString("# Cluster configuration\n")
+		sb.WriteString("# List of peer addresses (comma-separated or array format)\n")
+		if len(c.ClusterPeers) > 0 {
+			sb.WriteString("cluster_peers = [")
+			for i, peer := range c.ClusterPeers {
+				if i > 0 {
+					sb.WriteString(", ")
+				}
+				sb.WriteString(fmt.Sprintf("\"%s\"", peer))
+			}
+			sb.WriteString("]\n")
+		} else {
+			sb.WriteString("# cluster_peers = [\"host1:9998\", \"host2:9998\"]\n")
+		}
+		sb.WriteString(fmt.Sprintf("heartbeat_interval_ms = %d\n", c.HeartbeatInterval))
+		sb.WriteString(fmt.Sprintf("heartbeat_timeout_ms = %d\n", c.HeartbeatTimeout))
+		sb.WriteString(fmt.Sprintf("election_timeout_ms = %d\n", c.ElectionTimeout))
+		sb.WriteString(fmt.Sprintf("min_quorum = %d  # 0 = auto-calculate\n", c.MinQuorum))
+		sb.WriteString(fmt.Sprintf("enable_pre_vote = %v\n\n", c.EnablePreVote))
+	}
+
+	// Replication configuration
+	sb.WriteString("# Replication mode: async, semi_sync, or sync\n")
+	sb.WriteString(fmt.Sprintf("replication_mode = \"%s\"\n", c.ReplicationMode))
+	sb.WriteString(fmt.Sprintf("sync_timeout_ms = %d\n", c.SyncTimeout))
+	sb.WriteString(fmt.Sprintf("max_replication_lag_ms = %d\n\n", c.MaxReplicationLag))
+
+	sb.WriteString("# Storage\n")
+	sb.WriteString(fmt.Sprintf("data_dir = \"%s\"\n", c.DataDir))
 	sb.WriteString(fmt.Sprintf("db_path = \"%s\"\n\n", c.DBPath))
-	sb.WriteString(fmt.Sprintf("# Data-at-rest encryption (ENABLED BY DEFAULT for security)\n"))
-	sb.WriteString(fmt.Sprintf("# When enabled, you MUST set FLYDB_ENCRYPTION_PASSPHRASE environment variable\n"))
-	sb.WriteString(fmt.Sprintf("# To disable encryption, set encryption_enabled = false\n"))
-	sb.WriteString(fmt.Sprintf("# WARNING: Keep your passphrase safe - data cannot be recovered without it!\n"))
+
+	sb.WriteString("# Data-at-rest encryption (ENABLED BY DEFAULT for security)\n")
+	sb.WriteString("# When enabled, you MUST set FLYDB_ENCRYPTION_PASSPHRASE environment variable\n")
+	sb.WriteString("# To disable encryption, set encryption_enabled = false\n")
+	sb.WriteString("# WARNING: Keep your passphrase safe - data cannot be recovered without it!\n")
 	sb.WriteString(fmt.Sprintf("encryption_enabled = %v\n\n", c.EncryptionEnabled))
-	sb.WriteString(fmt.Sprintf("# Logging\n"))
+
+	sb.WriteString("# Logging\n")
 	sb.WriteString(fmt.Sprintf("log_level = \"%s\"\n", c.LogLevel))
 	sb.WriteString(fmt.Sprintf("log_json = %v\n", c.LogJSON))
 	return sb.String()

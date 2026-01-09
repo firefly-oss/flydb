@@ -157,6 +157,15 @@ func printUsage() {
 	fmt.Println()
 }
 
+// getHostname returns the hostname of the current machine, or "localhost" if it cannot be determined.
+func getHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "localhost"
+	}
+	return hostname
+}
+
 // main is the entry point for the FlyDB server application.
 // It orchestrates the initialization of all subsystems and starts the server.
 func main() {
@@ -593,8 +602,101 @@ func main() {
 			}
 		}()
 
+	case "cluster":
+		// Cluster Mode: Start the cluster manager for distributed operation with
+		// automatic leader election and failover.
+		unified, ok := store.(*storage.UnifiedStorageEngine)
+		if !ok {
+			log.Error("Cluster mode requires unified storage engine")
+			os.Exit(1)
+		}
+
+		// Create cluster configuration from config
+		clusterConfig := server.ClusterConfig{
+			NodeID:            fmt.Sprintf("%s:%d", getHostname(), cfg.ClusterPort),
+			NodeAddr:          fmt.Sprintf(":%d", cfg.ClusterPort),
+			Peers:             cfg.ClusterPeers,
+			HeartbeatInterval: time.Duration(cfg.HeartbeatInterval) * time.Millisecond,
+			HeartbeatTimeout:  time.Duration(cfg.HeartbeatTimeout) * time.Millisecond,
+			ElectionTimeout:   time.Duration(cfg.ElectionTimeout) * time.Millisecond,
+			MinQuorum:         cfg.MinQuorum,
+			EnablePreVote:     cfg.EnablePreVote,
+		}
+
+		clusterMgr := server.NewClusterManagerWithConfig(clusterConfig)
+
+		// Set up callbacks for leader/follower transitions
+		clusterMgr.SetCallbacks(
+			func() {
+				// On becoming leader: start replication master
+				replLog.Info("This node is now the LEADER - starting replication master")
+				replicator := server.NewReplicator(unified.WAL(), store, true)
+				go func() {
+					if err := replicator.StartMaster(fmt.Sprintf(":%d", cfg.ReplPort)); err != nil {
+						replLog.Error("Replication master error", "error", err)
+					}
+				}()
+			},
+			func(leaderAddr string) {
+				// On becoming follower: connect to leader for replication
+				replLog.Info("This node is now a FOLLOWER", "leader", leaderAddr)
+				// Note: In a full implementation, we would start replication to the leader here
+			},
+		)
+
+		// Set up event callback for logging cluster events
+		clusterMgr.SetEventCallback(func(event server.ClusterEvent) {
+			switch event.Type {
+			case server.EventLeaderElected:
+				log.Info("Cluster event: leader elected", "node", event.NodeID, "term", event.Term)
+			case server.EventLeaderStepDown:
+				log.Info("Cluster event: leader stepped down", "node", event.NodeID, "details", event.Details)
+			case server.EventNodeJoined:
+				log.Info("Cluster event: node joined", "node", event.NodeID)
+			case server.EventNodeLeft:
+				log.Info("Cluster event: node left", "node", event.NodeID)
+			case server.EventNodeUnhealthy:
+				log.Warn("Cluster event: node unhealthy", "node", event.NodeID)
+			case server.EventNodeRecovered:
+				log.Info("Cluster event: node recovered", "node", event.NodeID)
+			case server.EventQuorumLost:
+				log.Error("Cluster event: QUORUM LOST - cluster is degraded")
+			case server.EventQuorumRestored:
+				log.Info("Cluster event: quorum restored")
+			case server.EventSplitBrainRisk:
+				log.Warn("Cluster event: split-brain risk detected", "details", event.Details)
+			}
+		})
+
+		// Start the cluster manager
+		if err := clusterMgr.Start(fmt.Sprintf(":%d", cfg.ClusterPort)); err != nil {
+			log.Error("Failed to start cluster manager", "error", err)
+			os.Exit(1)
+		}
+
+		// If this is the first node (no peers), bootstrap as leader
+		if len(cfg.ClusterPeers) == 0 {
+			log.Info("No peers configured - bootstrapping as initial leader")
+			clusterMgr.BecomeLeader()
+		}
+
+		// Handle graceful shutdown of cluster manager
+		go func() {
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+			<-sigCh
+			log.Info("Shutting down cluster manager...")
+			clusterMgr.Stop()
+		}()
+
+		log.Info("Cluster mode started",
+			"cluster_port", cfg.ClusterPort,
+			"peers", cfg.ClusterPeers,
+			"replication_mode", cfg.ReplicationMode,
+		)
+
 	default:
-		log.Error("Invalid role specified", "role", cfg.Role, "valid_roles", "standalone, master, slave")
+		log.Error("Invalid role specified", "role", cfg.Role, "valid_roles", "standalone, master, slave, cluster")
 		os.Exit(1)
 	}
 
