@@ -54,6 +54,31 @@ Data Manipulation Language (DML):
 Data Control Language (DCL):
   - GRANT: Assign permissions to users with optional RLS
 
+Constraint Types:
+=================
+
+Column-level constraints:
+  - PRIMARY KEY: Unique identifier for rows
+  - NOT NULL: Column cannot contain NULL values
+  - UNIQUE: Column values must be unique
+  - DEFAULT: Default value when not specified
+  - CHECK: Validation expression for column values
+  - REFERENCES: Foreign key to another table
+
+Foreign Key Referential Actions:
+================================
+
+Foreign keys support referential actions that define behavior when
+referenced rows are deleted or updated:
+
+  - CASCADE: Propagate operation to dependent rows
+  - SET NULL: Set foreign key to NULL
+  - RESTRICT: Prevent operation if dependencies exist
+  - NO ACTION: Same as RESTRICT (default)
+  - SET DEFAULT: Set to default value (not implemented)
+
+Syntax: REFERENCES table(column) ON DELETE action ON UPDATE action
+
 AST Node Hierarchy:
 ===================
 
@@ -339,10 +364,29 @@ const (
 	ConstraintCheck         ConstraintType = "CHECK"
 )
 
+// ReferentialAction defines the action to take when a referenced row is deleted or updated.
+type ReferentialAction string
+
+// Referential action constants for CASCADE support.
+const (
+	// ReferentialActionNoAction is the default - no automatic action (same as RESTRICT for validation)
+	ReferentialActionNoAction ReferentialAction = "NO ACTION"
+	// ReferentialActionRestrict prevents the operation if there are dependent rows
+	ReferentialActionRestrict ReferentialAction = "RESTRICT"
+	// ReferentialActionCascade propagates the operation to dependent rows
+	ReferentialActionCascade ReferentialAction = "CASCADE"
+	// ReferentialActionSetNull sets the foreign key columns to NULL in dependent rows
+	ReferentialActionSetNull ReferentialAction = "SET NULL"
+	// ReferentialActionSetDefault sets the foreign key columns to their default value (not yet implemented)
+	ReferentialActionSetDefault ReferentialAction = "SET DEFAULT"
+)
+
 // ForeignKeyRef defines a foreign key reference to another table.
 type ForeignKeyRef struct {
-	Table  string // Referenced table name
-	Column string // Referenced column name
+	Table    string            // Referenced table name
+	Column   string            // Referenced column name
+	OnDelete ReferentialAction // Action on DELETE of referenced row
+	OnUpdate ReferentialAction // Action on UPDATE of referenced row's key
 }
 
 // ColumnConstraint defines a constraint on a column.

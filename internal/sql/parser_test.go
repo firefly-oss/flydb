@@ -557,6 +557,81 @@ func TestParseCreateTableWithForeignKey(t *testing.T) {
 	}
 }
 
+func TestParseCreateTableWithForeignKeyCascade(t *testing.T) {
+	input := "CREATE TABLE orders (id INT, user_id INT REFERENCES users(id) ON DELETE CASCADE ON UPDATE SET NULL)"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	createStmt, ok := stmt.(*CreateTableStmt)
+	if !ok {
+		t.Fatalf("Expected CreateTableStmt, got %T", stmt)
+	}
+
+	// Check user_id column has FOREIGN KEY constraint with CASCADE options
+	userIdCol := createStmt.Columns[1]
+	fk := userIdCol.GetForeignKey()
+	if fk == nil {
+		t.Fatal("Expected user_id column to have FOREIGN KEY constraint")
+	}
+
+	if fk.Table != "users" {
+		t.Errorf("Expected FK to reference users table, got %s", fk.Table)
+	}
+
+	if fk.Column != "id" {
+		t.Errorf("Expected FK to reference id column, got %s", fk.Column)
+	}
+
+	if fk.OnDelete != ReferentialActionCascade {
+		t.Errorf("Expected ON DELETE CASCADE, got %s", fk.OnDelete)
+	}
+
+	if fk.OnUpdate != ReferentialActionSetNull {
+		t.Errorf("Expected ON UPDATE SET NULL, got %s", fk.OnUpdate)
+	}
+}
+
+func TestParseCreateTableWithTableLevelForeignKeyCascade(t *testing.T) {
+	input := "CREATE TABLE orders (id INT, user_id INT, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT ON UPDATE CASCADE)"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	createStmt, ok := stmt.(*CreateTableStmt)
+	if !ok {
+		t.Fatalf("Expected CreateTableStmt, got %T", stmt)
+	}
+
+	// Check table-level constraint
+	if len(createStmt.Constraints) != 1 {
+		t.Fatalf("Expected 1 table constraint, got %d", len(createStmt.Constraints))
+	}
+
+	constraint := createStmt.Constraints[0]
+	if constraint.Type != ConstraintForeignKey {
+		t.Errorf("Expected FOREIGN KEY constraint, got %s", constraint.Type)
+	}
+
+	if constraint.ForeignKey == nil {
+		t.Fatal("Expected ForeignKey to be set")
+	}
+
+	if constraint.ForeignKey.OnDelete != ReferentialActionRestrict {
+		t.Errorf("Expected ON DELETE RESTRICT, got %s", constraint.ForeignKey.OnDelete)
+	}
+
+	if constraint.ForeignKey.OnUpdate != ReferentialActionCascade {
+		t.Errorf("Expected ON UPDATE CASCADE, got %s", constraint.ForeignKey.OnUpdate)
+	}
+}
+
 func TestParseCreateTableWithMultipleConstraints(t *testing.T) {
 	input := "CREATE TABLE users (id INT PRIMARY KEY, email TEXT NOT NULL UNIQUE)"
 	lexer := NewLexer(input)

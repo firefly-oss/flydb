@@ -145,29 +145,28 @@ func (s TableSchema) GetPrimaryKeyColumns() []string {
 	return pkCols
 }
 
+// ForeignKeyInfo contains information about a foreign key constraint including referential actions.
+type ForeignKeyInfo struct {
+	Column    string            // Column in this table
+	RefTable  string            // Referenced table name
+	RefColumn string            // Referenced column name
+	OnDelete  ReferentialAction // Action on DELETE of referenced row
+	OnUpdate  ReferentialAction // Action on UPDATE of referenced row's key
+}
+
 // GetForeignKeys returns all foreign key constraints for the table.
-func (s TableSchema) GetForeignKeys() []struct {
-	Column     string
-	RefTable   string
-	RefColumn  string
-} {
-	var fks []struct {
-		Column     string
-		RefTable   string
-		RefColumn  string
-	}
+func (s TableSchema) GetForeignKeys() []ForeignKeyInfo {
+	var fks []ForeignKeyInfo
 
 	// Check column-level foreign keys
 	for _, col := range s.Columns {
 		if fk := col.GetForeignKey(); fk != nil {
-			fks = append(fks, struct {
-				Column     string
-				RefTable   string
-				RefColumn  string
-			}{
+			fks = append(fks, ForeignKeyInfo{
 				Column:    col.Name,
 				RefTable:  fk.Table,
 				RefColumn: fk.Column,
+				OnDelete:  fk.OnDelete,
+				OnUpdate:  fk.OnUpdate,
 			})
 		}
 	}
@@ -176,14 +175,12 @@ func (s TableSchema) GetForeignKeys() []struct {
 	for _, constraint := range s.Constraints {
 		if constraint.Type == ConstraintForeignKey && constraint.ForeignKey != nil {
 			for _, col := range constraint.Columns {
-				fks = append(fks, struct {
-					Column     string
-					RefTable   string
-					RefColumn  string
-				}{
+				fks = append(fks, ForeignKeyInfo{
 					Column:    col,
 					RefTable:  constraint.ForeignKey.Table,
 					RefColumn: constraint.ForeignKey.Column,
+					OnDelete:  constraint.ForeignKey.OnDelete,
+					OnUpdate:  constraint.ForeignKey.OnUpdate,
 				})
 			}
 		}
@@ -721,6 +718,105 @@ func (c *Catalog) ModifyColumn(tableName, columnName, newType string, newConstra
 	}
 
 	// Update modification time
+	schema.ModifiedAt = time.Now()
+
+	// Update the cache
+	c.Tables[tableName] = schema
+
+	// Persist the updated schema
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return err
+	}
+	return c.store.Put(schemaKeyPrefix+tableName, data)
+}
+
+// AddConstraint adds a table-level constraint to an existing table.
+//
+// Parameters:
+//   - tableName: The name of the table to modify
+//   - constraint: The constraint to add
+//
+// Returns an error if:
+//   - The table does not exist
+//   - A constraint with the same name already exists
+//   - The schema cannot be persisted
+func (c *Catalog) AddConstraint(tableName string, constraint TableConstraint) error {
+	schema, ok := c.Tables[tableName]
+	if !ok {
+		return errors.New("table not found: " + tableName)
+	}
+
+	// Check if a constraint with this name already exists
+	if constraint.Name != "" {
+		for _, existing := range schema.Constraints {
+			if existing.Name == constraint.Name {
+				return errors.New("constraint already exists: " + constraint.Name)
+			}
+		}
+	}
+
+	// Validate constraint columns exist in the table
+	for _, colName := range constraint.Columns {
+		found := false
+		for _, col := range schema.Columns {
+			if col.Name == colName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("column not found: " + colName)
+		}
+	}
+
+	// Add the constraint
+	schema.Constraints = append(schema.Constraints, constraint)
+	schema.ModifiedAt = time.Now()
+
+	// Update the cache
+	c.Tables[tableName] = schema
+
+	// Persist the updated schema
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return err
+	}
+	return c.store.Put(schemaKeyPrefix+tableName, data)
+}
+
+// DropConstraint removes a table-level constraint from an existing table.
+//
+// Parameters:
+//   - tableName: The name of the table to modify
+//   - constraintName: The name of the constraint to drop
+//
+// Returns an error if:
+//   - The table does not exist
+//   - The constraint does not exist
+//   - The schema cannot be persisted
+func (c *Catalog) DropConstraint(tableName, constraintName string) error {
+	schema, ok := c.Tables[tableName]
+	if !ok {
+		return errors.New("table not found: " + tableName)
+	}
+
+	// Find and remove the constraint
+	found := false
+	newConstraints := make([]TableConstraint, 0, len(schema.Constraints))
+	for _, constraint := range schema.Constraints {
+		if constraint.Name == constraintName {
+			found = true
+			continue
+		}
+		newConstraints = append(newConstraints, constraint)
+	}
+
+	if !found {
+		return errors.New("constraint not found: " + constraintName)
+	}
+
+	schema.Constraints = newConstraints
 	schema.ModifiedAt = time.Now()
 
 	// Update the cache

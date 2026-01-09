@@ -705,11 +705,19 @@ func (p *Parser) parseColumnConstraints() ([]ColumnConstraint, error) {
 				return nil, errors.New("expected ) after column name in REFERENCES")
 			}
 
+			// Parse optional ON DELETE/UPDATE actions
+			onDelete, onUpdate, err := p.parseReferentialActions()
+			if err != nil {
+				return nil, err
+			}
+
 			constraints = append(constraints, ColumnConstraint{
 				Type: ConstraintForeignKey,
 				ForeignKey: &ForeignKeyRef{
-					Table:  refTable,
-					Column: refColumn,
+					Table:    refTable,
+					Column:   refColumn,
+					OnDelete: onDelete,
+					OnUpdate: onUpdate,
 				},
 			})
 
@@ -731,6 +739,89 @@ func (p *Parser) parseColumnConstraints() ([]ColumnConstraint, error) {
 	}
 
 	return constraints, nil
+}
+
+// parseReferentialActions parses optional ON DELETE/UPDATE actions for foreign keys.
+// Syntax: [ON DELETE action] [ON UPDATE action]
+// Actions: CASCADE, SET NULL, RESTRICT, NO ACTION, SET DEFAULT
+//
+// Examples:
+//
+//	ON DELETE CASCADE
+//	ON UPDATE SET NULL
+//	ON DELETE CASCADE ON UPDATE RESTRICT
+func (p *Parser) parseReferentialActions() (onDelete, onUpdate ReferentialAction, err error) {
+	// Default to NO ACTION (which behaves like RESTRICT)
+	onDelete = ReferentialActionNoAction
+	onUpdate = ReferentialActionNoAction
+
+	// Parse up to two ON clauses (one for DELETE, one for UPDATE)
+	for i := 0; i < 2; i++ {
+		if p.peek.Type != TokenKeyword || p.peek.Value != "ON" {
+			break
+		}
+		p.nextToken() // consume ON
+
+		// Expect DELETE or UPDATE
+		if !p.expectPeek(TokenKeyword) {
+			return "", "", errors.New("expected DELETE or UPDATE after ON")
+		}
+
+		actionType := p.cur.Value
+		if actionType != "DELETE" && actionType != "UPDATE" {
+			return "", "", fmt.Errorf("expected DELETE or UPDATE, got %s", actionType)
+		}
+
+		// Parse the action
+		action, err := p.parseReferentialAction()
+		if err != nil {
+			return "", "", err
+		}
+
+		if actionType == "DELETE" {
+			onDelete = action
+		} else {
+			onUpdate = action
+		}
+	}
+
+	return onDelete, onUpdate, nil
+}
+
+// parseReferentialAction parses a single referential action.
+// Actions: CASCADE, SET NULL, SET DEFAULT, RESTRICT, NO ACTION
+func (p *Parser) parseReferentialAction() (ReferentialAction, error) {
+	if !p.expectPeek(TokenKeyword) {
+		return "", errors.New("expected referential action (CASCADE, SET NULL, RESTRICT, NO ACTION)")
+	}
+
+	switch p.cur.Value {
+	case "CASCADE":
+		return ReferentialActionCascade, nil
+	case "RESTRICT":
+		return ReferentialActionRestrict, nil
+	case "SET":
+		// Expect NULL or DEFAULT
+		if !p.expectPeek(TokenKeyword) {
+			return "", errors.New("expected NULL or DEFAULT after SET")
+		}
+		switch p.cur.Value {
+		case "NULL":
+			return ReferentialActionSetNull, nil
+		case "DEFAULT":
+			return ReferentialActionSetDefault, nil
+		default:
+			return "", fmt.Errorf("expected NULL or DEFAULT after SET, got %s", p.cur.Value)
+		}
+	case "NO":
+		// Expect ACTION
+		if !p.expectPeek(TokenKeyword) || p.cur.Value != "ACTION" {
+			return "", errors.New("expected ACTION after NO")
+		}
+		return ReferentialActionNoAction, nil
+	default:
+		return "", fmt.Errorf("unknown referential action: %s", p.cur.Value)
+	}
 }
 
 // parseCheckExpression parses a CHECK constraint expression.
@@ -962,9 +1053,17 @@ func (p *Parser) parseTableConstraint() (*TableConstraint, error) {
 			return nil, errors.New("expected ) after referenced column")
 		}
 
+		// Parse optional ON DELETE/UPDATE actions
+		onDelete, onUpdate, err := p.parseReferentialActions()
+		if err != nil {
+			return nil, err
+		}
+
 		constraint.ForeignKey = &ForeignKeyRef{
-			Table:  refTable,
-			Column: refColumn,
+			Table:    refTable,
+			Column:   refColumn,
+			OnDelete: onDelete,
+			OnUpdate: onUpdate,
 		}
 
 	case "UNIQUE":

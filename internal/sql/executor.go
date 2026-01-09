@@ -76,6 +76,35 @@ The Executor uses these key prefixes in the storage engine:
 	user:<username>    - User credentials (managed by AuthManager)
 	perm:<user>:<table> - Permissions (managed by AuthManager)
 
+Foreign Key Referential Actions (CASCADE Support):
+==================================================
+
+FlyDB supports referential actions for foreign key constraints that define
+what happens when a referenced row is deleted or updated:
+
+  - CASCADE: Automatically propagate the operation to dependent rows
+  - SET NULL: Set the foreign key column to NULL in dependent rows
+  - RESTRICT: Prevent the operation if dependent rows exist
+  - NO ACTION: Same as RESTRICT (default behavior)
+  - SET DEFAULT: Set to default value (not yet implemented)
+
+Syntax:
+
+	CREATE TABLE orders (
+	    id INT PRIMARY KEY,
+	    user_id INT REFERENCES users(id) ON DELETE CASCADE ON UPDATE SET NULL
+	);
+
+Or with table-level constraints:
+
+	CREATE TABLE orders (
+	    id INT PRIMARY KEY,
+	    user_id INT,
+	    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+	);
+
+Circular CASCADE dependencies are detected and prevented during table creation.
+
 Reactive Notifications:
 =======================
 
@@ -90,6 +119,7 @@ import (
 	"errors"
 	"flydb/internal/auth"
 	"flydb/internal/banner"
+	"flydb/internal/cache"
 	"flydb/internal/storage"
 	"fmt"
 	"sort"
@@ -130,6 +160,21 @@ type Executor struct {
 	// This enables reactive features like WATCH subscriptions.
 	OnInsert func(tableName string, rowJSON string)
 
+	// OnUpdate is a callback invoked after each successful UPDATE.
+	// It receives the table name, old row JSON, and new row JSON.
+	// This enables reactive features like WATCH subscriptions.
+	OnUpdate func(tableName string, oldRowJSON string, newRowJSON string)
+
+	// OnDelete is a callback invoked after each successful DELETE.
+	// It receives the table name and JSON representation of the deleted row.
+	// This enables reactive features like WATCH subscriptions.
+	OnDelete func(tableName string, rowJSON string)
+
+	// OnSchemaChange is a callback invoked after schema modifications.
+	// It receives the event type (CREATE_TABLE, DROP_TABLE, ALTER_TABLE, etc.),
+	// the object name (table/view/index name), and optional details JSON.
+	OnSchemaChange func(eventType string, objectName string, details string)
+
 	// preparedStmts manages prepared statements for this executor.
 	preparedStmts *PreparedStatementManager
 
@@ -141,6 +186,10 @@ type Executor struct {
 
 	// encoder provides encoding validation based on database encoding settings.
 	encoder storage.Encoder
+
+	// queryCache caches SELECT query results for improved read performance.
+	// Cache is automatically invalidated on INSERT, UPDATE, DELETE operations.
+	queryCache *cache.QueryCache
 }
 
 // aggState holds the accumulator state for aggregate function computation.
@@ -183,6 +232,9 @@ func NewExecutor(store storage.Engine, auth *auth.AuthManager) *Executor {
 	// Initialize trigger manager
 	exec.triggerMgr = NewTriggerManager(store)
 
+	// Initialize query cache with default configuration
+	exec.queryCache = cache.New(cache.DefaultConfig())
+
 	return exec
 }
 
@@ -194,6 +246,46 @@ func (e *Executor) SetCollation(collation storage.Collation, locale string) {
 // SetEncoding sets the encoding for data validation.
 func (e *Executor) SetEncoding(encoding storage.CharacterEncoding) {
 	e.encoder = storage.GetEncoder(encoding)
+}
+
+// SetCacheEnabled enables or disables the query cache.
+func (e *Executor) SetCacheEnabled(enabled bool) {
+	if e.queryCache != nil {
+		e.queryCache.SetEnabled(enabled)
+	}
+}
+
+// GetCacheStats returns the current query cache statistics.
+func (e *Executor) GetCacheStats() cache.Stats {
+	if e.queryCache != nil {
+		return e.queryCache.Stats()
+	}
+	return cache.Stats{}
+}
+
+// InvalidateCache invalidates all cached queries for a table.
+// This is called automatically on INSERT, UPDATE, DELETE operations.
+func (e *Executor) InvalidateCache(tableName string) {
+	if e.queryCache != nil {
+		e.queryCache.Invalidate(tableName)
+	}
+}
+
+// InvalidateAllCache clears the entire query cache.
+func (e *Executor) InvalidateAllCache() {
+	if e.queryCache != nil {
+		e.queryCache.InvalidateAll()
+	}
+}
+
+// GetCatalog returns the catalog for metadata access.
+func (e *Executor) GetCatalog() *Catalog {
+	return e.catalog
+}
+
+// GetIndexManager returns the index manager for metadata access.
+func (e *Executor) GetIndexManager() *storage.IndexManager {
+	return e.indexMgr
 }
 
 // SetUser sets the current execution context user.
@@ -751,10 +843,29 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 		}
 	}
 
+	// Check for circular CASCADE dependencies
+	if err := e.checkCircularCascadeDependencies(stmt.TableName, stmt.Columns, stmt.Constraints); err != nil {
+		return "", err
+	}
+
 	err := e.catalog.CreateTableWithConstraints(stmt.TableName, stmt.Columns, stmt.Constraints)
 	if err != nil {
 		return "", err
 	}
+
+	// Invoke OnSchemaChange callback for WATCH functionality
+	if e.OnSchemaChange != nil {
+		// Build column details
+		colNames := make([]string, len(stmt.Columns))
+		for i, col := range stmt.Columns {
+			colNames[i] = col.Name
+		}
+		details, _ := json.Marshal(map[string]interface{}{
+			"columns": colNames,
+		})
+		e.OnSchemaChange("CREATE_TABLE", stmt.TableName, string(details))
+	}
+
 	return "CREATE TABLE OK", nil
 }
 
@@ -817,6 +928,11 @@ func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
 			return "", err
 		}
 		insertedCount++
+	}
+
+	// Invalidate cache for this table since data has changed
+	if e.queryCache != nil {
+		e.queryCache.Invalidate(stmt.TableName)
 	}
 
 	return fmt.Sprintf("INSERT %d", insertedCount), nil
@@ -1172,7 +1288,20 @@ func (e *Executor) checkUniqueConstraints(table TableSchema, values []string, ex
 	return nil
 }
 
-// checkForeignKeyConstraints verifies that all foreign key references exist.
+// checkForeignKeyConstraints verifies that all foreign key references exist in the parent table.
+// This is called during INSERT and UPDATE operations to ensure referential integrity.
+//
+// For each foreign key constraint (both column-level and table-level):
+//  1. Gets the value being inserted/updated for the FK column
+//  2. Skips NULL values (NULL foreign keys are allowed unless NOT NULL is specified)
+//  3. Scans the referenced table to verify the value exists
+//  4. Returns an error if the referenced value doesn't exist
+//
+// Parameters:
+//   - table: The table schema containing the foreign key constraints
+//   - values: The row values being inserted/updated (in column order)
+//
+// Returns an error if any foreign key value doesn't exist in the referenced table.
 func (e *Executor) checkForeignKeyConstraints(table TableSchema, values []string) error {
 	fks := table.GetForeignKeys()
 
@@ -1442,6 +1571,15 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 			}
 		}
 
+		// Handle CASCADE/SET NULL for foreign key references when primary key is updated
+		updatedColumns := make(map[string]bool)
+		for col := range normalizedUpdates {
+			updatedColumns[col] = true
+		}
+		if err := e.handleForeignKeyReferencesOnUpdate(stmt.TableName, oldRow, row, updatedColumns); err != nil {
+			return "", err
+		}
+
 		// Save the updated row.
 		newData, _ := json.Marshal(row)
 		e.store.Put(key, newData)
@@ -1451,12 +1589,23 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 			e.indexMgr.OnUpdate(stmt.TableName, key, oldRow, row)
 		}
 
+		// Invoke OnUpdate callback for WATCH functionality
+		if e.OnUpdate != nil {
+			oldData, _ := json.Marshal(oldRow)
+			e.OnUpdate(stmt.TableName, string(oldData), string(newData))
+		}
+
 		count++
 	}
 
 	// Execute AFTER UPDATE triggers
 	if err := e.executeTriggers(stmt.TableName, TriggerTimingAfter, TriggerEventUpdate); err != nil {
 		return "", fmt.Errorf("AFTER UPDATE trigger failed: %v", err)
+	}
+
+	// Invalidate cache for this table since data has changed
+	if e.queryCache != nil {
+		e.queryCache.Invalidate(stmt.TableName)
 	}
 
 	return fmt.Sprintf("UPDATE %d", count), nil
@@ -1530,6 +1679,12 @@ func (e *Executor) executeDelete(stmt *DeleteStmt) (string, error) {
 			e.indexMgr.OnDelete(stmt.TableName, key, row)
 		}
 
+		// Invoke OnDelete callback for WATCH functionality
+		if e.OnDelete != nil {
+			rowData, _ := json.Marshal(row)
+			e.OnDelete(stmt.TableName, string(rowData))
+		}
+
 		// Delete the row from storage.
 		e.store.Delete(key)
 		count++
@@ -1540,12 +1695,18 @@ func (e *Executor) executeDelete(stmt *DeleteStmt) (string, error) {
 		return "", fmt.Errorf("AFTER DELETE trigger failed: %v", err)
 	}
 
+	// Invalidate cache for this table since data has changed
+	if e.queryCache != nil {
+		e.queryCache.Invalidate(stmt.TableName)
+	}
+
 	return fmt.Sprintf("DELETE %d", count), nil
 }
 
-// checkForeignKeyReferences checks if any other table has a foreign key reference to this row.
-// This prevents deleting rows that are still referenced by other tables.
-func (e *Executor) checkForeignKeyReferences(tableName string, row map[string]interface{}) error {
+// handleForeignKeyReferencesOnDelete handles foreign key references when a row is deleted.
+// It applies the appropriate referential action (RESTRICT, CASCADE, SET NULL) based on the FK definition.
+// Returns an error if the operation should be prevented (RESTRICT/NO ACTION with dependent rows).
+func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[string]interface{}) error {
 	// Get all tables and check their foreign keys
 	for tblName, schema := range e.catalog.Tables {
 		if tblName == tableName {
@@ -1572,17 +1733,356 @@ func (e *Executor) checkForeignKeyReferences(tableName string, row map[string]in
 				continue
 			}
 
-			for _, rowData := range rows {
+			for key, rowData := range rows {
 				var refRow map[string]interface{}
 				if err := json.Unmarshal(rowData, &refRow); err != nil {
 					continue
 				}
 
-				if fkValue, ok := refRow[fk.Column]; ok {
-					if fmt.Sprintf("%v", fkValue) == refValueStr {
-						return fmt.Errorf("cannot delete: row is referenced by %s.%s", tblName, fk.Column)
+				fkValue, ok := refRow[fk.Column]
+				if !ok {
+					continue
+				}
+
+				if fmt.Sprintf("%v", fkValue) != refValueStr {
+					continue
+				}
+
+				// Found a dependent row - apply the referential action
+				onDelete := fk.OnDelete
+				if onDelete == "" {
+					onDelete = ReferentialActionNoAction
+				}
+
+				switch onDelete {
+				case ReferentialActionRestrict, ReferentialActionNoAction:
+					return fmt.Errorf("cannot delete: row is referenced by %s.%s", tblName, fk.Column)
+
+				case ReferentialActionCascade:
+					// Delete the dependent row
+					if err := e.store.Delete(key); err != nil {
+						return fmt.Errorf("cascade delete failed: %v", err)
+					}
+					// Recursively handle cascades from this deleted row
+					if err := e.handleForeignKeyReferencesOnDelete(tblName, refRow); err != nil {
+						return err
+					}
+					// Update indexes
+					if e.indexMgr != nil {
+						e.indexMgr.OnDelete(tblName, key, refRow)
+					}
+					// Invoke OnDelete callback
+					if e.OnDelete != nil {
+						rowDataStr, _ := json.Marshal(refRow)
+						e.OnDelete(tblName, string(rowDataStr))
+					}
+
+				case ReferentialActionSetNull:
+					// Check if the column allows NULL
+					for _, col := range schema.Columns {
+						if col.Name == fk.Column && col.IsNotNull() {
+							return fmt.Errorf("cannot set null: column %s.%s has NOT NULL constraint", tblName, fk.Column)
+						}
+					}
+					// Set the foreign key column to NULL
+					oldRow := make(map[string]interface{})
+					for k, v := range refRow {
+						oldRow[k] = v
+					}
+					refRow[fk.Column] = nil
+					newData, _ := json.Marshal(refRow)
+					if err := e.store.Put(key, newData); err != nil {
+						return fmt.Errorf("set null failed: %v", err)
+					}
+					// Update indexes
+					if e.indexMgr != nil {
+						e.indexMgr.OnUpdate(tblName, key, oldRow, refRow)
+					}
+					// Invoke OnUpdate callback
+					if e.OnUpdate != nil {
+						oldData, _ := json.Marshal(oldRow)
+						e.OnUpdate(tblName, string(oldData), string(newData))
+					}
+
+				case ReferentialActionSetDefault:
+					// Find the default value for the column
+					var defaultValue interface{}
+					for _, col := range schema.Columns {
+						if col.Name == fk.Column {
+							if defVal, hasDefault := col.GetDefaultValue(); hasDefault {
+								defaultValue = defVal
+							} else {
+								return fmt.Errorf("cannot set default: column %s.%s has no default value", tblName, fk.Column)
+							}
+							break
+						}
+					}
+					// Set the foreign key column to its default value
+					oldRow := make(map[string]interface{})
+					for k, v := range refRow {
+						oldRow[k] = v
+					}
+					refRow[fk.Column] = defaultValue
+					newData, _ := json.Marshal(refRow)
+					if err := e.store.Put(key, newData); err != nil {
+						return fmt.Errorf("set default failed: %v", err)
+					}
+					// Update indexes
+					if e.indexMgr != nil {
+						e.indexMgr.OnUpdate(tblName, key, oldRow, refRow)
 					}
 				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// handleForeignKeyReferencesOnUpdate handles foreign key references when a row's primary key is updated.
+// It applies the appropriate referential action (RESTRICT, CASCADE, SET NULL) based on the FK definition.
+// Returns an error if the operation should be prevented (RESTRICT/NO ACTION with dependent rows).
+func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, newRow map[string]interface{}, updatedColumns map[string]bool) error {
+	// Get the table schema to find primary key columns
+	table, ok := e.catalog.GetTable(tableName)
+	if !ok {
+		return nil
+	}
+
+	pkColumns := table.GetPrimaryKeyColumns()
+	if len(pkColumns) == 0 {
+		return nil
+	}
+
+	// Check if any primary key column was updated
+	pkUpdated := false
+	for _, pkCol := range pkColumns {
+		if updatedColumns[pkCol] {
+			pkUpdated = true
+			break
+		}
+	}
+
+	if !pkUpdated {
+		return nil // No primary key update, no cascade needed
+	}
+
+	// Get all tables and check their foreign keys
+	for tblName, schema := range e.catalog.Tables {
+		if tblName == tableName {
+			continue // Skip self-references for now
+		}
+
+		fks := schema.GetForeignKeys()
+		for _, fk := range fks {
+			if fk.RefTable != tableName {
+				continue
+			}
+
+			// Check if the referenced column was updated
+			if !updatedColumns[fk.RefColumn] {
+				continue
+			}
+
+			// Get the old and new values
+			oldValue, ok := oldRow[fk.RefColumn]
+			if !ok {
+				continue
+			}
+			oldValueStr := fmt.Sprintf("%v", oldValue)
+
+			newValue, ok := newRow[fk.RefColumn]
+			if !ok {
+				continue
+			}
+			newValueStr := fmt.Sprintf("%v", newValue)
+
+			if oldValueStr == newValueStr {
+				continue // Value didn't actually change
+			}
+
+			// Check if any row in the referencing table has the old value
+			prefix := "row:" + tblName + ":"
+			rows, err := e.store.Scan(prefix)
+			if err != nil {
+				continue
+			}
+
+			for key, rowData := range rows {
+				var refRow map[string]interface{}
+				if err := json.Unmarshal(rowData, &refRow); err != nil {
+					continue
+				}
+
+				fkValue, ok := refRow[fk.Column]
+				if !ok {
+					continue
+				}
+
+				if fmt.Sprintf("%v", fkValue) != oldValueStr {
+					continue
+				}
+
+				// Found a dependent row - apply the referential action
+				onUpdate := fk.OnUpdate
+				if onUpdate == "" {
+					onUpdate = ReferentialActionNoAction
+				}
+
+				switch onUpdate {
+				case ReferentialActionRestrict, ReferentialActionNoAction:
+					return fmt.Errorf("cannot update: row is referenced by %s.%s", tblName, fk.Column)
+
+				case ReferentialActionCascade:
+					// Update the foreign key to the new value
+					oldRefRow := make(map[string]interface{})
+					for k, v := range refRow {
+						oldRefRow[k] = v
+					}
+					refRow[fk.Column] = newValueStr
+					newData, _ := json.Marshal(refRow)
+					if err := e.store.Put(key, newData); err != nil {
+						return fmt.Errorf("cascade update failed: %v", err)
+					}
+					// Update indexes
+					if e.indexMgr != nil {
+						e.indexMgr.OnUpdate(tblName, key, oldRefRow, refRow)
+					}
+					// Invoke OnUpdate callback
+					if e.OnUpdate != nil {
+						oldData, _ := json.Marshal(oldRefRow)
+						e.OnUpdate(tblName, string(oldData), string(newData))
+					}
+
+				case ReferentialActionSetNull:
+					// Check if the column allows NULL
+					for _, col := range schema.Columns {
+						if col.Name == fk.Column && col.IsNotNull() {
+							return fmt.Errorf("cannot set null: column %s.%s has NOT NULL constraint", tblName, fk.Column)
+						}
+					}
+					// Set the foreign key column to NULL
+					oldRefRow := make(map[string]interface{})
+					for k, v := range refRow {
+						oldRefRow[k] = v
+					}
+					refRow[fk.Column] = nil
+					newData, _ := json.Marshal(refRow)
+					if err := e.store.Put(key, newData); err != nil {
+						return fmt.Errorf("set null failed: %v", err)
+					}
+					// Update indexes
+					if e.indexMgr != nil {
+						e.indexMgr.OnUpdate(tblName, key, oldRefRow, refRow)
+					}
+
+				case ReferentialActionSetDefault:
+					// Find the default value for the column
+					var defaultValue interface{}
+					for _, col := range schema.Columns {
+						if col.Name == fk.Column {
+							if defVal, hasDefault := col.GetDefaultValue(); hasDefault {
+								defaultValue = defVal
+							} else {
+								return fmt.Errorf("cannot set default: column %s.%s has no default value", tblName, fk.Column)
+							}
+							break
+						}
+					}
+					// Set the foreign key column to its default value
+					oldRefRow := make(map[string]interface{})
+					for k, v := range refRow {
+						oldRefRow[k] = v
+					}
+					refRow[fk.Column] = defaultValue
+					newData, _ := json.Marshal(refRow)
+					if err := e.store.Put(key, newData); err != nil {
+						return fmt.Errorf("set default failed: %v", err)
+					}
+					// Update indexes
+					if e.indexMgr != nil {
+						e.indexMgr.OnUpdate(tblName, key, oldRefRow, refRow)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkForeignKeyReferences is a backward-compatible wrapper that checks for RESTRICT/NO ACTION.
+// Deprecated: Use handleForeignKeyReferencesOnDelete for full CASCADE support.
+func (e *Executor) checkForeignKeyReferences(tableName string, row map[string]interface{}) error {
+	return e.handleForeignKeyReferencesOnDelete(tableName, row)
+}
+
+// checkCircularCascadeDependencies detects circular CASCADE dependencies that could cause infinite loops.
+// A circular CASCADE dependency occurs when table A has CASCADE to B, B has CASCADE to C, and C has CASCADE to A.
+// This would cause an infinite loop during DELETE or UPDATE operations.
+func (e *Executor) checkCircularCascadeDependencies(newTableName string, columns []ColumnDef, constraints []TableConstraint) error {
+	// Build a graph of CASCADE dependencies including the new table
+	// Graph: table -> list of tables it cascades to
+	cascadeGraph := make(map[string][]string)
+
+	// Add existing tables' CASCADE dependencies
+	for tableName, schema := range e.catalog.Tables {
+		fks := schema.GetForeignKeys()
+		for _, fk := range fks {
+			if fk.OnDelete == ReferentialActionCascade || fk.OnUpdate == ReferentialActionCascade {
+				cascadeGraph[fk.RefTable] = append(cascadeGraph[fk.RefTable], tableName)
+			}
+		}
+	}
+
+	// Add the new table's CASCADE dependencies
+	for _, col := range columns {
+		if fk := col.GetForeignKey(); fk != nil {
+			if fk.OnDelete == ReferentialActionCascade || fk.OnUpdate == ReferentialActionCascade {
+				cascadeGraph[fk.Table] = append(cascadeGraph[fk.Table], newTableName)
+			}
+		}
+	}
+	for _, constraint := range constraints {
+		if constraint.Type == ConstraintForeignKey && constraint.ForeignKey != nil {
+			fk := constraint.ForeignKey
+			if fk.OnDelete == ReferentialActionCascade || fk.OnUpdate == ReferentialActionCascade {
+				cascadeGraph[fk.Table] = append(cascadeGraph[fk.Table], newTableName)
+			}
+		}
+	}
+
+	// Detect cycles using DFS
+	visited := make(map[string]bool)
+	recStack := make(map[string]bool)
+
+	var detectCycle func(table string, path []string) error
+	detectCycle = func(table string, path []string) error {
+		visited[table] = true
+		recStack[table] = true
+		path = append(path, table)
+
+		for _, dependent := range cascadeGraph[table] {
+			if !visited[dependent] {
+				if err := detectCycle(dependent, path); err != nil {
+					return err
+				}
+			} else if recStack[dependent] {
+				// Found a cycle - build the cycle path for the error message
+				cyclePath := append(path, dependent)
+				return fmt.Errorf("circular CASCADE dependency detected: %s", strings.Join(cyclePath, " -> "))
+			}
+		}
+
+		recStack[table] = false
+		return nil
+	}
+
+	// Check for cycles starting from each table
+	for table := range cascadeGraph {
+		if !visited[table] {
+			if err := detectCycle(table, nil); err != nil {
+				return err
 			}
 		}
 	}
@@ -1613,6 +2113,19 @@ func (e *Executor) checkForeignKeyReferences(tableName string, row map[string]in
 //
 // Returns the query results as newline-separated CSV rows.
 func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
+	// Generate cache key from the query and user context.
+	// Cache key includes: table name, columns, where clause, order by, limit, offset, user.
+	// We only cache simple queries (no JOINs, no aggregates, no subqueries in WHERE).
+	cacheKey := e.generateSelectCacheKey(stmt)
+	canCache := cacheKey != "" && e.queryCache != nil && stmt.Join == nil && len(stmt.Aggregates) == 0
+
+	// Try to get result from cache
+	if canCache {
+		if cachedResult, found := e.queryCache.Get(cacheKey); found {
+			return cachedResult, nil
+		}
+	}
+
 	// Check if the table is actually a view
 	if view, ok := e.catalog.GetView(stmt.TableName); ok {
 		return e.executeViewQuery(stmt, view)
@@ -1896,10 +2409,69 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 	}
 	header := strings.Join(headers, ", ")
 
+	var finalResult string
 	if rowCount == 0 {
-		return fmt.Sprintf("%s\n(0 rows)", header), nil
+		finalResult = fmt.Sprintf("%s\n(0 rows)", header)
+	} else {
+		finalResult = fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(result, "\n"), rowCount)
 	}
-	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(result, "\n"), rowCount), nil
+
+	// Cache the result for future queries
+	if canCache && e.queryCache != nil {
+		// Collect tables referenced by this query for cache invalidation
+		tables := []string{stmt.TableName}
+		e.queryCache.Set(cacheKey, finalResult, tables)
+	}
+
+	return finalResult, nil
+}
+
+// generateSelectCacheKey generates a cache key for a SELECT statement.
+// Returns empty string if the query should not be cached (e.g., has subqueries).
+func (e *Executor) generateSelectCacheKey(stmt *SelectStmt) string {
+	// Don't cache queries with subqueries in WHERE clause
+	if stmt.WhereExt != nil && stmt.WhereExt.IsSubquery {
+		return ""
+	}
+
+	// Build cache key from query components
+	var parts []string
+	parts = append(parts, "SELECT")
+	parts = append(parts, stmt.TableName)
+	parts = append(parts, strings.Join(stmt.Columns, ","))
+
+	if stmt.Distinct {
+		parts = append(parts, "DISTINCT")
+	}
+
+	if stmt.Where != nil {
+		parts = append(parts, fmt.Sprintf("WHERE:%s=%s", stmt.Where.Column, stmt.Where.Value))
+	}
+
+	if stmt.WhereExt != nil {
+		parts = append(parts, fmt.Sprintf("WHERE_EXT:%s%s%s", stmt.WhereExt.Column, stmt.WhereExt.Operator, stmt.WhereExt.Value))
+	}
+
+	if stmt.OrderBy != nil {
+		dir := stmt.OrderBy.Direction
+		if dir == "" {
+			dir = "ASC"
+		}
+		parts = append(parts, fmt.Sprintf("ORDER:%s:%s", stmt.OrderBy.Column, dir))
+	}
+
+	if stmt.Limit > 0 {
+		parts = append(parts, fmt.Sprintf("LIMIT:%d", stmt.Limit))
+	}
+
+	if stmt.Offset > 0 {
+		parts = append(parts, fmt.Sprintf("OFFSET:%d", stmt.Offset))
+	}
+
+	// Include user context for RLS-aware caching
+	parts = append(parts, fmt.Sprintf("USER:%s", e.currentUser))
+
+	return strings.Join(parts, "|")
 }
 
 // executeUnion executes a UNION statement by combining results from multiple SELECTs.
@@ -4143,7 +4715,15 @@ func (e *Executor) inspectTable(tableName string) (string, error) {
 	if len(fks) > 0 {
 		results = append(results, "Foreign Keys:")
 		for _, fk := range fks {
-			results = append(results, fmt.Sprintf("  %s -> %s(%s)", fk.Column, fk.RefTable, fk.RefColumn))
+			fkInfo := fmt.Sprintf("  %s -> %s(%s)", fk.Column, fk.RefTable, fk.RefColumn)
+			// Add referential actions if not default
+			if fk.OnDelete != "" && fk.OnDelete != ReferentialActionNoAction {
+				fkInfo += fmt.Sprintf(" ON DELETE %s", fk.OnDelete)
+			}
+			if fk.OnUpdate != "" && fk.OnUpdate != ReferentialActionNoAction {
+				fkInfo += fmt.Sprintf(" ON UPDATE %s", fk.OnUpdate)
+			}
+			results = append(results, fkInfo)
 		}
 	}
 
@@ -4160,6 +4740,13 @@ func (e *Executor) inspectTable(tableName string) (string, error) {
 			}
 			if constraint.ForeignKey != nil {
 				constraintInfo += fmt.Sprintf(" -> %s(%s)", constraint.ForeignKey.Table, constraint.ForeignKey.Column)
+				// Add referential actions if not default
+				if constraint.ForeignKey.OnDelete != "" && constraint.ForeignKey.OnDelete != ReferentialActionNoAction {
+					constraintInfo += fmt.Sprintf(" ON DELETE %s", constraint.ForeignKey.OnDelete)
+				}
+				if constraint.ForeignKey.OnUpdate != "" && constraint.ForeignKey.OnUpdate != ReferentialActionNoAction {
+					constraintInfo += fmt.Sprintf(" ON UPDATE %s", constraint.ForeignKey.OnUpdate)
+				}
 			}
 			results = append(results, constraintInfo)
 		}
@@ -4458,6 +5045,16 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 			e.store.Put(key, newData)
 		}
 
+		// Invoke OnSchemaChange callback
+		if e.OnSchemaChange != nil {
+			details, _ := json.Marshal(map[string]interface{}{
+				"action":     "ADD_COLUMN",
+				"column":     stmt.ColumnDef.Name,
+				"columnType": stmt.ColumnDef.Type,
+			})
+			e.OnSchemaChange("ALTER_TABLE", stmt.TableName, string(details))
+		}
+
 		return "ALTER TABLE OK", nil
 
 	case AlterActionDropColumn:
@@ -4485,6 +5082,15 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 			delete(row, stmt.ColumnName)
 			newData, _ := json.Marshal(row)
 			e.store.Put(key, newData)
+		}
+
+		// Invoke OnSchemaChange callback
+		if e.OnSchemaChange != nil {
+			details, _ := json.Marshal(map[string]interface{}{
+				"action": "DROP_COLUMN",
+				"column": stmt.ColumnName,
+			})
+			e.OnSchemaChange("ALTER_TABLE", stmt.TableName, string(details))
 		}
 
 		return "ALTER TABLE OK", nil
@@ -4517,6 +5123,16 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 				newData, _ := json.Marshal(row)
 				e.store.Put(key, newData)
 			}
+		}
+
+		// Invoke OnSchemaChange callback
+		if e.OnSchemaChange != nil {
+			details, _ := json.Marshal(map[string]interface{}{
+				"action":    "RENAME_COLUMN",
+				"oldColumn": stmt.ColumnName,
+				"newColumn": stmt.NewColumnName,
+			})
+			e.OnSchemaChange("ALTER_TABLE", stmt.TableName, string(details))
 		}
 
 		return "ALTER TABLE OK", nil
@@ -4556,15 +5172,79 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 			return "", err
 		}
 
+		// Invoke OnSchemaChange callback
+		if e.OnSchemaChange != nil {
+			details, _ := json.Marshal(map[string]interface{}{
+				"action":  "MODIFY_COLUMN",
+				"column":  stmt.ColumnName,
+				"newType": stmt.NewColumnType,
+			})
+			e.OnSchemaChange("ALTER_TABLE", stmt.TableName, string(details))
+		}
+
 		return "ALTER TABLE OK", nil
 
 	case AlterActionAddConstraint:
-		// TODO: Implement ADD CONSTRAINT
-		return "", errors.New("ADD CONSTRAINT not yet implemented")
+		if stmt.Constraint == nil {
+			return "", errors.New("constraint definition required for ADD CONSTRAINT")
+		}
+
+		// Validate foreign key references if present
+		if stmt.Constraint.Type == ConstraintForeignKey && stmt.Constraint.ForeignKey != nil {
+			refTable, ok := e.catalog.GetTable(stmt.Constraint.ForeignKey.Table)
+			if !ok {
+				return "", fmt.Errorf("foreign key references non-existent table: %s", stmt.Constraint.ForeignKey.Table)
+			}
+			found := false
+			for _, refCol := range refTable.Columns {
+				if refCol.Name == stmt.Constraint.ForeignKey.Column {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return "", fmt.Errorf("foreign key references non-existent column: %s.%s", stmt.Constraint.ForeignKey.Table, stmt.Constraint.ForeignKey.Column)
+			}
+		}
+
+		// Add the constraint to the catalog
+		if err := e.catalog.AddConstraint(stmt.TableName, *stmt.Constraint); err != nil {
+			return "", err
+		}
+
+		// Invoke OnSchemaChange callback
+		if e.OnSchemaChange != nil {
+			details, _ := json.Marshal(map[string]interface{}{
+				"action":         "ADD_CONSTRAINT",
+				"constraintName": stmt.Constraint.Name,
+				"constraintType": string(stmt.Constraint.Type),
+				"columns":        stmt.Constraint.Columns,
+			})
+			e.OnSchemaChange("ALTER_TABLE", stmt.TableName, string(details))
+		}
+
+		return "ALTER TABLE OK", nil
 
 	case AlterActionDropConstraint:
-		// TODO: Implement DROP CONSTRAINT
-		return "", errors.New("DROP CONSTRAINT not yet implemented")
+		if stmt.ConstraintName == "" {
+			return "", errors.New("constraint name required for DROP CONSTRAINT")
+		}
+
+		// Drop the constraint from the catalog
+		if err := e.catalog.DropConstraint(stmt.TableName, stmt.ConstraintName); err != nil {
+			return "", err
+		}
+
+		// Invoke OnSchemaChange callback
+		if e.OnSchemaChange != nil {
+			details, _ := json.Marshal(map[string]interface{}{
+				"action":         "DROP_CONSTRAINT",
+				"constraintName": stmt.ConstraintName,
+			})
+			e.OnSchemaChange("ALTER_TABLE", stmt.TableName, string(details))
+		}
+
+		return "ALTER TABLE OK", nil
 
 	default:
 		return "", fmt.Errorf("unknown ALTER TABLE action: %s", stmt.Action)
@@ -4780,6 +5460,16 @@ func (e *Executor) executeDropTable(stmt *DropTableStmt) (string, error) {
 		return "", err
 	}
 
+	// Invalidate cache for this table since it's being dropped
+	if e.queryCache != nil {
+		e.queryCache.Invalidate(stmt.TableName)
+	}
+
+	// Invoke OnSchemaChange callback for WATCH functionality
+	if e.OnSchemaChange != nil {
+		e.OnSchemaChange("DROP_TABLE", stmt.TableName, "{}")
+	}
+
 	return "DROP TABLE OK", nil
 }
 
@@ -4846,6 +5536,11 @@ func (e *Executor) executeTruncateTable(stmt *TruncateTableStmt) (string, error)
 			seqKey := "seq:" + stmt.TableName + ":" + col.Name
 			e.store.Delete(seqKey)
 		}
+	}
+
+	// Invalidate cache for this table since data has changed
+	if e.queryCache != nil {
+		e.queryCache.Invalidate(stmt.TableName)
 	}
 
 	return "TRUNCATE TABLE OK", nil
