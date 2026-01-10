@@ -105,6 +105,8 @@ type Config struct {
 	ElectionTimeout   int      // Election timeout in milliseconds
 	MinQuorum         int      // Minimum nodes for quorum (0 = auto)
 	EnablePreVote     bool     // Enable pre-vote protocol
+	PartitionCount    int      // Number of data partitions (power of 2)
+	ReplicationFactor int      // Number of replicas per partition
 
 	// Replication configuration
 	ReplicationMode   string // async, semi_sync, or sync
@@ -141,6 +143,8 @@ func DefaultConfig() Config {
 		ElectionTimeout:   1000, // 1s
 		MinQuorum:         0,    // auto-calculate
 		EnablePreVote:     true,
+		PartitionCount:    256,  // Number of data partitions
+		ReplicationFactor: 3,    // Number of replicas per partition
 
 		// Replication defaults
 		ReplicationMode:   "async",
@@ -177,6 +181,8 @@ func FromConfig(cfg *config.Config) Config {
 		ElectionTimeout:   cfg.ElectionTimeout,
 		MinQuorum:         cfg.MinQuorum,
 		EnablePreVote:     cfg.EnablePreVote,
+		PartitionCount:    cfg.PartitionCount,
+		ReplicationFactor: cfg.ReplicationFactor,
 
 		// Replication configuration
 		ReplicationMode:   cfg.ReplicationMode,
@@ -220,6 +226,8 @@ func (c *Config) ToConfig() *config.Config {
 		ElectionTimeout:   c.ElectionTimeout,
 		MinQuorum:         c.MinQuorum,
 		EnablePreVote:     c.EnablePreVote,
+		PartitionCount:    c.PartitionCount,
+		ReplicationFactor: c.ReplicationFactor,
 
 		// Replication configuration
 		ReplicationMode:   c.ReplicationMode,
@@ -803,6 +811,23 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 		preVoteStr := promptWithDefault(reader, "  Enable pre-vote protocol? (y/n)", defaultPreVote)
 		cfg.EnablePreVote = strings.ToLower(preVoteStr) == "y" || strings.ToLower(preVoteStr) == "yes"
 
+		// Partition count
+		defaultPartitions := strconv.Itoa(cfg.PartitionCount)
+		partitionsStr := promptWithDefault(reader, "  Partition count (power of 2)", defaultPartitions)
+		if p, err := strconv.Atoi(partitionsStr); err == nil && p >= 16 && p <= 4096 {
+			// Ensure it's a power of 2
+			if p&(p-1) == 0 {
+				cfg.PartitionCount = p
+			}
+		}
+
+		// Replication factor
+		defaultReplFactor := strconv.Itoa(cfg.ReplicationFactor)
+		replFactorStr := promptWithDefault(reader, "  Replication factor (1-5)", defaultReplFactor)
+		if rf, err := strconv.Atoi(replFactorStr); err == nil && rf >= 1 && rf <= 5 {
+			cfg.ReplicationFactor = rf
+		}
+
 		fmt.Println()
 		stepNum++
 	}
@@ -1021,6 +1046,8 @@ func printSummary(cfg *Config) {
 		}
 		fmt.Printf("    %-16s %s\n", cli.Dimmed("Min Quorum:"), quorumDisplay)
 		fmt.Printf("    %-16s %v\n", cli.Dimmed("Pre-vote:"), cfg.EnablePreVote)
+		fmt.Printf("    %-16s %d\n", cli.Dimmed("Partitions:"), cfg.PartitionCount)
+		fmt.Printf("    %-16s %d\n", cli.Dimmed("Repl Factor:"), cfg.ReplicationFactor)
 	}
 
 	// Storage
