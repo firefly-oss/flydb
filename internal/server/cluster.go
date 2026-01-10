@@ -17,6 +17,22 @@
 /*
 Package server contains the cluster management subsystem for FlyDB.
 
+DEPRECATION NOTICE:
+===================
+
+This file provides legacy cluster management functionality. For new deployments,
+use the unified cluster-replication architecture in the internal/cluster package
+(internal/cluster/unified.go), which provides:
+
+  - Integrated cluster management and replication
+  - Data partitioning with consistent hashing
+  - Per-partition leader election
+  - Automatic rebalancing on node changes
+  - Configurable consistency levels (EVENTUAL, ONE, QUORUM, ALL)
+
+This legacy implementation is maintained for backward compatibility but will
+be removed in a future release.
+
 Cluster Overview:
 =================
 
@@ -82,6 +98,11 @@ Failover Process:
   4. If no response and quorum available, follower declares itself leader
   5. New leader sends COORDINATOR message to all nodes
   6. Other nodes update their leader reference and term
+
+See Also:
+=========
+
+  - internal/cluster/unified.go: Unified cluster-replication architecture (recommended)
 */
 package server
 

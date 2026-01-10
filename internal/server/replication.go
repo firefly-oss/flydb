@@ -17,6 +17,21 @@
 /*
 Package server contains the replication subsystem for FlyDB.
 
+DEPRECATION NOTICE:
+===================
+
+This file provides legacy leader-follower replication for simple master/slave
+setups. For new deployments, consider using the unified cluster-replication
+architecture in the internal/cluster package, which provides:
+
+  - Automatic leader election with term-based fencing
+  - Data partitioning with consistent hashing
+  - Integrated replication with configurable consistency levels
+  - Automatic failover and rebalancing
+
+This legacy implementation is maintained for backward compatibility with
+existing master/slave deployments.
+
 Replication Overview:
 =====================
 
@@ -79,6 +94,11 @@ Failure Handling:
   - The WAL offset ensures no data is lost or duplicated
   - Slaves automatically catch up after network partitions
   - Per-follower health monitoring with automatic failure detection
+
+See Also:
+=========
+
+  - internal/cluster/unified.go: Unified cluster-replication architecture
 */
 package server
 
