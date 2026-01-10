@@ -2,8 +2,8 @@
 
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
-**Version:** 01.26.9
-**Last Updated:** January 9, 2026
+**Version:** 01.26.10
+**Last Updated:** January 10, 2026
 
 ---
 
@@ -158,6 +158,10 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Cluster Events | Real-time event notifications for cluster state changes | 01.26.9 |
 | Dynamic Membership | Nodes can join and leave cluster without downtime | 01.26.9 |
 | Replication Modes | Async, semi-sync, and sync replication modes | 01.26.9 |
+| Unified Cluster Architecture | Single component managing leader election, replication, sharding, and failover | 01.26.10 |
+| Consistent Hashing | Data sharding with virtual nodes for even distribution | 01.26.10 |
+| WAL Streaming Replication | Configurable synchronous, semi-synchronous, and asynchronous replication | 01.26.10 |
+| Automatic Failover | Coordinated failover handling without race conditions | 01.26.10 |
 
 ### Performance Features
 
@@ -219,6 +223,18 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Semicolon Statement Termination | SQL statements require `;` to execute (like psql/mysql) | 01.26.7 |
 | Smart Multi-line Continuation | Automatic `->` prompt for incomplete SQL statements | 01.26.7 |
 | Multi-line Cancel | Ctrl+C cancels multi-line input | 01.26.7 |
+| SQL Dump Utility (flydb-dump) | Database export/import with SQL, CSV, JSON formats | 01.26.10 |
+
+### JSONB Data Type Support
+
+| Feature | Description | Version |
+|---------|-------------|---------|
+| JSONB Storage | Binary JSON storage with validation | 01.26.1 |
+| JSON Operators | `->`, `->>`, `@>`, `<@`, `?`, `?&`, `?\|` operators | 01.26.10 |
+| JSON Path Queries | `$.key.subkey[0].field` path syntax | 01.26.10 |
+| JSON Functions | json_extract, json_set, json_remove, json_merge, json_keys, json_typeof, json_valid | 01.26.10 |
+| JSON Array Functions | json_array_length, json_array_append, json_array | 01.26.10 |
+| JSON Object Functions | json_object for dynamic JSON creation | 01.26.10 |
 
 ---
 

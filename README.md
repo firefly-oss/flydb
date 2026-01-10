@@ -12,7 +12,7 @@ _/ ____\  | ___.__. __| _/\_ |__
   <p><strong>The Lightweight, Embeddable SQL Database for Go Applications</strong></p>
 
   <p>
-    <a href="https://github.com/firefly-oss/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.9-blue.svg" alt="Version"></a>
+    <a href="https://github.com/firefly-oss/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.10-blue.svg" alt="Version"></a>
     <a href="https://github.com/firefly-oss/flydb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="License"></a>
     <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go" alt="Go Version"></a>
     <a href="https://github.com/firefly-oss/flydb"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg" alt="Platform"></a>
@@ -34,6 +34,7 @@ Whether you are building microservices that need local persistence, edge applica
 - **Security by Default** — AES-256-GCM encryption at rest and row-level security policies protect sensitive data without additional configuration.
 - **Scale When Ready** — Start embedded, then seamlessly transition to leader-follower replication with automatic failover as your needs grow.
 - **Full SQL Support** — Joins, subqueries, transactions, stored procedures, triggers, and prepared statements. No compromises on query capabilities.
+- **JSONB Support** — Store and query semi-structured JSON data with PostgreSQL-compatible operators (`->`, `->>`, `@>`, `<@`, `?`) and functions.
 - **ODBC/JDBC Ready** — Binary wire protocol with complete metadata APIs enables building standard database drivers for any language or platform.
 
 ### Quick Example
@@ -102,9 +103,12 @@ SELECT * FROM users WHERE name LIKE 'A%';
   - [Authentication](#authentication)
   - [Encryption at Rest](#encryption-at-rest-1)
   - [Row-Level Security](#row-level-security)
-- [Replication](#replication-1)
+- [Replication & Clustering](#replication--clustering)
+  - [Unified Architecture](#unified-architecture)
   - [Start a Leader](#start-a-leader)
   - [Start a Follower](#start-a-follower)
+  - [Consistency Levels](#consistency-levels)
+  - [Cluster Features](#cluster-features)
 - [Documentation](#documentation)
 - [Development](#development)
   - [Running Tests](#running-tests)
@@ -171,12 +175,14 @@ FlyDB implements a production-grade, layered architecture inspired by PostgreSQL
           │
           ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                       Replication Layer                                │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │                    Leader-Follower Replication                   │  │
-│  │  • WAL-based log shipping        • Automatic reconnection        │  │
-│  │  • Eventual consistency          • Offset-based sync             │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
+│                    Cluster & Replication Layer                         │
+│  ┌────────────────────┐  ┌────────────────────┐  ┌──────────────────┐  │
+│  │  Partition Manager │  │  Consensus Engine  │  │ Replication Eng. │  │
+│  │                    │  │                    │  │                  │  │
+│  │ • Consistent hash  │  │ • Leader election  │  │ • WAL streaming  │  │
+│  │ • Virtual nodes    │  │ • Term-based fence │  │ • Multi-mode     │  │
+│  │ • Auto-rebalance   │  │ • Quorum decisions │  │ • Auto-failover  │  │
+│  └────────────────────┘  └────────────────────┘  └──────────────────┘  │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -935,9 +941,35 @@ GRANT SELECT ON orders WHERE user_id = 'alice' TO alice;
 
 ---
 
-## Replication
+## Replication & Clustering
 
-FlyDB supports leader-follower replication with automatic failover and configurable consistency modes.
+FlyDB provides a unified cluster-replication architecture that integrates leader election, data sharding, and replication into a single cohesive system.
+
+### Unified Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    Unified Cluster Manager                       │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                  Partition Manager                          │ │
+│  │  - Consistent hash ring for data distribution               │ │
+│  │  - Partition ownership tracking                             │ │
+│  │  - Automatic rebalancing on node changes                    │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                  Consensus Engine                           │ │
+│  │  - Leader election with term-based fencing                  │ │
+│  │  - Quorum-based decisions                                   │ │
+│  │  - Split-brain prevention                                   │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                  Replication Engine                         │ │
+│  │  - WAL streaming with configurable consistency              │ │
+│  │  - Automatic failover handling                              │ │
+│  │  - Per-partition replication state                          │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
+```
 
 ### Start a Leader
 
@@ -953,13 +985,24 @@ FlyDB supports leader-follower replication with automatic failover and configura
 
 Followers automatically sync from the leader and can be promoted if the leader fails.
 
+### Consistency Levels
+
+| Level | Description |
+|-------|-------------|
+| `EVENTUAL` | Returns immediately, replicates asynchronously |
+| `ONE` | Waits for at least one replica to acknowledge |
+| `QUORUM` | Waits for majority acknowledgment |
+| `ALL` | Waits for all replicas to acknowledge |
+
 ### Cluster Features
 
+- **Consistent Hashing**: Data sharding with virtual nodes for even distribution
 - **Term-based Elections**: Monotonically increasing term numbers prevent stale leaders
 - **Quorum Requirements**: Majority required for leader election and decisions
 - **Split-brain Prevention**: Leaders step down if they lose quorum
 - **Dynamic Membership**: Nodes can join/leave without cluster restart
 - **Health Monitoring**: Per-node health tracking with automatic failure detection
+- **Automatic Rebalancing**: Partitions redistribute when nodes join or leave
 - **Replication Lag Tracking**: Monitor lag per follower for capacity planning
 
 ---
@@ -1008,10 +1051,12 @@ flydb/
     cmd/
         flydb/              Server entry point
         flydb-shell/        CLI client entry point (fsql command)
+        flydb-dump/         Database dump/restore utility (fdump command)
     internal/
         auth/               Authentication and authorization
         banner/             Startup banner display
         cache/              Query caching
+        cluster/            Unified cluster-replication management
         config/             Configuration management
         errors/             Error handling
         logging/            Structured logging

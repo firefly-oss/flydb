@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [01.26.10] - 2026-01-10
+
+### Unified Cluster Architecture, SQL Dump Utility, and JSONB Support
+
+This release introduces a unified cluster-replication architecture, a dedicated SQL dump utility for database exports, and complete JSONB data type support with PostgreSQL-compatible operators.
+
+### Added
+
+#### Unified Cluster-Replication Architecture
+- **Unified Cluster Manager**: Single component managing leader election, replication, sharding, and failover
+- **Consistent Hashing**: Data sharding with virtual nodes for even distribution
+- **WAL Streaming**: Configurable synchronous, semi-synchronous, and asynchronous replication
+- **Automatic Failover**: Coordinated failover handling without race conditions
+- **Node Health Monitoring**: Integrated health checks with automatic recovery
+
+#### SQL Dump Utility (`flydb-dump`)
+- **Full Database Dumps**: Export complete database with schema and data
+- **Schema-Only Exports**: Export table definitions without data
+- **Table Selection**: Export specific tables using `-tables` flag
+- **Multiple Output Formats**:
+  - SQL: Standard INSERT statements for restoration
+  - CSV: Comma-separated values for spreadsheets and analysis
+  - JSON: Structured data for APIs and tools
+- **Import/Restore**: Restore databases from SQL dump files using `-restore` flag
+
+#### JSONB Data Type Support
+- **JSON Operators**:
+  - `->`: Get JSON field (returns JSON)
+  - `->>`: Get JSON field (returns text)
+  - `@>`: Contains operator
+  - `<@`: Contained by operator
+  - `?`: Key exists operator
+  - `?&`: All keys exist operator
+  - `?|`: Any key exists operator
+- **JSON Functions**:
+  - `json_extract(json, path)`: Extract value at JSON path
+  - `json_extract_text(json, path)`: Extract value as text
+  - `json_array_length(json)`: Get array length
+  - `json_keys(json)`: Get object keys as array
+  - `json_typeof(json)`: Get JSON value type
+  - `json_valid(json)`: Check if valid JSON
+  - `json_set(json, path, value)`: Set value at path
+  - `json_remove(json, path)`: Remove value at path
+  - `json_merge(json1, json2)`: Merge two JSON objects
+  - `json_array_append(json, value)`: Append value to array
+  - `json_object(k1, v1, ...)`: Create JSON object
+  - `json_array(v1, v2, ...)`: Create JSON array
+- **JSON Path Syntax**: Support for `$.key.subkey[0].field` notation
+
+### Changed
+- **Lexer**: Added token types for JSON operators
+- **Parser**: Extended WHERE clause parsing for JSON operators
+- **Executor**: Added JSON function evaluation
+
+### Example Usage
+
+```sql
+-- Create table with JSONB column
+CREATE TABLE products (id SERIAL PRIMARY KEY, data JSONB);
+
+-- Insert JSON data
+INSERT INTO products (data) VALUES ('{"name": "Widget", "price": 29.99, "tags": ["sale", "new"]}');
+
+-- Query with JSON operators
+SELECT * FROM products WHERE data @> '{"tags": ["sale"]}';
+SELECT * FROM products WHERE data->>'name' = 'Widget';
+SELECT json_extract(data, '$.price') FROM products;
+```
+
+```bash
+# Dump database to SQL
+flydb-dump -host localhost -database mydb > backup.sql
+
+# Export specific tables to CSV
+flydb-dump -format csv -tables users,orders -database mydb > data.csv
+
+# Restore from dump
+flydb-dump -restore -database mydb < backup.sql
+```
+
+---
+
 ## [01.26.9] - 2026-01-09
 
 ### Production-Ready Cluster Mode with Automatic Failover
