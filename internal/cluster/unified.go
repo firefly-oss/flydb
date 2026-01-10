@@ -77,10 +77,12 @@ Key Concepts:
 package cluster
 
 import (
+	"bufio"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"net"
 	"sort"
 	"sync"
@@ -542,6 +544,50 @@ type ClusterMetrics struct {
 	BytesReplicated int64 `json:"bytes_replicated"`
 }
 
+// WALInterface defines the interface for WAL operations.
+// This allows the unified cluster manager to work with the WAL for replication.
+type WALInterface interface {
+	// Write appends an operation to the WAL
+	Write(op byte, key string, value []byte) error
+	// Sync flushes pending writes to disk
+	Sync() error
+	// Size returns the current WAL size in bytes
+	Size() (int64, error)
+	// Replay reads the WAL from startOffset and invokes fn for each record
+	Replay(startOffset int64, fn func(op byte, key string, value []byte)) error
+	// Close closes the WAL
+	Close() error
+}
+
+// StorageEngine defines the interface for storage operations.
+// This allows the unified cluster manager to apply replicated operations.
+type StorageEngine interface {
+	// Put stores a value
+	Put(key string, value []byte) error
+	// Delete removes a key
+	Delete(key string) error
+	// Get retrieves a value
+	Get(key string) ([]byte, error)
+}
+
+// WAL operation types
+const (
+	OpPut    byte = 1
+	OpDelete byte = 2
+)
+
+// FollowerReplicationState tracks the replication state of a follower
+type FollowerReplicationState struct {
+	Address     string
+	WALOffset   int64
+	LastAckTime time.Time
+	Lag         time.Duration
+	IsHealthy   bool
+	FailedSends int
+	conn        net.Conn
+	mu          sync.Mutex
+}
+
 // UnifiedClusterManager integrates cluster management and replication
 type UnifiedClusterManager struct {
 	config ClusterConfig
@@ -569,6 +615,14 @@ type UnifiedClusterManager struct {
 	// Replication state per partition
 	replicationState   map[int]*PartitionReplicationState
 	replicationStateMu sync.RWMutex
+
+	// WAL-based replication
+	wal              WALInterface
+	store            StorageEngine
+	followers        map[string]*FollowerReplicationState
+	followersMu      sync.RWMutex
+	replListener     net.Listener
+	replPollInterval time.Duration
 
 	// Metrics
 	metrics *ClusterMetrics
@@ -628,6 +682,8 @@ func NewUnifiedClusterManager(config ClusterConfig) *UnifiedClusterManager {
 		partitions:       make(map[int]*Partition),
 		nodes:            make(map[string]*ClusterNode),
 		replicationState: make(map[int]*PartitionReplicationState),
+		followers:        make(map[string]*FollowerReplicationState),
+		replPollInterval: 100 * time.Millisecond,
 		metrics:          &ClusterMetrics{TotalPartitions: config.PartitionCount},
 		eventCh:          make(chan ClusterEvent, 1000),
 		stopCh:           make(chan struct{}),
@@ -657,6 +713,16 @@ func NewUnifiedClusterManager(config ClusterConfig) *UnifiedClusterManager {
 	ucm.ring.AddNode(selfNode)
 
 	return ucm
+}
+
+// SetWAL sets the WAL for replication
+func (ucm *UnifiedClusterManager) SetWAL(wal WALInterface) {
+	ucm.wal = wal
+}
+
+// SetStore sets the storage engine for applying replicated operations
+func (ucm *UnifiedClusterManager) SetStore(store StorageEngine) {
+	ucm.store = store
 }
 
 // Start initializes and starts the cluster manager
@@ -1603,4 +1669,378 @@ func (ucm *UnifiedClusterManager) SetFollowerCallback(callback func(leaderID str
 // GetConfig returns the cluster configuration
 func (ucm *UnifiedClusterManager) GetConfig() ClusterConfig {
 	return ucm.config
+}
+
+// ============================================================================
+// WAL-Based Replication Methods
+// ============================================================================
+
+// StartReplicationMaster starts the WAL replication server for leader mode.
+// This listens for follower connections and streams WAL updates to them.
+func (ucm *UnifiedClusterManager) StartReplicationMaster(port string) error {
+	if ucm.wal == nil {
+		return fmt.Errorf("WAL not configured - call SetWAL first")
+	}
+
+	ln, err := net.Listen("tcp", port)
+	if err != nil {
+		return fmt.Errorf("failed to start replication listener: %w", err)
+	}
+	ucm.replListener = ln
+
+	fmt.Printf("Replication Master listening on %s (consistency: %s)\n",
+		port, ucm.config.DefaultConsistency)
+
+	ucm.wg.Add(1)
+	go ucm.acceptReplicationConnections()
+
+	return nil
+}
+
+// acceptReplicationConnections accepts incoming follower connections
+func (ucm *UnifiedClusterManager) acceptReplicationConnections() {
+	defer ucm.wg.Done()
+
+	for {
+		select {
+		case <-ucm.stopCh:
+			if ucm.replListener != nil {
+				ucm.replListener.Close()
+			}
+			return
+		default:
+		}
+
+		ucm.replListener.(*net.TCPListener).SetDeadline(time.Now().Add(1 * time.Second))
+		conn, err := ucm.replListener.Accept()
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			continue
+		}
+
+		go ucm.handleFollowerConnection(conn)
+	}
+}
+
+// handleFollowerConnection manages a single follower connection with WAL streaming
+func (ucm *UnifiedClusterManager) handleFollowerConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// Read the follower's address for identification
+	var addrLen uint32
+	if err := binary.Read(conn, binary.BigEndian, &addrLen); err != nil {
+		addrLen = 0
+	}
+
+	var followerAddr string
+	if addrLen > 0 && addrLen < 1024 {
+		addrBuf := make([]byte, addrLen)
+		if _, err := io.ReadFull(conn, addrBuf); err != nil {
+			return
+		}
+		followerAddr = string(addrBuf)
+	} else {
+		followerAddr = conn.RemoteAddr().String()
+	}
+
+	// Read the follower's current WAL offset
+	var offset int64
+	if err := binary.Read(conn, binary.BigEndian, &offset); err != nil {
+		fmt.Printf("Failed to read follower offset: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Follower %s connected with offset %d\n", followerAddr, offset)
+
+	// Register the follower
+	ucm.followersMu.Lock()
+	follower := &FollowerReplicationState{
+		Address:     followerAddr,
+		WALOffset:   offset,
+		LastAckTime: time.Now(),
+		IsHealthy:   true,
+		conn:        conn,
+	}
+	ucm.followers[followerAddr] = follower
+	ucm.followersMu.Unlock()
+
+	defer func() {
+		ucm.followersMu.Lock()
+		delete(ucm.followers, followerAddr)
+		ucm.followersMu.Unlock()
+		fmt.Printf("Follower %s disconnected\n", followerAddr)
+	}()
+
+	// Start streaming WAL entries
+	ticker := time.NewTicker(ucm.replPollInterval)
+	defer ticker.Stop()
+
+	currentOffset := offset
+
+	for {
+		select {
+		case <-ucm.stopCh:
+			return
+		case <-ticker.C:
+			size, err := ucm.wal.Size()
+			if err != nil {
+				continue
+			}
+
+			if size > currentOffset {
+				bytesReplicated := int64(0)
+
+				err := ucm.wal.Replay(currentOffset, func(op byte, key string, value []byte) {
+					// Serialize the WAL entry
+					buf := make([]byte, 1+4+len(key)+4+len(value))
+					buf[0] = op
+					binary.BigEndian.PutUint32(buf[1:], uint32(len(key)))
+					copy(buf[5:], []byte(key))
+					off := 5 + len(key)
+					binary.BigEndian.PutUint32(buf[off:], uint32(len(value)))
+					copy(buf[off+4:], value)
+
+					// Send to follower
+					if _, err := conn.Write(buf); err != nil {
+						follower.mu.Lock()
+						follower.FailedSends++
+						if follower.FailedSends >= 3 {
+							follower.IsHealthy = false
+						}
+						follower.mu.Unlock()
+						return
+					}
+
+					bytesReplicated += int64(len(buf))
+					currentOffset += int64(len(buf))
+				})
+
+				if err != nil && err != io.EOF {
+					fmt.Printf("Replay error for %s: %v\n", followerAddr, err)
+					return
+				}
+
+				// Update metrics
+				ucm.metrics.mu.Lock()
+				ucm.metrics.BytesReplicated += bytesReplicated
+				ucm.metrics.mu.Unlock()
+
+				// Update follower state
+				follower.mu.Lock()
+				follower.WALOffset = currentOffset
+				follower.LastAckTime = time.Now()
+				follower.FailedSends = 0
+				follower.IsHealthy = true
+				follower.mu.Unlock()
+			}
+		}
+	}
+}
+
+// StartReplicationFollower connects to a leader and synchronizes data via WAL streaming.
+func (ucm *UnifiedClusterManager) StartReplicationFollower(leaderAddr string) error {
+	if ucm.wal == nil {
+		return fmt.Errorf("WAL not configured - call SetWAL first")
+	}
+	if ucm.store == nil {
+		return fmt.Errorf("Store not configured - call SetStore first")
+	}
+
+	ucm.wg.Add(1)
+	go ucm.followerReplicationLoop(leaderAddr)
+	return nil
+}
+
+// followerReplicationLoop continuously syncs with the leader
+func (ucm *UnifiedClusterManager) followerReplicationLoop(leaderAddr string) {
+	defer ucm.wg.Done()
+
+	reconnectInterval := 3 * time.Second
+
+	for {
+		select {
+		case <-ucm.stopCh:
+			return
+		default:
+		}
+
+		err := ucm.connectAndSyncWithLeader(leaderAddr)
+		if err != nil {
+			fmt.Printf("Replication connection lost: %v. Reconnecting in %v...\n",
+				err, reconnectInterval)
+			time.Sleep(reconnectInterval)
+			continue
+		}
+	}
+}
+
+// connectAndSyncWithLeader establishes connection and syncs with leader
+func (ucm *UnifiedClusterManager) connectAndSyncWithLeader(leaderAddr string) error {
+	conn, err := net.DialTimeout("tcp", leaderAddr, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Send our address for identification
+	selfAddr := fmt.Sprintf("%s:%d", ucm.nodeAddr, ucm.config.DataPort)
+	if err := binary.Write(conn, binary.BigEndian, uint32(len(selfAddr))); err != nil {
+		return err
+	}
+	if _, err := conn.Write([]byte(selfAddr)); err != nil {
+		return err
+	}
+
+	// Get current WAL size as starting offset
+	offset, err := ucm.wal.Size()
+	if err != nil {
+		return err
+	}
+
+	// Send our offset
+	if err := binary.Write(conn, binary.BigEndian, offset); err != nil {
+		return err
+	}
+
+	fmt.Printf("Connected to Leader at %s with offset %d\n", leaderAddr, offset)
+
+	reader := bufio.NewReader(conn)
+
+	// Receive and apply WAL entries
+	for {
+		select {
+		case <-ucm.stopCh:
+			return nil
+		default:
+		}
+
+		// Set read deadline
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+
+		// Read operation type
+		op, err := reader.ReadByte()
+		if err != nil {
+			return fmt.Errorf("failed to read operation: %w", err)
+		}
+
+		// Read key length
+		var keyLen uint32
+		if err := binary.Read(reader, binary.BigEndian, &keyLen); err != nil {
+			return fmt.Errorf("failed to read key length: %w", err)
+		}
+
+		// Read key
+		keyBuf := make([]byte, keyLen)
+		if _, err := io.ReadFull(reader, keyBuf); err != nil {
+			return fmt.Errorf("failed to read key: %w", err)
+		}
+		key := string(keyBuf)
+
+		// Read value length
+		var valLen uint32
+		if err := binary.Read(reader, binary.BigEndian, &valLen); err != nil {
+			return fmt.Errorf("failed to read value length: %w", err)
+		}
+
+		// Read value
+		valBuf := make([]byte, valLen)
+		if _, err := io.ReadFull(reader, valBuf); err != nil {
+			return fmt.Errorf("failed to read value: %w", err)
+		}
+
+		// Apply the operation to local storage
+		switch op {
+		case OpPut:
+			if err := ucm.store.Put(key, valBuf); err != nil {
+				fmt.Printf("Failed to apply PUT %s: %v\n", key, err)
+			}
+		case OpDelete:
+			if err := ucm.store.Delete(key); err != nil {
+				fmt.Printf("Failed to apply DELETE %s: %v\n", key, err)
+			}
+		}
+	}
+}
+
+// GetFollowerStates returns the state of all connected followers
+func (ucm *UnifiedClusterManager) GetFollowerStates() []FollowerReplicationState {
+	ucm.followersMu.RLock()
+	defer ucm.followersMu.RUnlock()
+
+	states := make([]FollowerReplicationState, 0, len(ucm.followers))
+	for _, f := range ucm.followers {
+		f.mu.Lock()
+		states = append(states, FollowerReplicationState{
+			Address:     f.Address,
+			WALOffset:   f.WALOffset,
+			LastAckTime: f.LastAckTime,
+			Lag:         f.Lag,
+			IsHealthy:   f.IsHealthy,
+			FailedSends: f.FailedSends,
+		})
+		f.mu.Unlock()
+	}
+	return states
+}
+
+// GetFollowerCount returns the number of connected followers
+func (ucm *UnifiedClusterManager) GetFollowerCount() int {
+	ucm.followersMu.RLock()
+	defer ucm.followersMu.RUnlock()
+	return len(ucm.followers)
+}
+
+// GetHealthyFollowerCount returns the number of healthy followers
+func (ucm *UnifiedClusterManager) GetHealthyFollowerCount() int {
+	ucm.followersMu.RLock()
+	defer ucm.followersMu.RUnlock()
+
+	count := 0
+	for _, f := range ucm.followers {
+		f.mu.Lock()
+		if f.IsHealthy {
+			count++
+		}
+		f.mu.Unlock()
+	}
+	return count
+}
+
+// WaitForReplication waits for replication to complete based on consistency level
+func (ucm *UnifiedClusterManager) WaitForReplication(consistency ConsistencyLevel, timeout time.Duration) error {
+	if consistency == ConsistencyEventual {
+		return nil // No waiting for eventual consistency
+	}
+
+	ucm.followersMu.RLock()
+	totalFollowers := len(ucm.followers)
+	ucm.followersMu.RUnlock()
+
+	if totalFollowers == 0 {
+		return nil // No followers to wait for
+	}
+
+	requiredAcks := 1
+	switch consistency {
+	case ConsistencyOne:
+		requiredAcks = 1
+	case ConsistencyQuorum:
+		requiredAcks = (totalFollowers / 2) + 1
+	case ConsistencyAll:
+		requiredAcks = totalFollowers
+	}
+
+	// Wait for required acknowledgments
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		healthyCount := ucm.GetHealthyFollowerCount()
+		if healthyCount >= requiredAcks {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	return fmt.Errorf("replication timeout: insufficient acknowledgments")
 }

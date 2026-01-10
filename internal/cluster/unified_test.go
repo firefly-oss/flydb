@@ -309,3 +309,357 @@ func TestClusterMetrics(t *testing.T) {
 		t.Errorf("Expected 16 total partitions, got %d", metrics.TotalPartitions)
 	}
 }
+
+// ============================================================================
+// WAL Replication Tests
+// ============================================================================
+
+// mockWAL implements WALInterface for testing
+type mockWAL struct {
+	entries []walEntry
+	size    int64
+}
+
+type walEntry struct {
+	op    byte
+	key   string
+	value []byte
+}
+
+func newMockWAL() *mockWAL {
+	return &mockWAL{
+		entries: make([]walEntry, 0),
+		size:    0,
+	}
+}
+
+func (m *mockWAL) Write(op byte, key string, value []byte) error {
+	m.entries = append(m.entries, walEntry{op, key, value})
+	m.size += int64(1 + 4 + len(key) + 4 + len(value))
+	return nil
+}
+
+func (m *mockWAL) Sync() error {
+	return nil
+}
+
+func (m *mockWAL) Size() (int64, error) {
+	return m.size, nil
+}
+
+func (m *mockWAL) Replay(startOffset int64, fn func(op byte, key string, value []byte)) error {
+	for _, e := range m.entries {
+		fn(e.op, e.key, e.value)
+	}
+	return nil
+}
+
+func (m *mockWAL) Close() error {
+	return nil
+}
+
+// mockStore implements StorageEngine for testing
+type mockStore struct {
+	data map[string][]byte
+}
+
+func newMockStore() *mockStore {
+	return &mockStore{
+		data: make(map[string][]byte),
+	}
+}
+
+func (m *mockStore) Put(key string, value []byte) error {
+	m.data[key] = value
+	return nil
+}
+
+func (m *mockStore) Delete(key string) error {
+	delete(m.data, key)
+	return nil
+}
+
+func (m *mockStore) Get(key string) ([]byte, error) {
+	if v, ok := m.data[key]; ok {
+		return v, nil
+	}
+	return nil, nil
+}
+
+// TestSetWALAndStore tests setting WAL and store on the cluster manager
+func TestSetWALAndStore(t *testing.T) {
+	config := ClusterConfig{
+		NodeID:         "test-node",
+		NodeAddr:       "localhost",
+		PartitionCount: 16,
+		VirtualNodes:   100,
+	}
+
+	ucm := NewUnifiedClusterManager(config)
+
+	wal := newMockWAL()
+	store := newMockStore()
+
+	ucm.SetWAL(wal)
+	ucm.SetStore(store)
+
+	if ucm.wal == nil {
+		t.Error("WAL was not set")
+	}
+	if ucm.store == nil {
+		t.Error("Store was not set")
+	}
+}
+
+// TestGetFollowerStates tests getting follower states
+func TestGetFollowerStates(t *testing.T) {
+	config := ClusterConfig{
+		NodeID:         "test-node",
+		NodeAddr:       "localhost",
+		PartitionCount: 16,
+		VirtualNodes:   100,
+	}
+
+	ucm := NewUnifiedClusterManager(config)
+
+	// Initially no followers
+	states := ucm.GetFollowerStates()
+	if len(states) != 0 {
+		t.Errorf("Expected 0 followers, got %d", len(states))
+	}
+
+	// Add a mock follower
+	ucm.followersMu.Lock()
+	ucm.followers["follower1"] = &FollowerReplicationState{
+		Address:   "follower1:9999",
+		WALOffset: 1000,
+		IsHealthy: true,
+	}
+	ucm.followersMu.Unlock()
+
+	states = ucm.GetFollowerStates()
+	if len(states) != 1 {
+		t.Errorf("Expected 1 follower, got %d", len(states))
+	}
+	if states[0].Address != "follower1:9999" {
+		t.Errorf("Expected address 'follower1:9999', got '%s'", states[0].Address)
+	}
+}
+
+// TestGetFollowerCount tests getting follower count
+func TestGetFollowerCount(t *testing.T) {
+	config := ClusterConfig{
+		NodeID:         "test-node",
+		NodeAddr:       "localhost",
+		PartitionCount: 16,
+		VirtualNodes:   100,
+	}
+
+	ucm := NewUnifiedClusterManager(config)
+
+	if ucm.GetFollowerCount() != 0 {
+		t.Error("Expected 0 followers initially")
+	}
+
+	ucm.followersMu.Lock()
+	ucm.followers["f1"] = &FollowerReplicationState{Address: "f1", IsHealthy: true}
+	ucm.followers["f2"] = &FollowerReplicationState{Address: "f2", IsHealthy: false}
+	ucm.followersMu.Unlock()
+
+	if ucm.GetFollowerCount() != 2 {
+		t.Errorf("Expected 2 followers, got %d", ucm.GetFollowerCount())
+	}
+}
+
+// TestGetHealthyFollowerCount tests getting healthy follower count
+func TestGetHealthyFollowerCount(t *testing.T) {
+	config := ClusterConfig{
+		NodeID:         "test-node",
+		NodeAddr:       "localhost",
+		PartitionCount: 16,
+		VirtualNodes:   100,
+	}
+
+	ucm := NewUnifiedClusterManager(config)
+
+	ucm.followersMu.Lock()
+	ucm.followers["f1"] = &FollowerReplicationState{Address: "f1", IsHealthy: true}
+	ucm.followers["f2"] = &FollowerReplicationState{Address: "f2", IsHealthy: false}
+	ucm.followers["f3"] = &FollowerReplicationState{Address: "f3", IsHealthy: true}
+	ucm.followersMu.Unlock()
+
+	if ucm.GetHealthyFollowerCount() != 2 {
+		t.Errorf("Expected 2 healthy followers, got %d", ucm.GetHealthyFollowerCount())
+	}
+}
+
+// TestWaitForReplicationEventual tests eventual consistency (no waiting)
+func TestWaitForReplicationEventual(t *testing.T) {
+	config := ClusterConfig{
+		NodeID:         "test-node",
+		NodeAddr:       "localhost",
+		PartitionCount: 16,
+		VirtualNodes:   100,
+	}
+
+	ucm := NewUnifiedClusterManager(config)
+
+	// Eventual consistency should return immediately
+	err := ucm.WaitForReplication(ConsistencyEventual, time.Second)
+	if err != nil {
+		t.Errorf("WaitForReplication with EVENTUAL should not error: %v", err)
+	}
+}
+
+// TestWaitForReplicationNoFollowers tests waiting with no followers
+func TestWaitForReplicationNoFollowers(t *testing.T) {
+	config := ClusterConfig{
+		NodeID:         "test-node",
+		NodeAddr:       "localhost",
+		PartitionCount: 16,
+		VirtualNodes:   100,
+	}
+
+	ucm := NewUnifiedClusterManager(config)
+
+	// With no followers, should return immediately for any consistency level
+	err := ucm.WaitForReplication(ConsistencyAll, time.Second)
+	if err != nil {
+		t.Errorf("WaitForReplication with no followers should not error: %v", err)
+	}
+}
+
+// TestWaitForReplicationWithHealthyFollowers tests waiting with healthy followers
+func TestWaitForReplicationWithHealthyFollowers(t *testing.T) {
+	config := ClusterConfig{
+		NodeID:         "test-node",
+		NodeAddr:       "localhost",
+		PartitionCount: 16,
+		VirtualNodes:   100,
+	}
+
+	ucm := NewUnifiedClusterManager(config)
+
+	// Add healthy followers
+	ucm.followersMu.Lock()
+	ucm.followers["f1"] = &FollowerReplicationState{Address: "f1", IsHealthy: true}
+	ucm.followers["f2"] = &FollowerReplicationState{Address: "f2", IsHealthy: true}
+	ucm.followers["f3"] = &FollowerReplicationState{Address: "f3", IsHealthy: true}
+	ucm.followersMu.Unlock()
+
+	// ConsistencyOne should succeed with 1 healthy follower
+	err := ucm.WaitForReplication(ConsistencyOne, time.Second)
+	if err != nil {
+		t.Errorf("WaitForReplication with ONE should succeed: %v", err)
+	}
+
+	// ConsistencyQuorum should succeed with 2+ healthy followers (quorum of 3 is 2)
+	err = ucm.WaitForReplication(ConsistencyQuorum, time.Second)
+	if err != nil {
+		t.Errorf("WaitForReplication with QUORUM should succeed: %v", err)
+	}
+
+	// ConsistencyAll should succeed with all 3 healthy
+	err = ucm.WaitForReplication(ConsistencyAll, time.Second)
+	if err != nil {
+		t.Errorf("WaitForReplication with ALL should succeed: %v", err)
+	}
+}
+
+// TestWaitForReplicationTimeout tests timeout when not enough healthy followers
+func TestWaitForReplicationTimeout(t *testing.T) {
+	config := ClusterConfig{
+		NodeID:         "test-node",
+		NodeAddr:       "localhost",
+		PartitionCount: 16,
+		VirtualNodes:   100,
+	}
+
+	ucm := NewUnifiedClusterManager(config)
+
+	// Add unhealthy followers
+	ucm.followersMu.Lock()
+	ucm.followers["f1"] = &FollowerReplicationState{Address: "f1", IsHealthy: false}
+	ucm.followers["f2"] = &FollowerReplicationState{Address: "f2", IsHealthy: false}
+	ucm.followersMu.Unlock()
+
+	// ConsistencyOne should timeout with no healthy followers
+	err := ucm.WaitForReplication(ConsistencyOne, 100*time.Millisecond)
+	if err == nil {
+		t.Error("WaitForReplication should timeout with no healthy followers")
+	}
+}
+
+// TestStartReplicationMasterWithoutWAL tests error when WAL not set
+func TestStartReplicationMasterWithoutWAL(t *testing.T) {
+	config := ClusterConfig{
+		NodeID:         "test-node",
+		NodeAddr:       "localhost",
+		PartitionCount: 16,
+		VirtualNodes:   100,
+	}
+
+	ucm := NewUnifiedClusterManager(config)
+
+	err := ucm.StartReplicationMaster(":0")
+	if err == nil {
+		t.Error("StartReplicationMaster should error without WAL")
+	}
+}
+
+// TestStartReplicationFollowerWithoutWAL tests error when WAL not set
+func TestStartReplicationFollowerWithoutWAL(t *testing.T) {
+	config := ClusterConfig{
+		NodeID:         "test-node",
+		NodeAddr:       "localhost",
+		PartitionCount: 16,
+		VirtualNodes:   100,
+	}
+
+	ucm := NewUnifiedClusterManager(config)
+
+	err := ucm.StartReplicationFollower("localhost:9999")
+	if err == nil {
+		t.Error("StartReplicationFollower should error without WAL")
+	}
+}
+
+// TestStartReplicationFollowerWithoutStore tests error when store not set
+func TestStartReplicationFollowerWithoutStore(t *testing.T) {
+	config := ClusterConfig{
+		NodeID:         "test-node",
+		NodeAddr:       "localhost",
+		PartitionCount: 16,
+		VirtualNodes:   100,
+	}
+
+	ucm := NewUnifiedClusterManager(config)
+	ucm.SetWAL(newMockWAL())
+
+	err := ucm.StartReplicationFollower("localhost:9999")
+	if err == nil {
+		t.Error("StartReplicationFollower should error without store")
+	}
+}
+
+// TestFollowerReplicationState tests the FollowerReplicationState struct
+func TestFollowerReplicationState(t *testing.T) {
+	state := &FollowerReplicationState{
+		Address:     "follower1:9999",
+		WALOffset:   1000,
+		LastAckTime: time.Now(),
+		Lag:         100 * time.Millisecond,
+		IsHealthy:   true,
+		FailedSends: 0,
+	}
+
+	if state.Address != "follower1:9999" {
+		t.Errorf("Expected address 'follower1:9999', got '%s'", state.Address)
+	}
+	if state.WALOffset != 1000 {
+		t.Errorf("Expected WALOffset 1000, got %d", state.WALOffset)
+	}
+	if !state.IsHealthy {
+		t.Error("Expected IsHealthy to be true")
+	}
+}
