@@ -971,19 +971,43 @@ FlyDB provides a unified cluster-replication architecture that integrates leader
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### Start a Leader
+### Deployment Modes
+
+FlyDB supports multiple deployment modes:
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `standalone` | Single server, no replication | Development, small deployments |
+| `master` | Leader node with legacy replication | Simple master/slave setups |
+| `slave` | Follower node with legacy replication | Read replicas for master mode |
+| `cluster` | Unified cluster with integrated replication | Production distributed deployments |
+
+### Simple Master/Slave (Legacy)
+
+For simple deployments, use the master/slave mode:
 
 ```bash
+# Start leader
 ./flydb -role master -port 8888 -repl-port 9999 -data-dir ./data
-```
 
-### Start a Follower
-
-```bash
+# Start follower
 ./flydb -role slave -port 8889 -master localhost:9999 -data-dir ./data-replica
 ```
 
-Followers automatically sync from the leader and can be promoted if the leader fails.
+### Cluster Mode (Recommended for Production)
+
+For production deployments, use cluster mode with integrated replication:
+
+```bash
+# Start first node (becomes leader)
+./flydb -role cluster -port 8888 -cluster-port 7000 -repl-port 9999 -data-dir ./node1
+
+# Start additional nodes (join cluster)
+./flydb -role cluster -port 8889 -cluster-port 7001 -repl-port 9998 \
+  -cluster-peers localhost:7000 -data-dir ./node2
+```
+
+Cluster mode provides automatic leader election, integrated WAL replication, and automatic failover.
 
 ### Consistency Levels
 
