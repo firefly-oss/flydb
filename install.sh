@@ -25,7 +25,7 @@ set -euo pipefail
 
 readonly SCRIPT_VERSION="01.26.9"
 readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.9}"
-readonly GITHUB_REPO="firefly-software/flydb"
+readonly GITHUB_REPO="firefly-oss/flydb"
 readonly DOWNLOAD_BASE_URL="https://github.com/${GITHUB_REPO}/releases/download"
 
 # Default values (can be overridden by CLI args or interactive prompts)
@@ -614,6 +614,18 @@ install_downloaded_binaries() {
         exit 1
     fi
 
+    # Install flydb-dump
+    spinner_start "Installing flydb-dump"
+    if $sudo_cmd cp "$TEMP_DIR/flydb-dump" "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb-dump"; then
+        spinner_success "Installed ${bin_dir}/flydb-dump"
+        INSTALLED_FILES+=("$bin_dir/flydb-dump")
+    else
+        spinner_error "Failed to install flydb-dump"
+        cleanup_temp_dir
+        rollback
+        exit 1
+    fi
+
     # Create fsql symlink for convenience
     spinner_start "Creating fsql symlink"
     if $sudo_cmd ln -sf "$bin_dir/flydb-shell" "$bin_dir/fsql"; then
@@ -621,6 +633,15 @@ install_downloaded_binaries() {
         INSTALLED_FILES+=("$bin_dir/fsql")
     else
         spinner_error "Failed to create fsql symlink"
+    fi
+
+    # Create fdump symlink for convenience
+    spinner_start "Creating fdump symlink"
+    if $sudo_cmd ln -sf "$bin_dir/flydb-dump" "$bin_dir/fdump"; then
+        spinner_success "Created ${bin_dir}/fdump symlink"
+        INSTALLED_FILES+=("$bin_dir/fdump")
+    else
+        spinner_error "Failed to create fdump symlink"
     fi
 
     # Clean up temp directory
@@ -1113,6 +1134,15 @@ build_binaries() {
         exit 1
     fi
 
+    spinner_start "Building flydb-dump utility"
+    if go build -o flydb-dump ./cmd/flydb-dump 2>/dev/null; then
+        spinner_success "Built flydb-dump utility"
+        INSTALLED_FILES+=("./flydb-dump")
+    else
+        spinner_error "Failed to build flydb-dump utility"
+        exit 1
+    fi
+
     echo ""
 }
 
@@ -1161,6 +1191,17 @@ install_binaries() {
         exit 1
     fi
 
+    # Install flydb-dump
+    spinner_start "Installing flydb-dump"
+    if $sudo_cmd cp flydb-dump "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb-dump"; then
+        spinner_success "Installed ${bin_dir}/flydb-dump"
+        INSTALLED_FILES+=("$bin_dir/flydb-dump")
+    else
+        spinner_error "Failed to install flydb-dump"
+        rollback
+        exit 1
+    fi
+
     # Create fsql symlink for convenience
     spinner_start "Creating fsql symlink"
     if $sudo_cmd ln -sf "$bin_dir/flydb-shell" "$bin_dir/fsql"; then
@@ -1168,6 +1209,15 @@ install_binaries() {
         INSTALLED_FILES+=("$bin_dir/fsql")
     else
         spinner_error "Failed to create fsql symlink"
+    fi
+
+    # Create fdump symlink for convenience
+    spinner_start "Creating fdump symlink"
+    if $sudo_cmd ln -sf "$bin_dir/flydb-dump" "$bin_dir/fdump"; then
+        spinner_success "Created ${bin_dir}/fdump symlink"
+        INSTALLED_FILES+=("$bin_dir/fdump")
+    else
+        spinner_error "Failed to create fdump symlink"
     fi
 
     echo ""
@@ -1534,11 +1584,28 @@ verify_installation() {
         ((errors++))
     fi
 
+    # Check flydb-dump binary
+    if [[ -x "$bin_dir/flydb-dump" ]]; then
+        local version
+        version=$("$bin_dir/flydb-dump" --version 2>/dev/null | head -1 || echo "unknown")
+        print_substep "${GREEN}${ICON_SUCCESS}${RESET} flydb-dump: $version"
+    else
+        print_substep "${RED}${ICON_ERROR}${RESET} flydb-dump: not found or not executable"
+        ((errors++))
+    fi
+
     # Check fsql symlink
     if [[ -x "$bin_dir/fsql" ]]; then
         print_substep "${GREEN}${ICON_SUCCESS}${RESET} fsql: symlink OK"
     else
         print_substep "${YELLOW}${ICON_WARNING}${RESET} fsql: symlink not found"
+    fi
+
+    # Check fdump symlink
+    if [[ -x "$bin_dir/fdump" ]]; then
+        print_substep "${GREEN}${ICON_SUCCESS}${RESET} fdump: symlink OK"
+    else
+        print_substep "${YELLOW}${ICON_WARNING}${RESET} fdump: symlink not found"
     fi
 
     echo ""
@@ -1568,7 +1635,7 @@ run_uninstall() {
     fi
 
     for dir in "${locations[@]}"; do
-        if [[ -x "$dir/flydb" ]] || [[ -x "$dir/flydb-shell" ]]; then
+        if [[ -x "$dir/flydb" ]] || [[ -x "$dir/flydb-shell" ]] || [[ -x "$dir/flydb-dump" ]]; then
             print_info "Found FlyDB installation in $dir"
             found=true
 
@@ -1599,12 +1666,30 @@ run_uninstall() {
                 fi
             fi
 
+            if [[ -x "$dir/flydb-dump" ]]; then
+                spinner_start "Removing flydb-dump"
+                if $sudo_cmd rm -f "$dir/flydb-dump" 2>/dev/null; then
+                    spinner_success "Removed $dir/flydb-dump"
+                else
+                    spinner_error "Failed to remove $dir/flydb-dump"
+                fi
+            fi
+
             if [[ -L "$dir/fsql" ]] || [[ -x "$dir/fsql" ]]; then
                 spinner_start "Removing fsql symlink"
                 if $sudo_cmd rm -f "$dir/fsql" 2>/dev/null; then
                     spinner_success "Removed $dir/fsql"
                 else
                     spinner_error "Failed to remove $dir/fsql"
+                fi
+            fi
+
+            if [[ -L "$dir/fdump" ]] || [[ -x "$dir/fdump" ]]; then
+                spinner_start "Removing fdump symlink"
+                if $sudo_cmd rm -f "$dir/fdump" 2>/dev/null; then
+                    spinner_success "Removed $dir/fdump"
+                else
+                    spinner_error "Failed to remove $dir/fdump"
                 fi
             fi
         fi
