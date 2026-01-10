@@ -3175,6 +3175,94 @@ func (e *Executor) evaluateScalarFunction(fn *FunctionExpr, row map[string]inter
 				return value
 			}
 		}
+
+	// JSON functions
+	case "JSON_EXTRACT":
+		if len(args) >= 2 {
+			result, err := JSONExtract(args[0], args[1])
+			if err == nil {
+				return result
+			}
+		}
+	case "JSON_EXTRACT_TEXT":
+		if len(args) >= 2 {
+			result, err := JSONExtractText(args[0], args[1])
+			if err == nil {
+				return result
+			}
+		}
+	case "JSON_ARRAY_LENGTH":
+		if len(args) >= 1 {
+			length, err := JSONArrayLength(args[0])
+			if err == nil {
+				return fmt.Sprintf("%d", length)
+			}
+		}
+	case "JSON_KEYS":
+		if len(args) >= 1 {
+			result, err := JSONKeys(args[0])
+			if err == nil {
+				return result
+			}
+		}
+	case "JSON_TYPEOF":
+		if len(args) >= 1 {
+			return JSONTypeOf(args[0])
+		}
+	case "JSON_VALID":
+		if len(args) >= 1 {
+			if JSONValid(args[0]) {
+				return "true"
+			}
+			return "false"
+		}
+	case "JSON_SET":
+		if len(args) >= 3 {
+			// Parse the value as JSON if possible
+			var value interface{}
+			if err := json.Unmarshal([]byte(args[2]), &value); err != nil {
+				value = args[2]
+			}
+			result, err := JSONSet(args[0], args[1], value)
+			if err == nil {
+				return result
+			}
+		}
+	case "JSON_REMOVE":
+		if len(args) >= 2 {
+			result, err := JSONRemove(args[0], args[1])
+			if err == nil {
+				return result
+			}
+		}
+	case "JSON_MERGE":
+		if len(args) >= 2 {
+			result, err := JSONMerge(args[0], args[1])
+			if err == nil {
+				return result
+			}
+		}
+	case "JSON_ARRAY_APPEND":
+		if len(args) >= 2 {
+			var value interface{}
+			if err := json.Unmarshal([]byte(args[1]), &value); err != nil {
+				value = args[1]
+			}
+			result, err := JSONArrayAppend(args[0], value)
+			if err == nil {
+				return result
+			}
+		}
+	case "JSON_OBJECT":
+		result, err := JSONObject(args...)
+		if err == nil {
+			return result
+		}
+	case "JSON_ARRAY":
+		result, err := JSONArray(args...)
+		if err == nil {
+			return result
+		}
 	}
 
 	return "NULL"
@@ -3265,6 +3353,65 @@ func (e *Executor) evaluateWhereClause(where *WhereClause, row map[string]interf
 			return found
 		}
 		return !found // NOT IN
+
+	// JSON operators
+	case "->":
+		// JSON field access - returns JSON
+		result, err := JSONGetField(colStr, where.Value)
+		if err != nil {
+			return false
+		}
+		return result != ""
+	case "->>":
+		// JSON field access - returns text
+		result, err := JSONGetFieldText(colStr, where.Value)
+		if err != nil {
+			return false
+		}
+		return result != ""
+	case "@>":
+		// JSON contains
+		contains, err := JSONContains(colStr, where.Value)
+		if err != nil {
+			return false
+		}
+		return contains
+	case "<@":
+		// JSON contained by
+		containedBy, err := JSONContainedBy(colStr, where.Value)
+		if err != nil {
+			return false
+		}
+		return containedBy
+	case "?":
+		// JSON key exists
+		exists, err := JSONKeyExists(colStr, where.Value)
+		if err != nil {
+			return false
+		}
+		return exists
+	case "?&":
+		// JSON all keys exist
+		keys := strings.Split(where.Value, ",")
+		for i := range keys {
+			keys[i] = strings.TrimSpace(keys[i])
+		}
+		allExist, err := JSONAllKeysExist(colStr, keys)
+		if err != nil {
+			return false
+		}
+		return allExist
+	case "?|":
+		// JSON any key exists
+		keys := strings.Split(where.Value, ",")
+		for i := range keys {
+			keys[i] = strings.TrimSpace(keys[i])
+		}
+		anyExists, err := JSONAnyKeyExists(colStr, keys)
+		if err != nil {
+			return false
+		}
+		return anyExists
 	}
 
 	return false
