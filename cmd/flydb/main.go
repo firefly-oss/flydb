@@ -86,6 +86,7 @@ import (
 
 	"flydb/internal/auth"
 	"flydb/internal/banner"
+	"flydb/internal/cluster"
 	"flydb/internal/config"
 	"flydb/internal/logging"
 	"flydb/internal/server"
@@ -603,81 +604,86 @@ func main() {
 		}()
 
 	case "cluster":
-		// Cluster Mode: Start the cluster manager for distributed operation with
-		// automatic leader election and failover.
+		// Cluster Mode: Start the unified cluster manager for distributed operation
+		// with automatic leader election, data partitioning, and integrated replication.
 		unified, ok := store.(*storage.UnifiedStorageEngine)
 		if !ok {
 			log.Error("Cluster mode requires unified storage engine")
 			os.Exit(1)
 		}
 
-		// Create cluster configuration from config
-		clusterConfig := server.ClusterConfig{
+		// Create unified cluster configuration
+		clusterConfig := cluster.ClusterConfig{
 			NodeID:            fmt.Sprintf("%s:%d", getHostname(), cfg.ClusterPort),
-			NodeAddr:          fmt.Sprintf(":%d", cfg.ClusterPort),
-			Peers:             cfg.ClusterPeers,
+			NodeAddr:          getHostname(),
+			ClusterPort:       cfg.ClusterPort,
+			DataPort:          cfg.ReplPort,
+			Seeds:             cfg.ClusterPeers,
+			PartitionCount:    cfg.PartitionCount,
+			ReplicationFactor: cfg.ReplicationFactor,
 			HeartbeatInterval: time.Duration(cfg.HeartbeatInterval) * time.Millisecond,
-			HeartbeatTimeout:  time.Duration(cfg.HeartbeatTimeout) * time.Millisecond,
 			ElectionTimeout:   time.Duration(cfg.ElectionTimeout) * time.Millisecond,
-			MinQuorum:         cfg.MinQuorum,
-			EnablePreVote:     cfg.EnablePreVote,
+			SyncTimeout:       time.Duration(cfg.SyncTimeout) * time.Millisecond,
+			EnableAutoRebalance: true,
+			DataDir:           cfg.DataDir,
 		}
 
-		clusterMgr := server.NewClusterManagerWithConfig(clusterConfig)
+		// Set default consistency based on replication mode
+		switch cfg.ReplicationMode {
+		case "sync":
+			clusterConfig.DefaultConsistency = cluster.ConsistencyAll
+		case "semi_sync":
+			clusterConfig.DefaultConsistency = cluster.ConsistencyQuorum
+		default:
+			clusterConfig.DefaultConsistency = cluster.ConsistencyOne
+		}
 
-		// Set up callbacks for leader/follower transitions
-		clusterMgr.SetCallbacks(
-			func() {
-				// On becoming leader: start replication master
-				replLog.Info("This node is now the LEADER - starting replication master")
-				replicator := server.NewReplicator(unified.WAL(), store, true)
-				go func() {
-					if err := replicator.StartMaster(fmt.Sprintf(":%d", cfg.ReplPort)); err != nil {
-						replLog.Error("Replication master error", "error", err)
-					}
-				}()
-			},
-			func(leaderAddr string) {
-				// On becoming follower: connect to leader for replication
-				replLog.Info("This node is now a FOLLOWER", "leader", leaderAddr)
-				// Note: In a full implementation, we would start replication to the leader here
-			},
-		)
+		clusterMgr := cluster.NewUnifiedClusterManager(clusterConfig)
+
+		// Set up callback for leader transitions - start replication when becoming leader
+		clusterMgr.SetLeaderCallback(func() {
+			replLog.Info("This node is now the LEADER - starting replication master")
+			replicator := server.NewReplicator(unified.WAL(), store, true)
+			go func() {
+				if err := replicator.StartMaster(fmt.Sprintf(":%d", cfg.ReplPort)); err != nil {
+					replLog.Error("Replication master error", "error", err)
+				}
+			}()
+		})
+
+		// Set up callback for follower transitions
+		clusterMgr.SetFollowerCallback(func(leaderID string) {
+			replLog.Info("This node is now a FOLLOWER", "leader", leaderID)
+		})
 
 		// Set up event callback for logging cluster events
-		clusterMgr.SetEventCallback(func(event server.ClusterEvent) {
+		clusterMgr.OnEvent(func(event cluster.ClusterEvent) {
 			switch event.Type {
-			case server.EventLeaderElected:
+			case cluster.EventLeaderElected:
 				log.Info("Cluster event: leader elected", "node", event.NodeID, "term", event.Term)
-			case server.EventLeaderStepDown:
-				log.Info("Cluster event: leader stepped down", "node", event.NodeID, "details", event.Details)
-			case server.EventNodeJoined:
+			case cluster.EventNodeJoined:
 				log.Info("Cluster event: node joined", "node", event.NodeID)
-			case server.EventNodeLeft:
+			case cluster.EventNodeLeft:
 				log.Info("Cluster event: node left", "node", event.NodeID)
-			case server.EventNodeUnhealthy:
-				log.Warn("Cluster event: node unhealthy", "node", event.NodeID)
-			case server.EventNodeRecovered:
-				log.Info("Cluster event: node recovered", "node", event.NodeID)
-			case server.EventQuorumLost:
+			case cluster.EventNodeFailed:
+				log.Warn("Cluster event: node failed", "node", event.NodeID)
+			case cluster.EventQuorumLost:
 				log.Error("Cluster event: QUORUM LOST - cluster is degraded")
-			case server.EventQuorumRestored:
+			case cluster.EventQuorumRestored:
 				log.Info("Cluster event: quorum restored")
-			case server.EventSplitBrainRisk:
-				log.Warn("Cluster event: split-brain risk detected", "details", event.Details)
+			case cluster.EventRebalanceStarted:
+				log.Info("Cluster event: partition rebalancing started")
+			case cluster.EventRebalanceComplete:
+				log.Info("Cluster event: partition rebalancing complete")
+			case cluster.EventPartitionMoved:
+				log.Info("Cluster event: partition moved", "partition", event.PartitionID)
 			}
 		})
 
-		// Start the cluster manager
-		if err := clusterMgr.Start(fmt.Sprintf(":%d", cfg.ClusterPort)); err != nil {
-			log.Error("Failed to start cluster manager", "error", err)
+		// Start the unified cluster manager
+		if err := clusterMgr.Start(); err != nil {
+			log.Error("Failed to start unified cluster manager", "error", err)
 			os.Exit(1)
-		}
-
-		// If this is the first node (no peers), bootstrap as leader
-		if len(cfg.ClusterPeers) == 0 {
-			log.Info("No peers configured - bootstrapping as initial leader")
-			clusterMgr.BecomeLeader()
 		}
 
 		// Handle graceful shutdown of cluster manager
@@ -685,14 +691,19 @@ func main() {
 			sigCh := make(chan os.Signal, 1)
 			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 			<-sigCh
-			log.Info("Shutting down cluster manager...")
+			log.Info("Shutting down unified cluster manager...")
 			clusterMgr.Stop()
 		}()
 
-		log.Info("Cluster mode started",
+		// Log cluster status
+		status := clusterMgr.GetStatus()
+		log.Info("Unified cluster mode started",
+			"node_id", status.NodeID,
 			"cluster_port", cfg.ClusterPort,
+			"data_port", cfg.ReplPort,
+			"partitions", cfg.PartitionCount,
+			"replication_factor", cfg.ReplicationFactor,
 			"peers", cfg.ClusterPeers,
-			"replication_mode", cfg.ReplicationMode,
 		)
 
 	default:

@@ -143,16 +143,18 @@ type Config struct {
 	MasterAddr string `toml:"master_addr" json:"master_addr"`
 
 	// Cluster configuration
-	ClusterPeers      []string `toml:"cluster_peers" json:"cluster_peers"`           // List of peer addresses for cluster mode
+	ClusterPeers      []string `toml:"cluster_peers" json:"cluster_peers"`                 // List of peer addresses for cluster mode
 	HeartbeatInterval int      `toml:"heartbeat_interval_ms" json:"heartbeat_interval_ms"` // Heartbeat interval in milliseconds
 	HeartbeatTimeout  int      `toml:"heartbeat_timeout_ms" json:"heartbeat_timeout_ms"`   // Heartbeat timeout in milliseconds
 	ElectionTimeout   int      `toml:"election_timeout_ms" json:"election_timeout_ms"`     // Election timeout in milliseconds
 	MinQuorum         int      `toml:"min_quorum" json:"min_quorum"`                       // Minimum nodes for quorum (0 = auto)
 	EnablePreVote     bool     `toml:"enable_pre_vote" json:"enable_pre_vote"`             // Enable pre-vote protocol
+	PartitionCount    int      `toml:"partition_count" json:"partition_count"`             // Number of data partitions (power of 2)
+	ReplicationFactor int      `toml:"replication_factor" json:"replication_factor"`       // Number of replicas per partition
 
 	// Replication configuration
-	ReplicationMode   string `toml:"replication_mode" json:"replication_mode"`       // async, semi_sync, or sync
-	SyncTimeout       int    `toml:"sync_timeout_ms" json:"sync_timeout_ms"`         // Timeout for sync replication in ms
+	ReplicationMode   string `toml:"replication_mode" json:"replication_mode"`             // async, semi_sync, or sync
+	SyncTimeout       int    `toml:"sync_timeout_ms" json:"sync_timeout_ms"`               // Timeout for sync replication in ms
 	MaxReplicationLag int    `toml:"max_replication_lag_ms" json:"max_replication_lag_ms"` // Max acceptable replication lag in ms
 
 	// Storage configuration
@@ -204,6 +206,8 @@ func DefaultConfig() *Config {
 		ElectionTimeout:   1000, // 1s
 		MinQuorum:         0,    // 0 = auto-calculate based on cluster size
 		EnablePreVote:     true,
+		PartitionCount:    256,  // Number of data partitions
+		ReplicationFactor: 3,    // Number of replicas per partition
 
 		// Replication
 		ReplicationMode:   "async",
