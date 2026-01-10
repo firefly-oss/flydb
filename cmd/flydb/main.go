@@ -614,18 +614,18 @@ func main() {
 
 		// Create unified cluster configuration
 		clusterConfig := cluster.ClusterConfig{
-			NodeID:            fmt.Sprintf("%s:%d", getHostname(), cfg.ClusterPort),
-			NodeAddr:          getHostname(),
-			ClusterPort:       cfg.ClusterPort,
-			DataPort:          cfg.ReplPort,
-			Seeds:             cfg.ClusterPeers,
-			PartitionCount:    cfg.PartitionCount,
-			ReplicationFactor: cfg.ReplicationFactor,
-			HeartbeatInterval: time.Duration(cfg.HeartbeatInterval) * time.Millisecond,
-			ElectionTimeout:   time.Duration(cfg.ElectionTimeout) * time.Millisecond,
-			SyncTimeout:       time.Duration(cfg.SyncTimeout) * time.Millisecond,
+			NodeID:              fmt.Sprintf("%s:%d", getHostname(), cfg.ClusterPort),
+			NodeAddr:            getHostname(),
+			ClusterPort:         cfg.ClusterPort,
+			DataPort:            cfg.ReplPort,
+			Seeds:               cfg.ClusterPeers,
+			PartitionCount:      cfg.PartitionCount,
+			ReplicationFactor:   cfg.ReplicationFactor,
+			HeartbeatInterval:   time.Duration(cfg.HeartbeatInterval) * time.Millisecond,
+			ElectionTimeout:     time.Duration(cfg.ElectionTimeout) * time.Millisecond,
+			SyncTimeout:         time.Duration(cfg.SyncTimeout) * time.Millisecond,
 			EnableAutoRebalance: true,
-			DataDir:           cfg.DataDir,
+			DataDir:             cfg.DataDir,
 		}
 
 		// Set default consistency based on replication mode
@@ -640,20 +640,40 @@ func main() {
 
 		clusterMgr := cluster.NewUnifiedClusterManager(clusterConfig)
 
-		// Set up callback for leader transitions - start replication when becoming leader
+		// Wire up WAL and storage for integrated replication
+		clusterMgr.SetWAL(unified.WAL())
+		clusterMgr.SetStore(store)
+
+		// Set up callback for leader transitions - start integrated replication master
 		clusterMgr.SetLeaderCallback(func() {
-			replLog.Info("This node is now the LEADER - starting replication master")
-			replicator := server.NewReplicator(unified.WAL(), store, true)
+			replLog.Info("This node is now the LEADER - starting integrated replication master")
 			go func() {
-				if err := replicator.StartMaster(fmt.Sprintf(":%d", cfg.ReplPort)); err != nil {
+				if err := clusterMgr.StartReplicationMaster(fmt.Sprintf(":%d", cfg.ReplPort)); err != nil {
 					replLog.Error("Replication master error", "error", err)
 				}
 			}()
 		})
 
-		// Set up callback for follower transitions
+		// Set up callback for follower transitions - start integrated replication follower
 		clusterMgr.SetFollowerCallback(func(leaderID string) {
 			replLog.Info("This node is now a FOLLOWER", "leader", leaderID)
+			// Extract leader address from leaderID (format: hostname:clusterPort)
+			// The replication port is DataPort in the config
+			leaderAddr := fmt.Sprintf("%s", leaderID)
+			// Replace cluster port with replication port
+			if idx := len(leaderAddr) - 1; idx > 0 {
+				for i := len(leaderAddr) - 1; i >= 0; i-- {
+					if leaderAddr[i] == ':' {
+						leaderAddr = leaderAddr[:i+1] + fmt.Sprintf("%d", cfg.ReplPort)
+						break
+					}
+				}
+			}
+			go func() {
+				if err := clusterMgr.StartReplicationFollower(leaderAddr); err != nil {
+					replLog.Error("Replication follower error", "error", err)
+				}
+			}()
 		})
 
 		// Set up event callback for logging cluster events
