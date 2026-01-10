@@ -2453,6 +2453,27 @@ func (p *Parser) parseWhereClause() (*WhereClause, error) {
 	case TokenGreaterEqual:
 		operator = ">="
 		p.nextToken()
+	case TokenJSONArrow:
+		operator = "->"
+		p.nextToken()
+	case TokenJSONArrowText:
+		operator = "->>"
+		p.nextToken()
+	case TokenJSONContains:
+		operator = "@>"
+		p.nextToken()
+	case TokenJSONContainedBy:
+		operator = "<@"
+		p.nextToken()
+	case TokenJSONKeyExists:
+		operator = "?"
+		p.nextToken()
+	case TokenJSONAllKeysExist:
+		operator = "?&"
+		p.nextToken()
+	case TokenJSONAnyKeyExists:
+		operator = "?|"
+		p.nextToken()
 	case TokenKeyword:
 		switch p.peek.Value {
 		case "IN":

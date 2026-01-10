@@ -133,6 +133,13 @@ const (
 	TokenConcat                        // String concatenation (||)
 	TokenSemicolon                     // Semicolon (;)
 	TokenDot                           // Dot (.)
+	TokenJSONArrow                     // JSON field access (->)
+	TokenJSONArrowText                 // JSON field access as text (->>)
+	TokenJSONContains                  // JSON contains (@>)
+	TokenJSONContainedBy               // JSON contained by (<@)
+	TokenJSONKeyExists                 // JSON key exists (?)
+	TokenJSONAllKeysExist              // JSON all keys exist (?&)
+	TokenJSONAnyKeyExists              // JSON any key exists (?|)
 )
 
 // Token represents a single lexical unit from the input.
@@ -285,7 +292,11 @@ func (l *Lexer) NextToken() Token {
 			"DATE_FORMAT", "TIME_FORMAT", "STRFTIME", "TO_CHAR", "TO_DATE", "TO_TIMESTAMP",
 			"DATE_TRUNC", "DATE_PART", "INTERVAL",
 			// Type casting
-			"TYPEOF", "TYPE":
+			"TYPEOF", "TYPE",
+			// JSON functions
+			"JSON_EXTRACT", "JSON_EXTRACT_TEXT", "JSON_ARRAY_LENGTH", "JSON_KEYS",
+			"JSON_TYPEOF", "JSON_VALID", "JSON_SET", "JSON_REMOVE", "JSON_MERGE",
+			"JSON_ARRAY_APPEND", "JSON_OBJECT", "JSON_ARRAY":
 			return Token{Type: TokenKeyword, Value: upper}
 		}
 
@@ -365,6 +376,10 @@ func (l *Lexer) NextToken() Token {
 			case '>':
 				l.pos++
 				return Token{Type: TokenNotEqual, Value: "<>"}
+			case '@':
+				// JSON contained by operator (<@)
+				l.pos++
+				return Token{Type: TokenJSONContainedBy, Value: "<@"}
 			}
 		}
 		return Token{Type: TokenLessThan, Value: "<"}
@@ -376,6 +391,32 @@ func (l *Lexer) NextToken() Token {
 			return Token{Type: TokenGreaterEqual, Value: ">="}
 		}
 		return Token{Type: TokenGreaterThan, Value: ">"}
+	}
+	if ch == '@' {
+		l.pos++
+		if l.pos < len(l.input) && l.input[l.pos] == '>' {
+			// JSON contains operator (@>)
+			l.pos++
+			return Token{Type: TokenJSONContains, Value: "@>"}
+		}
+		// Single @ is not a valid SQL operator, return EOF
+		return Token{Type: TokenEOF}
+	}
+	if ch == '?' {
+		l.pos++
+		if l.pos < len(l.input) {
+			switch l.input[l.pos] {
+			case '&':
+				// JSON all keys exist operator (?&)
+				l.pos++
+				return Token{Type: TokenJSONAllKeysExist, Value: "?&"}
+			case '|':
+				// JSON any key exists operator (?|)
+				l.pos++
+				return Token{Type: TokenJSONAnyKeyExists, Value: "?|"}
+			}
+		}
+		return Token{Type: TokenJSONKeyExists, Value: "?"}
 	}
 	if ch == '!' {
 		l.pos++
@@ -395,19 +436,31 @@ func (l *Lexer) NextToken() Token {
 		// Single | is not commonly used in SQL, return EOF
 		return Token{Type: TokenEOF}
 	}
-	// Handle comments
+	// Handle comments and JSON arrow operators
 	if ch == '-' {
-		if l.pos+1 < len(l.input) && l.input[l.pos+1] == '-' {
-			// Single-line comment: skip until end of line
-			l.pos += 2
-			for l.pos < len(l.input) && l.input[l.pos] != '\n' {
-				l.pos++
+		if l.pos+1 < len(l.input) {
+			next := l.input[l.pos+1]
+			if next == '-' {
+				// Single-line comment: skip until end of line
+				l.pos += 2
+				for l.pos < len(l.input) && l.input[l.pos] != '\n' {
+					l.pos++
+				}
+				// Skip the newline and continue lexing
+				if l.pos < len(l.input) {
+					l.pos++
+				}
+				return l.NextToken()
 			}
-			// Skip the newline and continue lexing
-			if l.pos < len(l.input) {
-				l.pos++
+			if next == '>' {
+				// JSON arrow operators (-> or ->>)
+				l.pos += 2
+				if l.pos < len(l.input) && l.input[l.pos] == '>' {
+					l.pos++
+					return Token{Type: TokenJSONArrowText, Value: "->>"}
+				}
+				return Token{Type: TokenJSONArrow, Value: "->"}
 			}
-			return l.NextToken()
 		}
 		l.pos++
 		return Token{Type: TokenMinus, Value: "-"}
