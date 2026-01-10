@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [01.26.11] - 2026-01-10
+
+### Function Value Evaluation in INSERT and UPDATE Statements
+
+This release fixes an important issue where SQL functions like `NOW()`, `CURRENT_TIMESTAMP`, and `UUID()` were being treated as literal strings instead of being evaluated when used in INSERT and UPDATE statements.
+
+### Added
+
+#### Function Evaluation in INSERT/UPDATE Values
+- **INSERT with function values**: Functions like `NOW()`, `UUID()` are now properly evaluated when used as explicit values in INSERT statements
+- **UPDATE with function values**: Functions are now properly evaluated in UPDATE SET clauses
+- **UUID generation functions**: Added support for `UUID()`, `GEN_RANDOM_UUID()`, and `NEWID()` functions for generating UUIDs
+
+#### Supported Functions in INSERT/UPDATE/DEFAULT Contexts
+| Function | Description | Example |
+|----------|-------------|---------|
+| `NOW()` | Current timestamp (RFC3339) | `INSERT INTO logs (created_at) VALUES (NOW())` |
+| `CURRENT_TIMESTAMP` | Current timestamp (RFC3339) | `UPDATE users SET updated_at = CURRENT_TIMESTAMP` |
+| `CURRENT_DATE` | Current date (YYYY-MM-DD) | `INSERT INTO reports (date) VALUES (CURRENT_DATE)` |
+| `CURRENT_TIME` | Current time (HH:MM:SS) | `INSERT INTO events (time) VALUES (CURRENT_TIME)` |
+| `GETDATE()` | Current timestamp (SQL Server) | `INSERT INTO logs (ts) VALUES (GETDATE())` |
+| `SYSDATE()` | Current timestamp (Oracle) | `INSERT INTO logs (ts) VALUES (SYSDATE())` |
+| `LOCALTIMESTAMP` | Current local timestamp | `UPDATE records SET modified = LOCALTIMESTAMP` |
+| `LOCALTIME` | Current local time | `INSERT INTO shifts (start) VALUES (LOCALTIME)` |
+| `UUID()` | Generate random UUID v4 | `INSERT INTO tokens (id) VALUES (UUID())` |
+| `GEN_RANDOM_UUID()` | Generate random UUID (PostgreSQL) | `INSERT INTO keys (key) VALUES (GEN_RANDOM_UUID())` |
+| `NEWID()` | Generate random UUID (SQL Server) | `INSERT INTO sessions (sid) VALUES (NEWID())` |
+
+### Fixed
+- **Function values in INSERT**: `INSERT INTO table (col) VALUES (NOW())` now correctly evaluates `NOW()` instead of storing the literal string "NOW()"
+- **Function values in UPDATE**: `UPDATE table SET col = NOW()` now correctly evaluates `NOW()` instead of failing with a validation error
+- **Default value functions**: Functions in DEFAULT constraints continue to work correctly
+
+### Example Usage
+
+```sql
+-- Create table with UUID and timestamp columns
+CREATE TABLE api_keys (
+    id UUID PRIMARY KEY,
+    key UUID DEFAULT UUID(),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP
+);
+
+-- Insert with explicit function values
+INSERT INTO api_keys (id, key, created_at) VALUES (UUID(), GEN_RANDOM_UUID(), NOW());
+
+-- Update with function values
+UPDATE api_keys SET updated_at = CURRENT_TIMESTAMP WHERE id = '...';
+
+-- Insert using defaults (also works)
+INSERT INTO api_keys (id) VALUES (UUID());
+```
+
+---
+
 ## [01.26.10] - 2026-01-10
 
 ### Unified Cluster Architecture, SQL Dump Utility, and JSONB Support

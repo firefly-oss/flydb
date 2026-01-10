@@ -2,7 +2,7 @@
 
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
-**Version:** 01.26.10
+**Version:** 01.26.11
 **Last Updated:** January 10, 2026
 
 ---
@@ -100,6 +100,8 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Date/Time Functions | NOW, CURRENT_DATE, CURRENT_TIME, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DATE_ADD, DATE_SUB, DATEDIFF | 01.26.1 |
 | NULL Handling | COALESCE, NULLIF, IFNULL | 01.26.1 |
 | Type Conversion | CAST, CONVERT | 01.26.1 |
+| UUID Generation | UUID, GEN_RANDOM_UUID, NEWID | 01.26.11 |
+| Function Values in INSERT/UPDATE | NOW(), UUID(), etc. work in INSERT VALUES and UPDATE SET | 01.26.11 |
 
 ### Extended Column Types
 
@@ -411,6 +413,8 @@ storage:
 
 | Version | Release Date | Highlights |
 |---------|--------------|------------|
+| 01.26.11 | January 2026 | Function value evaluation in INSERT/UPDATE, UUID generation functions |
+| 01.26.10 | January 2026 | Unified cluster architecture, SQL dump utility, JSONB support |
 | 01.26.9 | January 2026 | Production-ready cluster mode with automatic leader election and failover |
 | 01.26.8 | January 2026 | Unified disk-based storage engine with auto-sizing buffer pool |
 | 01.26.7 | January 2026 | Professional multi-line editing with semicolon termination (like psql/mysql) |
