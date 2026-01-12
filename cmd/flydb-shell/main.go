@@ -65,7 +65,7 @@ Usage Examples:
     fsql
 
   Connect to remote server:
-    fsql -h 192.168.1.100 -p 8888
+    fsql -h 192.168.1.100 -p 8889
 
   Example session:
     flydb> AUTH admin admin
@@ -182,6 +182,7 @@ var allCompletions = []string{
 	// Local commands
 	"\\q", "\\quit", "\\h", "\\help", "\\c", "\\connect", "\\clear", "\\s", "\\status", "\\v", "\\version",
 	"\\timing", "\\x", "\\!", "\\o", "\\conninfo", "\\dt", "\\du", "\\db", "\\l", "\\sql", "\\normal", "\\di",
+	"\\cd", "\\current",
 	// Server commands
 	"PING", "AUTH", "SQL", "USE",
 	// SQL statement keywords (can start a statement)
@@ -1437,10 +1438,10 @@ func processCommand(client *BinaryClient, input string, config CLIConfig) (strin
 			WithSuggestion("Or use 'AUTH' for interactive login")
 	}
 
-	// Handle WATCH command (not supported in binary protocol yet)
+	// Handle WATCH command (not supported yet)
 	if cmd == "WATCH" {
-		return "", cli.NewCLIError("WATCH is not supported in binary protocol mode").
-			WithSuggestion("Use the text protocol for WATCH functionality")
+		return "", cli.NewCLIError("WATCH is not supported yet").
+			WithSuggestion("WATCH functionality is planned for a future release")
 	}
 
 	// Handle USE command directly (without SQL prefix requirement)
@@ -1506,6 +1507,22 @@ func processCommand(client *BinaryClient, input string, config CLIConfig) (strin
 		replState.CurrentDatabase = dbName
 	}
 
+	// Handle DROP DATABASE - if we dropped the current database, update local state
+	upperQuery := strings.ToUpper(query)
+	if strings.HasPrefix(upperQuery, "DROP DATABASE") && strings.Contains(result, "OK") {
+		// Check if the server switched us to a different database
+		if strings.Contains(result, "switched to") {
+			// Extract the new database name from "DROP DATABASE OK (switched to <db>)"
+			if idx := strings.Index(result, "switched to "); idx != -1 {
+				newDb := strings.TrimSuffix(result[idx+len("switched to "):], ")")
+				replState.CurrentDatabase = newDb
+				// Add a warning to the result
+				result = result + "\n" + cli.Warning("⚠ You were connected to the dropped database. Now using: "+newDb)
+				result = result + "\n" + cli.Dimmed("  Use 'USE <database>' to switch to a different database.")
+			}
+		}
+	}
+
 	// Add timing information if enabled (via \timing or --verbose)
 	if config.Verbose || replState.Timing {
 		result = fmt.Sprintf("%s\n%s", result, cli.Dimmed(fmt.Sprintf("Time: %v", elapsed)))
@@ -1515,7 +1532,25 @@ func processCommand(client *BinaryClient, input string, config CLIConfig) (strin
 }
 
 // printErrorMessage prints an error message with formatting.
+// It handles both CLIError types and plain error strings, parsing server
+// error messages for better display.
 func printErrorMessage(msg string) {
+	// Check if this is a server error with hint (format: "ERROR: message\nHint: suggestion")
+	if strings.Contains(msg, "\nHint:") {
+		parts := strings.SplitN(msg, "\nHint:", 2)
+		cli.PrintError("%s", strings.TrimPrefix(parts[0], "ERROR: "))
+		if len(parts) > 1 {
+			fmt.Printf("  %s %s\n", cli.Dimmed("Hint:"), strings.TrimSpace(parts[1]))
+		}
+		return
+	}
+
+	// Check if this is a simple ERROR: prefix message
+	if strings.HasPrefix(msg, "ERROR: ") {
+		cli.PrintError("%s", strings.TrimPrefix(msg, "ERROR: "))
+		return
+	}
+
 	cli.PrintError("%s", msg)
 }
 
@@ -1658,6 +1693,15 @@ func handleLocalCommand(cmd string, config CLIConfig, client *BinaryClient) {
 		fmt.Printf("Current database: %s\n\n", cli.Success(replState.CurrentDatabase))
 		printResponseWithFormat(response, config.Format)
 
+	case "\\cd", "\\current":
+		// Show current database
+		dbName := replState.CurrentDatabase
+		if dbName == "" {
+			dbName = "default"
+		}
+		fmt.Printf("Current database: %s\n", cli.Success(dbName))
+		fmt.Println(cli.Dimmed("  Use '\\c <database>' or 'USE <database>' to switch databases"))
+
 	case "\\c", "\\connect":
 		// Connect to a different database (shortcut for USE <database>)
 		if arg == "" {
@@ -1670,7 +1714,12 @@ func handleLocalCommand(cmd string, config CLIConfig, client *BinaryClient) {
 			printErrorMessage(err.Error())
 			return
 		}
-		printResponseWithFormat(response, config.Format)
+		// Show a nice confirmation message
+		if strings.Contains(response, "OK") {
+			cli.PrintSuccess("Connected to database '%s'", arg)
+		} else {
+			printResponseWithFormat(response, config.Format)
+		}
 
 	case "\\sql":
 		// Enter SQL mode - all input treated as SQL
@@ -1794,6 +1843,7 @@ func printHelp() {
 	fmt.Printf("    %s                 List indexes (shortcut)\n", cli.Info("\\di"))
 	fmt.Printf("    %s, %s            List databases\n", cli.Info("\\db"), cli.Info("\\l"))
 	fmt.Printf("    %s, %s <db>   Switch to database\n", cli.Info("\\c"), cli.Info("\\connect"))
+	fmt.Printf("    %s, %s     Show current database\n", cli.Info("\\cd"), cli.Info("\\current"))
 	fmt.Printf("    %s               Enter SQL mode (all input = SQL)\n", cli.Info("\\sql"))
 	fmt.Printf("    %s            Return to normal mode\n", cli.Info("\\normal"))
 	fmt.Println()
