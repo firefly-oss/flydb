@@ -2,8 +2,8 @@
 
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
-**Version:** 01.26.11
-**Last Updated:** January 10, 2026
+**Version:** 01.26.12
+**Last Updated:** January 11, 2026
 
 ---
 
@@ -177,8 +177,8 @@ This document outlines the development roadmap for FlyDB, including completed fe
 
 | Feature | Description | Version |
 |---------|-------------|---------|
-| Binary Protocol | High-performance binary encoding (default) | 01.26.1 |
-| Text Protocol | Human-readable for debugging | 01.26.1 |
+| Binary Protocol | High-performance binary encoding (unified protocol) | 01.26.1 |
+| Text Protocol Removal | Removed legacy text protocol for simplified architecture | 01.26.12 |
 | WATCH Command | Real-time table change notifications | 01.26.1 |
 
 ### Observability

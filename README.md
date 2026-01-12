@@ -134,12 +134,12 @@ FlyDB implements a production-grade, layered architecture inspired by PostgreSQL
           ▼                ▼                ▼                ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                         Protocol Layer                                 │
-│  ┌─────────────────────────────┐  ┌─────────────────────────────────┐  │
-│  │   Text Protocol (:8888)     │  │   Binary Protocol (:8889)       │  │
-│  │   • Human-readable          │  │   • Type-Length-Value framing   │  │
-│  │   • Debugging/testing       │  │   • Prepared statements         │  │
-│  └─────────────────────────────┘  │   • Cursor operations           │  │
-│                                   └─────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │              Binary Protocol (:8889)                            │   │
+│  │   • Type-Length-Value framing                                   │   │
+│  │   • Prepared statements                                         │   │
+│  │   • Cursor operations                                           │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────────────────┘
           │
           ▼
@@ -534,10 +534,10 @@ Running `flydb` without arguments launches an interactive wizard that guides you
 flydb -role standalone
 
 # Start with custom data directory
-flydb -data-dir /var/lib/flydb -port 8888
+flydb -data-dir /var/lib/flydb -port 8889
 
 # Start as master node for replication
-flydb -role master -port 8888 -repl-port 9999 -data-dir /var/lib/flydb
+flydb -role master -port 8889 -repl-port 9999 -data-dir /var/lib/flydb
 
 # Start as slave node
 flydb -role slave -master localhost:9999 -data-dir /var/lib/flydb/slave
@@ -547,8 +547,7 @@ flydb -role slave -master localhost:9999 -data-dir /var/lib/flydb/slave
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-port` | Text protocol port | 8888 |
-| `-binary-port` | Binary protocol port (used by fsql) | 8889 |
+| `-port` | Server port (binary protocol) | 8889 |
 | `-repl-port` | Replication port (master only) | 9999 |
 | `-role` | Server role: `standalone`, `master`, `slave` | master |
 | `-master` | Master address for slave mode | - |
@@ -562,8 +561,7 @@ flydb -role slave -master localhost:9999 -data-dir /var/lib/flydb/slave
 | Variable | Description |
 |----------|-------------|
 | `FLYDB_DATA_DIR` | Data directory for database storage |
-| `FLYDB_PORT` | Server port for text protocol |
-| `FLYDB_BINARY_PORT` | Server port for binary protocol |
+| `FLYDB_PORT` | Server port (binary protocol) |
 | `FLYDB_ENCRYPTION_PASSPHRASE` | Encryption passphrase (required if encryption enabled) |
 | `FLYDB_ADMIN_PASSWORD` | Admin password for first-time setup |
 
@@ -751,8 +749,7 @@ Example configuration file:
 role = "standalone"
 
 # Network ports
-port = 8888
-binary_port = 8889
+port = 8889
 replication_port = 9999
 
 # Storage - Multi-database mode (always enabled)
@@ -791,8 +788,7 @@ Configuration values are applied in the following order (highest priority first)
 
 | Variable | Description |
 |----------|-------------|
-| `FLYDB_PORT` | Server port for text protocol |
-| `FLYDB_BINARY_PORT` | Server port for binary protocol |
+| `FLYDB_PORT` | Server port (binary protocol) |
 | `FLYDB_REPL_PORT` | Replication port |
 | `FLYDB_ROLE` | Server role (standalone, master, slave) |
 | `FLYDB_MASTER_ADDR` | Master address for slave mode |
@@ -812,8 +808,7 @@ Configuration values are applied in the following order (highest priority first)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-port` | `8888` | Text protocol port |
-| `-binary-port` | `8889` | Binary protocol port |
+| `-port` | `8889` | Server port (binary protocol) |
 | `-repl-port` | `9999` | Replication port (master only) |
 | `-data-dir` | `/var/lib/flydb` | Directory for database storage |
 | `-role` | `standalone` | Server role: `standalone`, `master`, or `slave` |
@@ -889,13 +884,13 @@ Standalone server (development):
 Leader with replication:
 
 ```bash
-./flydb -port 8888 -repl-port 9999 -role master -data-dir /var/lib/flydb
+./flydb -port 8889 -repl-port 9999 -role master -data-dir /var/lib/flydb
 ```
 
 Follower:
 
 ```bash
-./flydb -port 8889 -role slave -master localhost:9999 -data-dir /var/lib/flydb-replica
+./flydb -port 8890 -role slave -master localhost:9999 -data-dir /var/lib/flydb-replica
 ```
 
 ---
@@ -988,10 +983,10 @@ For simple deployments, use the master/slave mode:
 
 ```bash
 # Start leader
-./flydb -role master -port 8888 -repl-port 9999 -data-dir ./data
+./flydb -role master -port 8889 -repl-port 9999 -data-dir ./data
 
 # Start follower
-./flydb -role slave -port 8889 -master localhost:9999 -data-dir ./data-replica
+./flydb -role slave -port 8890 -master localhost:9999 -data-dir ./data-replica
 ```
 
 ### Cluster Mode (Recommended for Production)
@@ -1000,10 +995,10 @@ For production deployments, use cluster mode with integrated replication:
 
 ```bash
 # Start first node (becomes leader)
-./flydb -role cluster -port 8888 -cluster-port 7000 -repl-port 9999 -data-dir ./node1
+./flydb -role cluster -port 8889 -cluster-port 7000 -repl-port 9999 -data-dir ./node1
 
 # Start additional nodes (join cluster)
-./flydb -role cluster -port 8889 -cluster-port 7001 -repl-port 9998 \
+./flydb -role cluster -port 8890 -cluster-port 7001 -repl-port 9998 \
   -cluster-peers localhost:7000 -data-dir ./node2
 ```
 
@@ -1063,9 +1058,11 @@ go test ./...
 
 ### Manual Protocol Testing
 
+Use the `fsql` CLI client to test the binary protocol:
+
 ```bash
-echo "PING" | nc localhost 8888
-# Response: PONG
+fsql -h localhost -p 8889
+# Connect and run SQL commands
 ```
 
 ### Project Structure

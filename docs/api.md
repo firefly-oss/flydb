@@ -5,7 +5,6 @@ This document provides a complete reference for FlyDB's SQL syntax, protocol com
 ## Table of Contents
 
 1. [Protocol Commands](#protocol-commands)
-   - [Text Protocol Commands](#text-protocol-commands)
    - [Binary Protocol](#binary-protocol)
    - [CLI Commands](#cli-commands)
 2. [SQL Statements](#sql-statements)
@@ -1511,8 +1510,7 @@ The wizard guides you through:
    - **Slave**: Follower node that receives replication from master
 
 2. **Network Configuration**
-   - Text protocol port (default: 8888)
-   - Binary protocol port (default: 8889)
+   - Server port (default: 8889)
    - Replication port (master only, default: 9999)
 
 3. **Storage Configuration**
@@ -1532,8 +1530,7 @@ FlyDB is configured via command-line flags:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-port` | `8888` | Text protocol port |
-| `-binary-port` | `8889` | Binary protocol port |
+| `-port` | `8889` | Server port (binary protocol) |
 | `-repl-port` | `9999` | Replication port (master only) |
 | `-db` | `flydb.fdb` | WAL file path |
 | `-role` | `master` | Server role: `standalone`, `master`, `slave`, or `cluster` |
@@ -1669,11 +1666,11 @@ export FLYDB_ENCRYPTION_ENABLED=false
 
 # Master with replication
 export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
-./flydb -port 8888 -repl-port 9999 -role master -db master.fdb
+./flydb -port 8889 -repl-port 9999 -role master -db master.fdb
 
 # Slave connecting to master
 export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
-./flydb -port 8889 -role slave -master localhost:9999 -db slave.fdb
+./flydb -port 8890 -role slave -master localhost:9999 -db slave.fdb
 
 # Cluster mode (3-node example)
 # Node 1:

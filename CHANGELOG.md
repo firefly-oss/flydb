@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [01.26.12] - 2026-01-11
+
+### Text Protocol Removal and Binary Protocol Unification
+
+This release removes the legacy text-based protocol and unifies all client communication on the binary protocol. This simplifies the codebase, improves performance, and provides a more consistent client experience.
+
+### Removed
+
+#### Text Protocol
+- **Text protocol server**: The line-based text protocol has been removed
+- **Text protocol port**: The separate text protocol port configuration (`port`, `FLYDB_PORT`) is no longer used
+- **Text protocol handler**: The `TextHandler` and related text protocol code has been removed
+
+### Changed
+
+#### Binary Protocol as Default
+- **Single protocol**: All client connections now use the binary protocol on port 8889 (default)
+- **Simplified configuration**: Only `binary_port` (or `--binary-port` flag) is needed for client connections
+- **CLI tools**: `flydb-shell` and `flydb-dump` continue to work seamlessly with the binary protocol
+
+### Migration Guide
+
+If you were using the text protocol (port 8888 by default), you need to:
+
+1. **Update client connections**: Switch to the binary protocol port (8889 by default)
+2. **Update configuration**: Remove `port` settings from config files; use `binary_port` instead
+3. **Update environment variables**: Replace `FLYDB_PORT` with `FLYDB_BINARY_PORT`
+
+```bash
+# Before (text protocol)
+flydb-shell -p 8888
+
+# After (binary protocol)
+flydb-shell -p 8889
+```
+
+### Benefits
+
+- **Improved performance**: Binary protocol is more efficient than text-based parsing
+- **Reduced complexity**: Single protocol simplifies client library development
+- **Better type safety**: Binary protocol preserves data types accurately
+- **Consistent behavior**: All clients use the same protocol and features
+
+---
+
 ## [01.26.11] - 2026-01-10
 
 ### Function Value Evaluation in INSERT and UPDATE Statements
