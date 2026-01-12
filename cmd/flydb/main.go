@@ -54,7 +54,7 @@ Startup Flow:
 Command-Line Flags:
 ===================
 
-  -port      : TCP port for client connections (default: 8888)
+  -port      : TCP port for client connections (default: 8889)
   -repl-port : TCP port for replication (master only, default: 9999)
   -role      : Server role - "master" or "slave" (default: master)
   -master    : Master address for slave nodes (format: host:port)
@@ -67,10 +67,10 @@ Usage Examples:
     ./flydb -data-dir ./data
 
   Start a master node:
-    ./flydb -port 8888 -repl-port 9999 -role master -data-dir ./data
+    ./flydb -port 8889 -repl-port 9999 -role master -data-dir ./data
 
   Start a slave node:
-    ./flydb -port 8889 -role slave -master localhost:9999 -data-dir ./data
+    ./flydb -port 8890 -role slave -master localhost:9999 -data-dir ./data
 */
 package main
 
@@ -110,8 +110,7 @@ func printUsage() {
 	fmt.Println()
 
 	fmt.Println(cli.Highlight("OPTIONS:"))
-	fmt.Println("  -port <port>             Server port for text protocol (default: 8888)")
-	fmt.Println("  -binary-port <port>      Server port for binary protocol (default: 8889)")
+	fmt.Println("  -port <port>             Server port for client connections (default: 8889)")
 	fmt.Println("  -repl-port <port>        Replication port for master mode (default: 9999)")
 	fmt.Println("  -role <role>             Server role: standalone, master, slave (default: master)")
 	fmt.Println("  -master <host:port>      Master address for slave mode")
@@ -124,8 +123,7 @@ func printUsage() {
 
 	fmt.Println(cli.Highlight("ENVIRONMENT VARIABLES:"))
 	fmt.Println("  FLYDB_DATA_DIR           Data directory for database storage")
-	fmt.Println("  FLYDB_PORT               Server port for text protocol")
-	fmt.Println("  FLYDB_BINARY_PORT        Server port for binary protocol")
+	fmt.Println("  FLYDB_PORT               Server port for client connections")
 	fmt.Println("  FLYDB_ENCRYPTION_PASSPHRASE  Encryption passphrase (required if encryption enabled)")
 	fmt.Println("  FLYDB_ADMIN_PASSWORD     Admin password for first-time setup")
 	fmt.Println()
@@ -136,10 +134,10 @@ func printUsage() {
 	fmt.Println("  flydb")
 	fmt.Println()
 	fmt.Println("  " + cli.Dimmed("# Start standalone server (development)"))
-	fmt.Println("  flydb -role standalone -port 8888")
+	fmt.Println("  flydb -role standalone -port 8889")
 	fmt.Println()
 	fmt.Println("  " + cli.Dimmed("# Start master server (production)"))
-	fmt.Println("  flydb -role master -port 8888 -repl-port 9999 -db /var/lib/flydb/data.fdb")
+	fmt.Println("  flydb -role master -port 8889 -repl-port 9999 -db /var/lib/flydb/data.fdb")
 	fmt.Println()
 	fmt.Println("  " + cli.Dimmed("# Start slave server"))
 	fmt.Println("  flydb -role slave -master localhost:9999 -db /var/lib/flydb/slave.fdb")
@@ -187,8 +185,7 @@ func main() {
 	// These flags allow operators to customize the server behavior without
 	// modifying code, following the 12-factor app methodology.
 	// Default values come from the loaded configuration.
-	port := flag.String("port", strconv.Itoa(cfg.Port), "Server port for client connections")
-	binaryPort := flag.String("binary-port", strconv.Itoa(cfg.BinaryPort), "Server port for binary protocol connections")
+	port := flag.String("port", strconv.Itoa(cfg.Port), "Server port for client connections (binary protocol)")
 	replPort := flag.String("repl-port", strconv.Itoa(cfg.ReplPort), "Replication port (master only)")
 	role := flag.String("role", cfg.Role, "Server role: 'master', 'slave', or 'standalone'")
 	masterAddr := flag.String("master", cfg.MasterAddr, "Master address (host:port) for slave mode")
@@ -266,10 +263,6 @@ func main() {
 				if portInt, err := strconv.Atoi(*port); err == nil {
 					cfg.Port = portInt
 				}
-			case "binary-port":
-				if binaryPortInt, err := strconv.Atoi(*binaryPort); err == nil {
-					cfg.BinaryPort = binaryPortInt
-				}
 			case "repl-port":
 				if replPortInt, err := strconv.Atoi(*replPort); err == nil {
 					cfg.ReplPort = replPortInt
@@ -315,7 +308,6 @@ func main() {
 		"version", banner.Version,
 		"role", cfg.Role,
 		"port", cfg.Port,
-		"binary_port", cfg.BinaryPort,
 		"data_dir", cfg.DataDir,
 	)
 
@@ -742,7 +734,7 @@ func main() {
 	//   - Proper resource management
 	srv := server.NewServerWithDatabaseManager(
 		fmt.Sprintf(":%d", cfg.Port),
-		fmt.Sprintf(":%d", cfg.BinaryPort),
+		"", // binaryAddr is deprecated - all connections use binary protocol on Port
 		dbManager,
 	)
 
@@ -775,8 +767,7 @@ func main() {
 	fmt.Println()
 	cli.PrintSuccess("FlyDB server is ready!")
 	fmt.Println()
-	cli.KeyValue("Text Protocol", fmt.Sprintf("localhost:%d", cfg.Port), 20)
-	cli.KeyValue("Binary Protocol", fmt.Sprintf("localhost:%d", cfg.BinaryPort), 20)
+	cli.KeyValue("Server", fmt.Sprintf("localhost:%d", cfg.Port), 20)
 	cli.KeyValue("Role", cfg.Role, 20)
 	cli.KeyValue("Data Directory", cfg.DataDir, 20)
 	if cfg.EncryptionEnabled {
@@ -793,8 +784,7 @@ func main() {
 	// This call blocks and handles client connections until the server is stopped.
 	// Each client connection is handled in a separate goroutine for concurrency.
 	log.Info("Starting FlyDB server",
-		"text_port", cfg.Port,
-		"binary_port", cfg.BinaryPort,
+		"port", cfg.Port,
 		"role", cfg.Role,
 	)
 	if err := srv.Start(); err != nil {
