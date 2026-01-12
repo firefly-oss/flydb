@@ -879,7 +879,14 @@ prompt() {
         echo -en "${BOLD}${prompt_text}${RESET}: " >&2
     fi
 
-    read -r result
+    if [[ -t 0 ]]; then
+        read -r result
+    elif [[ -c /dev/tty ]]; then
+        # When piped (curl | bash), read from tty
+        read -r result < /dev/tty
+    else
+        read -r result
+    fi
 
     if [[ -z "$result" ]]; then
         result="$default"
@@ -913,7 +920,14 @@ prompt_yes_no() {
     fi
 
     echo -en "${BOLD}${prompt_text}${RESET} [${CYAN}${hint}${RESET}]: " >&2
-    read -r result
+    if [[ -t 0 ]]; then
+        read -r result
+    elif [[ -c /dev/tty ]]; then
+        # When piped (curl | bash), read from tty
+        read -r result < /dev/tty
+    else
+        read -r result
+    fi
 
     if [[ -z "$result" ]]; then
         result="$default"
