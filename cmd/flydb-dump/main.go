@@ -155,61 +155,170 @@ var (
 )
 
 func main() {
+	// Custom usage function
+	flag.Usage = printUsage
 	flag.Parse()
 
+	// Handle --version flag
 	if *showVersion {
-		fmt.Printf("flydb-dump version %s (built %s)\n", Version, BuildDate)
+		fmt.Printf("fdump version %s (built %s)\n", Version, BuildDate)
 		os.Exit(0)
 	}
 
+	// Handle --help flag
 	if *help {
 		printUsage()
 		os.Exit(0)
 	}
 
+	// Validate required flags
 	if *dataDir == "" {
-		fmt.Fprintf(os.Stderr, "%s Data directory (-d) is required\n", cli.ErrorIcon())
-		fmt.Fprintf(os.Stderr, "   %s fdump -d <data_dir> [options]\n", cli.Dimmed("Usage:"))
-		os.Exit(1)
+		cli.NewCLIError("Data directory (-d) is required").
+			WithDetail("The -d flag specifies the FlyDB data directory to export from or import to").
+			WithSuggestion("fdump -d ./data -o backup.sql").
+			WithSuggestion("fdump -d /var/lib/flydb --import backup.sql").
+			Exit()
+	}
+
+	// Validate format
+	validFormats := map[string]bool{"sql": true, "csv": true, "json": true}
+	if !validFormats[*format] {
+		cli.NewCLIError(fmt.Sprintf("Invalid format: %s", *format)).
+			WithDetail("Supported formats are: sql, csv, json").
+			WithSuggestion("Use -f sql for SQL dump format").
+			WithSuggestion("Use -f json for JSON export").
+			WithSuggestion("Use -f csv for CSV export (creates one file per table)").
+			Exit()
+	}
+
+	// Validate conflicting options
+	if *schemaOnly && *dataOnly {
+		cli.NewCLIError("Cannot use --schema-only and --data-only together").
+			WithDetail("These options are mutually exclusive").
+			WithSuggestion("Use --schema-only to export only table definitions").
+			WithSuggestion("Use --data-only to export only data (INSERT statements)").
+			Exit()
 	}
 
 	// Handle import mode
 	if *importFile != "" {
 		if err := runImport(); err != nil {
-			fmt.Fprintf(os.Stderr, "%s Import failed: %v\n", cli.ErrorIcon(), err)
-			os.Exit(1)
+			handleError("Import failed", err)
 		}
 		os.Exit(0)
 	}
 
 	// Run export
 	if err := runExport(); err != nil {
-		fmt.Fprintf(os.Stderr, "%s Export failed: %v\n", cli.ErrorIcon(), err)
-		os.Exit(1)
+		handleError("Export failed", err)
 	}
 }
 
+// handleError formats and displays an error with helpful suggestions
+func handleError(operation string, err error) {
+	errStr := err.Error()
+
+	cliErr := cli.NewCLIError(fmt.Sprintf("%s: %s", operation, errStr))
+
+	// Add context-specific suggestions based on error type
+	if strings.Contains(errStr, "database directory not found") {
+		cliErr.WithSuggestion("Verify the data directory path is correct")
+		cliErr.WithSuggestion("Ensure the database exists: fdump -d ./data -db <database_name>")
+	} else if strings.Contains(errStr, "authentication failed") {
+		cliErr.WithSuggestion("Check your username and password")
+		cliErr.WithSuggestion("Use -P to prompt for password securely")
+	} else if strings.Contains(errStr, "passphrase") || strings.Contains(errStr, "decrypt") {
+		cliErr.WithSuggestion("Verify the encryption passphrase is correct")
+		cliErr.WithSuggestion("Use --prompt-passphrase for secure input")
+		cliErr.WithSuggestion("Set FLYDB_ENCRYPTION_PASSPHRASE environment variable")
+	} else if strings.Contains(errStr, "permission denied") {
+		cliErr.WithSuggestion("Check file and directory permissions")
+		cliErr.WithSuggestion("Ensure you have read access to the data directory")
+	} else if strings.Contains(errStr, "failed to create") || strings.Contains(errStr, "failed to open") {
+		cliErr.WithSuggestion("Check that the output path is writable")
+		cliErr.WithSuggestion("Ensure the parent directory exists")
+	}
+
+	cliErr.Exit()
+}
+
 func printUsage() {
-	fmt.Println("FlyDB Dump Utility - Database export and import tool")
 	fmt.Println()
-	fmt.Println("Usage:")
+	fmt.Printf("%s - Database export and import tool\n", cli.Highlight("FlyDB Dump Utility v"+Version))
+	fmt.Println(cli.Separator(60))
+	fmt.Println()
+
+	fmt.Println(cli.Highlight("USAGE:"))
 	fmt.Println("  fdump -d <data_dir> [options]")
+	fmt.Println("  fdump -d <data_dir> --import <file>")
 	fmt.Println()
-	fmt.Println("Options:")
-	flag.PrintDefaults()
+
+	fmt.Println(cli.Highlight("EXPORT OPTIONS:"))
+	fmt.Printf("  %-24s %s\n", cli.Info("-d <path>"), "Data directory path "+cli.Warning("[required]"))
+	fmt.Printf("  %-24s %s\n", cli.Info("-db <name>"), "Database name to dump (default: default)")
+	fmt.Printf("  %-24s %s\n", cli.Info("-o <file>"), "Output file path (default: stdout)")
+	fmt.Printf("  %-24s %s\n", cli.Info("-f <format>"), "Output format: sql, csv, json (default: sql)")
+	fmt.Printf("  %-24s %s\n", cli.Info("-t <tables>"), "Comma-separated list of tables (default: all)")
+	fmt.Printf("  %-24s %s\n", cli.Info("--schema-only"), "Dump schema only, no data")
+	fmt.Printf("  %-24s %s\n", cli.Info("--data-only"), "Dump data only, no schema")
+	fmt.Printf("  %-24s %s\n", cli.Info("--no-owner"), "Do not output ownership commands")
+	fmt.Printf("  %-24s %s\n", cli.Info("-z"), "Compress output with gzip")
 	fmt.Println()
-	fmt.Println("Examples:")
-	fmt.Println("  fdump -d ./data -o backup.sql                          # Full SQL dump")
-	fmt.Println("  fdump -d ./data -U admin -P -o backup.sql              # With authentication")
-	fmt.Println("  fdump -d ./data --passphrase secret -o backup.sql      # With encryption")
-	fmt.Println("  fdump -d ./data -db mydb -o mydb.sql                   # Specific database")
-	fmt.Println("  fdump -d ./data -t users -f json -o u.json             # Export users table as JSON")
-	fmt.Println("  fdump -d ./data --schema-only -o schema.sql            # Schema only")
-	fmt.Println("  fdump -d ./data --import backup.sql                    # Import from dump")
+
+	fmt.Println(cli.Highlight("IMPORT OPTIONS:"))
+	fmt.Printf("  %-24s %s\n", cli.Info("--import <file>"), "Import data from SQL dump file")
 	fmt.Println()
-	fmt.Println("Environment Variables:")
-	fmt.Println("  FLYDB_ADMIN_PASSWORD         Password for authentication")
-	fmt.Println("  FLYDB_ENCRYPTION_PASSPHRASE  Encryption passphrase")
+
+	fmt.Println(cli.Highlight("AUTHENTICATION:"))
+	fmt.Printf("  %-24s %s\n", cli.Info("-U <username>"), "Username for authentication")
+	fmt.Printf("  %-24s %s\n", cli.Info("-W <password>"), "Password (use -P for secure prompt)")
+	fmt.Printf("  %-24s %s\n", cli.Info("-P"), "Prompt for password interactively")
+	fmt.Println()
+
+	fmt.Println(cli.Highlight("ENCRYPTION:"))
+	fmt.Printf("  %-24s %s\n", cli.Info("--passphrase <pass>"), "Encryption passphrase")
+	fmt.Printf("  %-24s %s\n", cli.Info("--prompt-passphrase"), "Prompt for passphrase interactively")
+	fmt.Println()
+
+	fmt.Println(cli.Highlight("OTHER OPTIONS:"))
+	fmt.Printf("  %-24s %s\n", cli.Info("-v"), "Verbose output")
+	fmt.Printf("  %-24s %s\n", cli.Info("--version"), "Show version information")
+	fmt.Printf("  %-24s %s\n", cli.Info("-h"), "Show this help message")
+	fmt.Println()
+
+	fmt.Println(cli.Highlight("EXAMPLES:"))
+	fmt.Println()
+	fmt.Println("  " + cli.Dimmed("# Full SQL dump"))
+	fmt.Println("  " + cli.Info("fdump -d ./data -o backup.sql"))
+	fmt.Println()
+	fmt.Println("  " + cli.Dimmed("# Dump with authentication"))
+	fmt.Println("  " + cli.Info("fdump -d ./data -U admin -P -o backup.sql"))
+	fmt.Println()
+	fmt.Println("  " + cli.Dimmed("# Dump encrypted database"))
+	fmt.Println("  " + cli.Info("fdump -d ./data --passphrase secret -o backup.sql"))
+	fmt.Println()
+	fmt.Println("  " + cli.Dimmed("# Export specific tables as JSON"))
+	fmt.Println("  " + cli.Info("fdump -d ./data -t users,orders -f json -o data.json"))
+	fmt.Println()
+	fmt.Println("  " + cli.Dimmed("# Schema only dump"))
+	fmt.Println("  " + cli.Info("fdump -d ./data --schema-only -o schema.sql"))
+	fmt.Println()
+	fmt.Println("  " + cli.Dimmed("# Compressed dump"))
+	fmt.Println("  " + cli.Info("fdump -d ./data -z -o backup.sql.gz"))
+	fmt.Println()
+	fmt.Println("  " + cli.Dimmed("# Import from dump file"))
+	fmt.Println("  " + cli.Info("fdump -d ./data --import backup.sql"))
+	fmt.Println()
+
+	fmt.Println(cli.Highlight("ENVIRONMENT VARIABLES:"))
+	fmt.Println()
+	fmt.Printf("  %-32s %s\n", cli.Info("FLYDB_USER"), "Default username for authentication")
+	fmt.Printf("  %-32s %s\n", cli.Info("FLYDB_ADMIN_PASSWORD"), "Password for authentication")
+	fmt.Printf("  %-32s %s\n", cli.Info("FLYDB_ENCRYPTION_PASSPHRASE"), "Encryption passphrase")
+	fmt.Println()
+
+	fmt.Println("  " + cli.Dimmed("For more information, visit: https://github.com/firefly-oss/flydb"))
+	fmt.Println()
 }
 
 // promptForPassword prompts the user for a password securely
@@ -294,7 +403,7 @@ func authenticateIfNeeded(store storage.Engine) error {
 	}
 
 	if *verbose {
-		fmt.Fprintf(os.Stderr, "Authenticated as user: %s\n", user)
+		cli.PrintSuccess("Authenticated as user: %s", user)
 	}
 
 	return nil
@@ -311,6 +420,7 @@ type Dumper struct {
 	tableCount int
 	rowCount   int
 	startTime  time.Time
+	toStdout   bool
 }
 
 // NewDumper creates a new Dumper instance
@@ -327,33 +437,52 @@ func NewDumper(store storage.Engine, catalog *sql.Catalog) *Dumper {
 func runExport() error {
 	startTime := time.Now()
 
-	// Show what we're doing (only if not outputting to stdout)
+	// Determine if outputting to stdout (no progress indicators in that case)
 	toStdout := *outputFile == "" || *outputFile == "-"
-	if !toStdout {
-		fmt.Fprintf(os.Stderr, "%s Exporting database '%s'...\n", cli.InfoIcon(), *database)
-	}
 
-	// Open the database
+	// Open the database with spinner
 	dbPath := filepath.Join(*dataDir, *database)
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return fmt.Errorf("database directory not found: %s", dbPath)
 	}
 
+	var spinner *cli.Spinner
+	if !toStdout {
+		spinner = cli.NewSpinner(fmt.Sprintf("Opening database '%s'...", *database))
+		spinner.Start()
+	}
+
 	// Initialize storage engine with encryption support
 	config, err := createStorageConfig(dbPath)
 	if err != nil {
+		if spinner != nil {
+			spinner.StopWithError("Failed to configure storage")
+		}
 		return err
 	}
 
 	store, err := storage.NewStorageEngine(config)
 	if err != nil {
+		if spinner != nil {
+			spinner.StopWithError("Failed to open database")
+		}
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 	defer store.Close()
 
 	// Authenticate if credentials provided
+	if spinner != nil {
+		spinner.UpdateMessage("Authenticating...")
+	}
 	if err := authenticateIfNeeded(store); err != nil {
+		if spinner != nil {
+			spinner.StopWithError("Authentication failed")
+		}
 		return err
+	}
+
+	if spinner != nil {
+		spinner.StopWithSuccess(fmt.Sprintf("Connected to database '%s'", *database))
 	}
 
 	// Initialize catalog
@@ -364,6 +493,7 @@ func runExport() error {
 	dumper.format = *format
 	dumper.verbose = *verbose
 	dumper.startTime = startTime
+	dumper.toStdout = toStdout
 
 	// Parse table list
 	if *tables != "" {
@@ -395,6 +525,30 @@ func runExport() error {
 		dumper.writer = output
 	}
 
+	// Show export info
+	if !toStdout {
+		tablesToDump := dumper.getTablesToDump()
+		tableInfo := "all tables"
+		if len(dumper.tables) > 0 {
+			tableInfo = fmt.Sprintf("%d table(s)", len(dumper.tables))
+		} else {
+			tableInfo = fmt.Sprintf("%d table(s)", len(tablesToDump))
+		}
+
+		formatInfo := strings.ToUpper(*format)
+		if *compress {
+			formatInfo += " (gzip)"
+		}
+
+		cli.PrintInfo("Exporting %s in %s format...", tableInfo, formatInfo)
+	}
+
+	// Start export spinner
+	if !toStdout {
+		spinner = cli.NewSpinner("Exporting data...")
+		spinner.Start()
+	}
+
 	// Perform the dump based on format
 	var dumpErr error
 	switch dumper.format {
@@ -405,20 +559,34 @@ func runExport() error {
 	case "csv":
 		dumpErr = dumper.dumpCSV()
 	default:
+		if spinner != nil {
+			spinner.StopWithError("Unsupported format")
+		}
 		return fmt.Errorf("unsupported format: %s", dumper.format)
 	}
 
 	if dumpErr != nil {
+		if spinner != nil {
+			spinner.StopWithError("Export failed")
+		}
 		return dumpErr
 	}
 
 	// Print summary (only if not outputting to stdout)
 	if !toStdout {
+		if spinner != nil {
+			spinner.StopWithSuccess("Export completed successfully")
+		}
+
 		elapsed := time.Since(startTime)
-		fmt.Fprintf(os.Stderr, "%s Export completed successfully\n", cli.SuccessIcon())
-		fmt.Fprintf(os.Stderr, "   %s %d tables, %d rows\n", cli.Dimmed("Exported:"), dumper.tableCount, dumper.rowCount)
-		fmt.Fprintf(os.Stderr, "   %s %s\n", cli.Dimmed("Output:"), *outputFile)
-		fmt.Fprintf(os.Stderr, "   %s %v\n", cli.Dimmed("Duration:"), elapsed.Round(time.Millisecond))
+		fmt.Println()
+		cli.Box("Export Summary", fmt.Sprintf(
+			"%s %d tables, %d rows\n%s %s\n%s %s\n%s %v",
+			cli.Dimmed("Exported:"), dumper.tableCount, dumper.rowCount,
+			cli.Dimmed("Format:"), strings.ToUpper(*format),
+			cli.Dimmed("Output:"), *outputFile,
+			cli.Dimmed("Duration:"), elapsed.Round(time.Millisecond),
+		))
 	}
 
 	return nil
@@ -537,8 +705,8 @@ func (d *Dumper) dumpTableSchema(tableName string) error {
 	}
 
 	fmt.Fprintf(d.writer, ");\n\n")
-	if d.verbose {
-		fmt.Fprintf(os.Stderr, "Dumped schema for table: %s\n", tableName)
+	if d.verbose && !d.toStdout {
+		cli.PrintInfo("Exported schema: %s (%d columns)", tableName, len(table.Columns))
 	}
 	return nil
 }
@@ -592,8 +760,8 @@ func (d *Dumper) dumpTableData(tableName string) error {
 	d.tableCount++
 	d.rowCount += tableRowCount
 
-	if d.verbose {
-		fmt.Fprintf(os.Stderr, "  %s Dumped %d rows from table: %s\n", cli.SuccessIcon(), tableRowCount, tableName)
+	if d.verbose && !d.toStdout {
+		cli.PrintSuccess("Exported data: %s (%d rows)", tableName, tableRowCount)
 	}
 	return nil
 }
@@ -745,8 +913,10 @@ func (d *Dumper) dumpCSV() error {
 		writer.Flush()
 		f.Close()
 
-		if d.verbose {
-			fmt.Fprintf(os.Stderr, "Exported table %s to %s\n", tableName, csvPath)
+		d.tableCount++
+
+		if d.verbose && !d.toStdout {
+			cli.PrintSuccess("Exported: %s → %s", tableName, csvPath)
 		}
 	}
 
@@ -757,33 +927,46 @@ func (d *Dumper) dumpCSV() error {
 func runImport() error {
 	startTime := time.Now()
 
-	fmt.Fprintf(os.Stderr, "%s Importing from '%s' into database '%s'...\n",
-		cli.InfoIcon(), *importFile, *database)
+	// Validate import file exists
+	if _, err := os.Stat(*importFile); os.IsNotExist(err) {
+		return fmt.Errorf("import file not found: %s", *importFile)
+	}
+
+	// Start connection spinner
+	spinner := cli.NewSpinner(fmt.Sprintf("Opening database '%s'...", *database))
+	spinner.Start()
 
 	// Open the database
 	dbPath := filepath.Join(*dataDir, *database)
 
 	// Create database directory if it doesn't exist
 	if err := os.MkdirAll(dbPath, 0755); err != nil {
+		spinner.StopWithError("Failed to create database directory")
 		return fmt.Errorf("failed to create database directory: %w", err)
 	}
 
 	// Initialize storage engine with encryption support
 	config, err := createStorageConfig(dbPath)
 	if err != nil {
+		spinner.StopWithError("Failed to configure storage")
 		return err
 	}
 
 	store, err := storage.NewStorageEngine(config)
 	if err != nil {
+		spinner.StopWithError("Failed to open database")
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 	defer store.Close()
 
 	// Authenticate if credentials provided
+	spinner.UpdateMessage("Authenticating...")
 	if err := authenticateIfNeeded(store); err != nil {
+		spinner.StopWithError("Authentication failed")
 		return err
 	}
+
+	spinner.StopWithSuccess(fmt.Sprintf("Connected to database '%s'", *database))
 
 	// Open import file
 	f, err := os.Open(*importFile)
@@ -792,9 +975,15 @@ func runImport() error {
 	}
 	defer f.Close()
 
+	// Get file info for display
+	fileInfo, _ := f.Stat()
+	fileSize := fileInfo.Size()
+	fileSizeStr := formatFileSize(fileSize)
+
 	// Check if file is gzipped
 	var reader io.Reader = f
-	if strings.HasSuffix(*importFile, ".gz") {
+	isCompressed := strings.HasSuffix(*importFile, ".gz")
+	if isCompressed {
 		gzReader, err := gzip.NewReader(f)
 		if err != nil {
 			return fmt.Errorf("failed to decompress file: %w", err)
@@ -803,16 +992,29 @@ func runImport() error {
 		reader = gzReader
 	}
 
+	// Show import info
+	importInfo := filepath.Base(*importFile)
+	if isCompressed {
+		importInfo += " (compressed)"
+	}
+	cli.PrintInfo("Importing from %s (%s)...", importInfo, fileSizeStr)
+
+	// Start import spinner
+	spinner = cli.NewSpinner("Importing statements...")
+	spinner.Start()
+
 	// Initialize executor (it creates its own catalog)
 	executor := sql.NewExecutor(store, nil)
 
 	// Read and execute SQL statements
-	scanner := NewSQLScanner(reader)
+	sqlScanner := NewSQLScanner(reader)
 	stmtCount := 0
 	errorCount := 0
+	createCount := 0
+	insertCount := 0
 
-	for scanner.Scan() {
-		stmtText := strings.TrimSpace(scanner.Text())
+	for sqlScanner.Scan() {
+		stmtText := strings.TrimSpace(sqlScanner.Text())
 		if stmtText == "" || strings.HasPrefix(stmtText, "--") {
 			continue
 		}
@@ -824,7 +1026,10 @@ func runImport() error {
 		if err != nil {
 			errorCount++
 			if *verbose {
-				fmt.Fprintf(os.Stderr, "  %s Parse error: %v\n", cli.WarningIcon(), err)
+				spinner.Stop()
+				cli.PrintWarning("Parse error: %v", err)
+				spinner = cli.NewSpinner(fmt.Sprintf("Importing statements... (%d executed)", stmtCount))
+				spinner.Start()
 			}
 			continue
 		}
@@ -833,28 +1038,80 @@ func runImport() error {
 		if err != nil {
 			errorCount++
 			if *verbose {
-				fmt.Fprintf(os.Stderr, "  %s Execute error: %v\n", cli.WarningIcon(), err)
+				spinner.Stop()
+				cli.PrintWarning("Execute error: %v", err)
+				spinner = cli.NewSpinner(fmt.Sprintf("Importing statements... (%d executed)", stmtCount))
+				spinner.Start()
 			}
 			continue
 		}
 		stmtCount++
+
+		// Track statement types for summary
+		upperStmt := strings.ToUpper(stmtText)
+		if strings.HasPrefix(upperStmt, "CREATE") {
+			createCount++
+		} else if strings.HasPrefix(upperStmt, "INSERT") {
+			insertCount++
+		}
+
+		// Update spinner periodically
+		if stmtCount%100 == 0 {
+			spinner.UpdateMessage(fmt.Sprintf("Importing statements... (%d executed)", stmtCount))
+		}
 	}
 
-	if err := scanner.Err(); err != nil {
+	if err := sqlScanner.Err(); err != nil {
+		spinner.StopWithError("Error reading import file")
 		return fmt.Errorf("error reading import file: %w", err)
 	}
 
 	elapsed := time.Since(startTime)
 
-	// Print summary
-	fmt.Fprintf(os.Stderr, "%s Import completed successfully\n", cli.SuccessIcon())
-	fmt.Fprintf(os.Stderr, "   %s %d statements executed\n", cli.Dimmed("Imported:"), stmtCount)
+	// Show completion status
 	if errorCount > 0 {
-		fmt.Fprintf(os.Stderr, "   %s %d statements skipped (errors)\n", cli.Dimmed("Skipped:"), errorCount)
+		spinner.StopWithWarning(fmt.Sprintf("Import completed with %d error(s)", errorCount))
+	} else {
+		spinner.StopWithSuccess("Import completed successfully")
 	}
-	fmt.Fprintf(os.Stderr, "   %s %v\n", cli.Dimmed("Duration:"), elapsed.Round(time.Millisecond))
+
+	// Print summary using Box
+	fmt.Println()
+	summaryContent := fmt.Sprintf(
+		"%s %d statements executed\n%s %d CREATE, %d INSERT",
+		cli.Dimmed("Imported:"), stmtCount,
+		cli.Dimmed("Breakdown:"), createCount, insertCount,
+	)
+	if errorCount > 0 {
+		summaryContent += fmt.Sprintf("\n%s %d statements", cli.Warning("Skipped:"), errorCount)
+	}
+	summaryContent += fmt.Sprintf("\n%s %s\n%s %v",
+		cli.Dimmed("Source:"), *importFile,
+		cli.Dimmed("Duration:"), elapsed.Round(time.Millisecond),
+	)
+	cli.Box("Import Summary", summaryContent)
 
 	return nil
+}
+
+// formatFileSize formats a file size in bytes to a human-readable string
+func formatFileSize(size int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+
+	switch {
+	case size >= GB:
+		return fmt.Sprintf("%.2f GB", float64(size)/float64(GB))
+	case size >= MB:
+		return fmt.Sprintf("%.2f MB", float64(size)/float64(MB))
+	case size >= KB:
+		return fmt.Sprintf("%.2f KB", float64(size)/float64(KB))
+	default:
+		return fmt.Sprintf("%d bytes", size)
+	}
 }
 
 // SQLScanner reads SQL statements from a reader
