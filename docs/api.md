@@ -186,18 +186,85 @@ flydb> \dt
 flydb> \s
 
   Connection Status
-  ──────────────────────────────
+  ──────────────────────────────────────
 
     Status: ● Connected
     Server: localhost:8889
+    Mode: Single node
     Protocol: Binary
     Format: table
 
   Session Settings
-  ──────────────────────────────
+  ──────────────────────────────────────
 
     Timing: on
     Expanded: off
+
+#### Client Command-Line Options
+
+The `fsql` client supports the following command-line options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-H`, `--host` | `localhost` | Server hostname(s), comma-separated for HA cluster |
+| `-p`, `--port` | `8889` | Server port (used when host doesn't include port) |
+| `-d`, `--database` | `default` | Database to connect to |
+| `-v`, `--verbose` | `false` | Verbose mode (show query timing) |
+| `-f`, `--format` | `table` | Output format: table, json, plain |
+| `-e`, `--execute` | - | Execute a command and exit |
+| `-c`, `--config` | - | Path to configuration file |
+| `--target-primary` | `false` | Prefer connecting to primary/leader in cluster |
+| `--no-color` | `false` | Disable colored output |
+
+#### HA Cluster Connections
+
+The `fsql` client supports PostgreSQL-style high-availability connections with automatic failover:
+
+```bash
+# Connect to a 3-node cluster
+fsql -H node1,node2,node3 -p 8889
+
+# Hosts with individual ports
+fsql -H node1:8889,node2:8890,node3:8891
+
+# Prefer connecting to primary/leader
+fsql -H node1,node2,node3 -p 8889 --target-primary
+```
+
+**Automatic Failover:**
+- If the current connection fails, the client automatically reconnects to another node
+- Authentication credentials are cached and re-applied on reconnection
+- Use `\status` or `\conninfo` to see current connection and cluster info
+
+**Configuration File (`~/.flydbrc`):**
+
+```ini
+# Multiple hosts for HA cluster
+hosts = node1,node2,node3
+port = 8889
+target_primary = true
+database = myapp
+format = table
+```
+
+#### Cluster Connection Status
+
+When connected to a cluster, `\status` shows additional information:
+
+```
+flydb> \s
+
+  Connection Status
+  ──────────────────────────────────────
+
+    Status: ● Connected
+    Server: node1:8889
+    Mode: Cluster/HA (3 nodes)
+    Nodes: node1:8889, node2:8890, node3:8891
+    Target: Primary/Leader
+    Protocol: Binary
+    Format: table
+```
     Output: stdout
 ```
 

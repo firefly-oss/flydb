@@ -130,7 +130,8 @@ The server layer handles all network communication and coordination:
 |-----------|------|---------|
 | TCP Server | `server.go` | Multi-threaded connection handling, command dispatch |
 | Replicator | `replication.go` | Leader-Follower WAL streaming replication |
-| Cluster Manager | `cluster.go` | Automatic failover via Bully algorithm |
+| Cluster Manager | `unified.go` | Unified cluster management with Raft consensus |
+| Raft Node | `raft.go` | Raft consensus implementation with pre-vote |
 
 ### SQL Layer (`internal/sql/`)
 
@@ -734,37 +735,45 @@ See [Driver Development Guide](driver-development.md) for complete protocol spec
 
 ## Cluster Architecture
 
-FlyDB supports automatic failover using an enhanced Bully algorithm with term-based elections and quorum requirements:
+FlyDB supports automatic failover using **Raft consensus** (default) or the legacy Bully algorithm:
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                    Enhanced Cluster                            │
+│                    Raft Consensus Cluster                      │
 │                                                                │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
 │  │   Node A    │    │   Node B    │    │   Node C    │         │
 │  │  (Leader)   │◄──►│ (Follower)  │◄──►│ (Follower)  │         │
 │  │  Term: 5    │    │  Term: 5    │    │  Term: 5    │         │
 │  │             │    │             │    │             │         │
+│  │ AppendEntry │───►│             │    │             │         │
 │  │ Heartbeats  │───►│             │    │             │         │
-│  │ every 500ms │───►│             │    │             │         │
 │  └─────────────┘    └─────────────┘    └─────────────┘         │
 │                                                                │
-│  Enhanced Features:                                            │
-│  • Term-based elections (monotonically increasing)             │
-│  • Quorum requirements (majority needed for decisions)         │
-│  • Split-brain prevention (leaders step down without quorum)   │
-│  • Dynamic membership (nodes can join/leave at runtime)        │
-│  • Health monitoring (per-node health tracking)                │
-│  • Cluster metrics (election count, leader changes, lag)       │
+│  Raft Features:                                                │
+│  • Log replication with strong consistency guarantees          │
+│  • Pre-vote protocol to prevent disruption from partitioned    │
+│    nodes                                                       │
+│  • Term-based leader election with randomized timeouts         │
+│  • Quorum-based commit (majority acknowledgment required)      │
+│  • Automatic leader election on failure                        │
+│  • Log compaction and snapshotting                             │
 │                                                                │
 │  If Leader fails:                                              │
-│  1. Followers detect missing heartbeat (2s timeout)            │
-│  2. Highest-ID node initiates election with new term           │
-│  3. Election requires quorum acknowledgment                    │
-│  4. New leader announces via COORDINATOR message               │
-│  5. Followers update their leader reference and term           │
+│  1. Followers detect missing heartbeat (election timeout)      │
+│  2. Follower transitions to Candidate, increments term         │
+│  3. Candidate requests votes from all peers                    │
+│  4. Majority vote grants leadership                            │
+│  5. New leader begins sending AppendEntries                    │
 └────────────────────────────────────────────────────────────────┘
 ```
+
+### Consensus Algorithms
+
+| Algorithm | Config | Description |
+|-----------|--------|-------------|
+| **Raft** (default) | `enable_raft: true` | Full Raft consensus with log replication |
+| Bully (legacy) | `enable_raft: false` | Simple leader election based on node ID |
 
 ### Cluster Events
 
@@ -791,6 +800,36 @@ FlyDB supports multiple replication modes for different consistency requirements
 | `ASYNC` | Return immediately, replicate in background | Maximum performance |
 | `SEMI_SYNC` | Wait for at least one replica to acknowledge | Balanced |
 | `SYNC` | Wait for all replicas to acknowledge | Maximum durability |
+
+## Performance Features
+
+### Zero-Copy Buffer Pooling
+
+FlyDB uses zero-copy buffer pooling to minimize memory allocations and GC pressure:
+
+- **Buffer Pool**: Reusable buffers in size classes (256B to 16MB)
+- **Zero-Copy Reader**: Reads messages directly into pooled buffers
+- **Scatter-Gather I/O**: Efficient network writes without copying
+
+Enable with: `enable_zero_copy: true` (default)
+
+### Compression
+
+FlyDB supports configurable compression for WAL and replication traffic:
+
+| Algorithm | Config Value | Description |
+|-----------|--------------|-------------|
+| gzip | `gzip` | Good compression ratio, moderate speed |
+| LZ4 | `lz4` | Very fast, lower ratio |
+| Snappy | `snappy` | Fast, good for real-time |
+| Zstd | `zstd` | Best ratio, configurable speed |
+
+Configuration:
+```toml
+enable_compression = true
+compression_algorithm = "gzip"
+compression_min_size = 256
+```
 
 ## SQL Command Summary
 

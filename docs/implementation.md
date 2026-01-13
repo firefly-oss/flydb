@@ -20,9 +20,10 @@ This document provides an in-depth technical guide to FlyDB's internal architect
 14. [Replication](#replication)
 15. [Clustering](#clustering)
 16. [Query Cache](#query-cache)
-17. [Binary Wire Protocol](#binary-wire-protocol)
-18. [SQL Dump Utility](#sql-dump-utility)
-19. [JSONB Data Type](#jsonb-data-type)
+17. [Performance Optimizations](#performance-optimizations)
+18. [Binary Wire Protocol](#binary-wire-protocol)
+19. [SQL Dump Utility](#sql-dump-utility)
+20. [JSONB Data Type](#jsonb-data-type)
 
 ---
 
@@ -1569,9 +1570,61 @@ func (cm *ClusterManager) checkForDeadNodes() {
 | HEARTBEAT | `HEARTBEAT <node_id>` | Keep-alive signal |
 | JOIN | `JOIN <node_id> <address>` | Join cluster |
 
+### Raft Consensus (Default)
+
+FlyDB now uses **Raft consensus** as the default leader election algorithm, providing stronger consistency guarantees than the Bully algorithm:
+
+**Why Raft?**
+
+1. **Log Replication**: Raft replicates a log of commands, ensuring all nodes apply the same operations in the same order
+2. **Strong Leader**: Only the leader can accept writes, simplifying consistency
+3. **Pre-Vote Protocol**: Prevents disruption from partitioned nodes rejoining the cluster
+4. **Proven Correctness**: Raft has formal proofs of safety and liveness
+
+**Raft States:**
+
+```go
+type RaftState int
+
+const (
+    StateFollower RaftState = iota  // Following a leader
+    StateCandidate                   // Running for election
+    StateLeader                      // Elected leader
+)
+```
+
+**Leader Election Flow:**
+
+1. Follower's election timer expires (randomized 150-300ms)
+2. Follower becomes Candidate, increments term
+3. Candidate votes for itself and requests votes from peers
+4. If majority votes received, becomes Leader
+5. Leader sends AppendEntries heartbeats to maintain authority
+
+**Pre-Vote Protocol:**
+
+Before starting a real election, candidates conduct a "pre-vote" to check if they would win:
+
+```go
+func (rn *RaftNode) conductPreVote() bool {
+    // Ask peers: "Would you vote for me if I started an election?"
+    // Only proceed if majority says yes
+    // This prevents disruption from partitioned nodes
+}
+```
+
+**Configuration:**
+
+```toml
+enable_raft = true
+raft_election_timeout_ms = 1000
+raft_heartbeat_interval_ms = 150
+enable_pre_vote = true
+```
+
 ### Production-Ready Cluster Features
 
-The `ClusterManager` includes production-ready features for reliable distributed operation:
+The `UnifiedClusterManager` includes production-ready features for reliable distributed operation:
 
 ```go
 type ClusterManager struct {
@@ -1784,6 +1837,119 @@ The query cache is disabled for:
 - Queries with non-deterministic functions (NOW(), RANDOM())
 - Queries inside transactions (may see uncommitted data)
 - Queries with user-specific data (unless RLS is considered)
+
+---
+
+## Performance Optimizations
+
+### Zero-Copy Buffer Pooling
+
+FlyDB uses zero-copy buffer pooling to minimize memory allocations and reduce GC pressure:
+
+**The Problem:**
+
+Every network message requires buffer allocation. With thousands of concurrent connections, this creates:
+- High GC pressure from frequent allocations
+- Memory fragmentation
+- Increased latency from GC pauses
+
+**Solution: Buffer Pool with Size Classes**
+
+```go
+type BufferPool struct {
+    pools     []*sync.Pool  // One pool per size class
+    sizes     []int         // Size classes: 256B, 1KB, 4KB, 16KB, 64KB, 256KB, 1MB, 4MB, 16MB
+}
+
+func (bp *BufferPool) Get(size int) []byte {
+    // Find smallest buffer class that fits
+    for i, s := range bp.sizes {
+        if s >= size {
+            return bp.pools[i].Get().([]byte)[:size]
+        }
+    }
+    // Size exceeds max, allocate directly
+    return make([]byte, size)
+}
+
+func (bp *BufferPool) Put(buf []byte) {
+    // Return to appropriate pool based on capacity
+    cap := cap(buf)
+    for i, s := range bp.sizes {
+        if s == cap {
+            bp.pools[i].Put(buf[:cap])
+            return
+        }
+    }
+}
+```
+
+**Zero-Copy Reader:**
+
+Messages are read directly into pooled buffers without intermediate copies:
+
+```go
+type ZeroCopyReader struct {
+    reader     io.Reader
+    pool       *BufferPool
+    headerBuf  []byte      // Reused for headers
+    payloadBuf []byte      // Borrowed from pool
+}
+
+func (zcr *ZeroCopyReader) ReadMessage() (*Header, []byte, error) {
+    // Read header into fixed buffer
+    io.ReadFull(zcr.reader, zcr.headerBuf)
+
+    // Get payload buffer from pool
+    zcr.payloadBuf = zcr.pool.Get(int(header.Length))
+
+    // Read payload directly into pooled buffer
+    io.ReadFull(zcr.reader, zcr.payloadBuf)
+
+    return header, zcr.payloadBuf, nil
+}
+```
+
+### Compression
+
+FlyDB supports configurable compression for WAL entries and replication traffic:
+
+**Supported Algorithms:**
+
+| Algorithm | Speed | Ratio | Use Case |
+|-----------|-------|-------|----------|
+| gzip | Moderate | Good | General purpose |
+| LZ4 | Very fast | Lower | Real-time, low latency |
+| Snappy | Fast | Moderate | Balanced |
+| Zstd | Configurable | Best | Maximum compression |
+
+**Batch Compression:**
+
+For better compression ratios, multiple entries are batched before compression:
+
+```go
+type BatchCompressor struct {
+    compressor *Compressor
+    entries    [][]byte
+    totalSize  int
+}
+
+func (bc *BatchCompressor) Flush() ([]byte, error) {
+    // Encode batch: [count][len1][data1][len2][data2]...
+    buf := encodeBatch(bc.entries)
+
+    // Compress the entire batch
+    return bc.compressor.Compress(buf.Bytes())
+}
+```
+
+**Configuration:**
+
+```toml
+enable_compression = true
+compression_algorithm = "gzip"  # gzip, lz4, snappy, zstd
+compression_min_size = 256      # Don't compress small payloads
+```
 
 ---
 
