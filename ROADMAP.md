@@ -2,8 +2,8 @@
 
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
-**Version:** 01.26.12
-**Last Updated:** January 11, 2026
+**Version:** 01.26.14
+**Last Updated:** January 13, 2026
 
 ---
 
@@ -164,6 +164,14 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Consistent Hashing | Data sharding with virtual nodes for even distribution | 01.26.10 |
 | WAL Streaming Replication | Configurable synchronous, semi-synchronous, and asynchronous replication | 01.26.10 |
 | Automatic Failover | Coordinated failover handling without race conditions | 01.26.10 |
+| Raft Consensus | Raft-based leader election replacing Bully algorithm for better partition tolerance | 01.26.13 |
+| Enhanced Log Replication | Improved WAL streaming with conflict resolution and consistency guarantees | 01.26.13 |
+| Improved Failover | Faster failure detection with pre-vote protocol and graceful transitions | 01.26.13 |
+| Advanced Membership | Gossip-based node discovery with health monitoring and suspicion tracking | 01.26.13 |
+| Intelligent Partitioning | Consistent hashing with automatic partition rebalancing on topology changes | 01.26.13 |
+| Cluster Automatic Failover | Fixed leader failure detection and re-election triggering | 01.26.14 |
+| Node Rejoin as Follower | Old leaders correctly rejoin as followers after recovery | 01.26.14 |
+| Split-brain Resolution | Fixed repeated event spam during split-brain recovery | 01.26.14 |
 
 ### Performance Features
 
@@ -172,6 +180,10 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Connection Pooling | Efficient connection management | 01.26.1 |
 | Query Caching | LRU cache with TTL and auto-invalidation | 01.26.1 |
 | TLS Support | Encrypted client-server connections | 01.26.1 |
+| Zero-Copy Message Delivery | Buffer pooling and direct buffer access for reduced allocations | 01.26.13 |
+| Batch Compression | Configurable compression (Gzip, LZ4, Snappy, Zstd) for WAL and replication | 01.26.13 |
+| Connection Multiplexing | Multiple logical streams over single TCP connection | 01.26.13 |
+| Async Disk I/O | Non-blocking disk operations with worker pool and batching | 01.26.13 |
 
 ### Wire Protocol
 
@@ -180,6 +192,8 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Binary Protocol | High-performance binary encoding (unified protocol) | 01.26.1 |
 | Text Protocol Removal | Removed legacy text protocol for simplified architecture | 01.26.12 |
 | WATCH Command | Real-time table change notifications | 01.26.1 |
+| Zero-Copy Protocol | Buffer pooling for reduced memory allocations | 01.26.13 |
+| Multiplexed Connections | Stream-based multiplexing for concurrent requests | 01.26.13 |
 
 ### Observability
 
@@ -226,6 +240,8 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Smart Multi-line Continuation | Automatic `->` prompt for incomplete SQL statements | 01.26.7 |
 | Multi-line Cancel | Ctrl+C cancels multi-line input | 01.26.7 |
 | SQL Dump Utility (flydb-dump) | Database export/import with SQL, CSV, JSON formats | 01.26.10 |
+| HA Cluster Connections | Multi-host connections with automatic failover (PostgreSQL-style) | 01.26.14 |
+| Cluster Status Display | `\status` and `\conninfo` show cluster connection info | 01.26.14 |
 
 ### JSONB Data Type Support
 

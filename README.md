@@ -12,7 +12,7 @@ _/ ____\  | ___.__. __| _/\_ |__
   <p><strong>The Lightweight, Embeddable SQL Database for Go Applications</strong></p>
 
   <p>
-    <a href="https://github.com/firefly-oss/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.10-blue.svg" alt="Version"></a>
+    <a href="https://github.com/firefly-oss/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.14-blue.svg" alt="Version"></a>
     <a href="https://github.com/firefly-oss/flydb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="License"></a>
     <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go" alt="Go Version"></a>
     <a href="https://github.com/firefly-oss/flydb"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg" alt="Platform"></a>
@@ -821,11 +821,12 @@ Configuration values are applied in the following order (highest priority first)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-h` | `localhost` | Server hostname |
-| `-p` | `8889` | Server port |
-| `-d` | `default` | Database to connect to |
-| `-v` | `false` | Verbose mode (show query timing) |
-| `-f` | `table` | Output format: table, json, plain |
+| `-H`, `--host` | `localhost` | Server hostname(s), comma-separated for HA cluster |
+| `-p`, `--port` | `8889` | Server port (used when host doesn't include port) |
+| `-d`, `--database` | `default` | Database to connect to |
+| `-v`, `--verbose` | `false` | Verbose mode (show query timing) |
+| `-f`, `--format` | `table` | Output format: table, json, plain |
+| `--target-primary` | `false` | Prefer connecting to primary/leader in cluster |
 
 ### CLI Local Commands
 
@@ -1002,7 +1003,19 @@ For production deployments, use cluster mode with integrated replication:
   -cluster-peers localhost:7000 -data-dir ./node2
 ```
 
-Cluster mode provides automatic leader election, integrated WAL replication, and automatic failover.
+Cluster mode provides:
+- **Automatic leader election**: Highest node ID becomes leader using a bully algorithm
+- **Integrated WAL replication**: Leader streams WAL to followers in real-time
+- **Automatic failover**: When a leader fails, followers detect it and elect a new leader
+- **Split-brain resolution**: Multiple leaders automatically resolve via term-based fencing
+- **Rejoin as follower**: When a failed leader returns, it rejoins as a follower
+
+**Failover Process:**
+1. Followers send heartbeats to all cluster nodes every 500ms (configurable)
+2. If heartbeat to leader fails twice consecutively, leader is marked as dead
+3. Re-election is triggered among remaining alive nodes
+4. Node with highest ID becomes the new leader
+5. Other nodes connect to the new leader for replication
 
 ### Consistency Levels
 
@@ -1023,6 +1036,37 @@ Cluster mode provides automatic leader election, integrated WAL replication, and
 - **Health Monitoring**: Per-node health tracking with automatic failure detection
 - **Automatic Rebalancing**: Partitions redistribute when nodes join or leave
 - **Replication Lag Tracking**: Monitor lag per follower for capacity planning
+
+### HA Client Connections
+
+The `fsql` client supports PostgreSQL-style high-availability connections with automatic failover. Connect to multiple cluster nodes using comma-separated hosts:
+
+```bash
+# Connect to a 3-node cluster
+fsql -H node1,node2,node3 -p 8889
+
+# Hosts with individual ports
+fsql -H node1:8889,node2:8890,node3:8891
+
+# Prefer connecting to primary/leader
+fsql -H node1,node2,node3 -p 8889 --target-primary
+```
+
+**Automatic Failover:**
+- If the current connection fails, the client automatically reconnects to another node
+- Authentication credentials are cached and re-applied on reconnection
+- Use `\status` or `\conninfo` to see current connection and cluster info
+
+**Configuration File:**
+
+You can also configure HA hosts in a config file (`~/.flydbrc`):
+
+```ini
+# Multiple hosts for HA cluster
+hosts = node1,node2,node3
+port = 8889
+target_primary = true
+```
 
 ---
 
