@@ -555,6 +555,9 @@ type WALInterface interface {
 	Size() (int64, error)
 	// Replay reads the WAL from startOffset and invokes fn for each record
 	Replay(startOffset int64, fn func(op byte, key string, value []byte)) error
+	// ReplayWithPosition reads WAL from startOffset and returns the new file position
+	// This is essential for replication to track exact file positions in encrypted WALs
+	ReplayWithPosition(startOffset int64, fn func(op byte, key string, value []byte)) (int64, error)
 	// Close closes the WAL
 	Close() error
 }
@@ -562,12 +565,26 @@ type WALInterface interface {
 // StorageEngine defines the interface for storage operations.
 // This allows the unified cluster manager to apply replicated operations.
 type StorageEngine interface {
-	// Put stores a value
+	// Put stores a value (writes to WAL then storage)
 	Put(key string, value []byte) error
-	// Delete removes a key
+	// Delete removes a key (writes to WAL then storage)
 	Delete(key string) error
 	// Get retrieves a value
 	Get(key string) ([]byte, error)
+}
+
+// ReplicatedStorageEngine extends StorageEngine with methods for cluster replication.
+// This allows followers to apply replicated changes without re-writing to WAL,
+// following the MySQL/PostgreSQL replication pattern.
+type ReplicatedStorageEngine interface {
+	StorageEngine
+	// ApplyReplicatedPut applies a replicated PUT without writing to WAL
+	// (the WAL entry is written separately via WriteReplicatedWAL)
+	ApplyReplicatedPut(key string, value []byte) error
+	// ApplyReplicatedDelete applies a replicated DELETE without writing to WAL
+	ApplyReplicatedDelete(key string) error
+	// WriteReplicatedWAL writes a replicated WAL entry for crash recovery
+	WriteReplicatedWAL(op byte, key string, value []byte) error
 }
 
 // WAL operation types
@@ -601,6 +618,10 @@ type UnifiedClusterManager struct {
 	// Term-based leader election
 	term uint64
 
+	// Raft consensus engine (replaces Bully algorithm)
+	raftNode    *RaftNode
+	useRaft     bool // Enable Raft-based consensus
+
 	// Hash ring for consistent hashing
 	ring *HashRing
 
@@ -623,6 +644,9 @@ type UnifiedClusterManager struct {
 	followersMu      sync.RWMutex
 	replListener     net.Listener
 	replPollInterval time.Duration
+	replActive       bool           // true when this node is leader and accepting follower connections
+	followerStopCh   chan struct{}  // channel to stop follower replication loop on leader change
+	followerStopMu   sync.Mutex     // protects followerStopCh
 
 	// Metrics
 	metrics *ClusterMetrics
@@ -678,6 +702,7 @@ func NewUnifiedClusterManager(config ClusterConfig) *UnifiedClusterManager {
 		nodeAddr:         config.NodeAddr,
 		role:             RoleFollower,
 		term:             0,
+		useRaft:          true, // Enable Raft by default
 		ring:             NewHashRing(config.VirtualNodes),
 		partitions:       make(map[int]*Partition),
 		nodes:            make(map[string]*ClusterNode),
@@ -725,6 +750,27 @@ func (ucm *UnifiedClusterManager) SetStore(store StorageEngine) {
 	ucm.store = store
 }
 
+// SetRaftNode sets the Raft consensus node for leader election
+func (ucm *UnifiedClusterManager) SetRaftNode(raft *RaftNode) {
+	ucm.raftNode = raft
+	ucm.useRaft = raft != nil
+}
+
+// EnableRaft enables or disables Raft-based consensus
+func (ucm *UnifiedClusterManager) EnableRaft(enable bool) {
+	ucm.useRaft = enable
+}
+
+// GetRaftNode returns the Raft node if configured
+func (ucm *UnifiedClusterManager) GetRaftNode() *RaftNode {
+	return ucm.raftNode
+}
+
+// IsRaftEnabled returns true if Raft consensus is enabled
+func (ucm *UnifiedClusterManager) IsRaftEnabled() bool {
+	return ucm.useRaft && ucm.raftNode != nil
+}
+
 // Start initializes and starts the cluster manager
 func (ucm *UnifiedClusterManager) Start() error {
 	// Start cluster communication listener
@@ -746,6 +792,24 @@ func (ucm *UnifiedClusterManager) Start() error {
 
 	fmt.Printf("Unified Cluster Manager started (Node: %s, Cluster: %s, Data: %s)\n",
 		ucm.nodeID, clusterAddr, dataAddr)
+
+	// Start Raft consensus if enabled
+	if ucm.useRaft && ucm.raftNode != nil {
+		if err := ucm.raftNode.Start(); err != nil {
+			ucm.clusterListener.Close()
+			ucm.dataListener.Close()
+			return fmt.Errorf("failed to start Raft node: %w", err)
+		}
+		fmt.Printf("Raft consensus enabled for node %s\n", ucm.nodeID)
+
+		// Subscribe to Raft state changes via callbacks
+		ucm.raftNode.SetLeaderCallback(func() {
+			ucm.handleRaftStateChange(StateLeader)
+		})
+		ucm.raftNode.SetFollowerCallback(func(leaderID string) {
+			ucm.handleRaftStateChange(StateFollower)
+		})
+	}
 
 	// Start background goroutines
 	ucm.wg.Add(4)
@@ -769,6 +833,11 @@ func (ucm *UnifiedClusterManager) Start() error {
 func (ucm *UnifiedClusterManager) Stop() error {
 	close(ucm.stopCh)
 
+	// Stop Raft node if enabled
+	if ucm.raftNode != nil {
+		ucm.raftNode.Stop()
+	}
+
 	if ucm.clusterListener != nil {
 		ucm.clusterListener.Close()
 	}
@@ -778,6 +847,46 @@ func (ucm *UnifiedClusterManager) Stop() error {
 
 	ucm.wg.Wait()
 	return nil
+}
+
+// handleRaftStateChange handles Raft state transitions
+func (ucm *UnifiedClusterManager) handleRaftStateChange(state RaftState) {
+	ucm.roleMu.Lock()
+	defer ucm.roleMu.Unlock()
+
+	var newRole NodeRole
+	switch state {
+	case StateLeader:
+		newRole = RoleLeader
+	case StateCandidate:
+		newRole = RoleCandidate
+	case StateFollower:
+		newRole = RoleFollower
+	default:
+		return
+	}
+
+	if ucm.role != newRole {
+		oldRole := ucm.role
+		ucm.role = newRole
+
+		// Update term from Raft
+		if ucm.raftNode != nil {
+			atomic.StoreUint64(&ucm.term, ucm.raftNode.GetTerm())
+		}
+
+		// Emit role change event
+		ucm.emitEvent(ClusterEvent{
+			Type:      EventLeaderElected,
+			NodeID:    ucm.nodeID,
+			Term:      ucm.term,
+			Timestamp: time.Now(),
+			Details:   fmt.Sprintf("role changed: %s -> %s", oldRole.String(), newRole.String()),
+		})
+
+		fmt.Printf("Node %s role changed: %s -> %s (term %d)\n",
+			ucm.nodeID, oldRole, newRole, ucm.term)
+	}
 }
 
 // GetTerm returns the current election term
@@ -792,6 +901,10 @@ func (ucm *UnifiedClusterManager) IncrementTerm() uint64 {
 
 // IsLeader returns true if this node is the cluster leader
 func (ucm *UnifiedClusterManager) IsLeader() bool {
+	// Use Raft state if enabled
+	if ucm.useRaft && ucm.raftNode != nil {
+		return ucm.raftNode.IsLeader()
+	}
 	ucm.roleMu.RLock()
 	defer ucm.roleMu.RUnlock()
 	return ucm.role == RoleLeader
@@ -979,8 +1092,13 @@ func (ucm *UnifiedClusterManager) handleClusterConnection(conn net.Conn) {
 
 // handleDataConnection processes data replication messages
 func (ucm *UnifiedClusterManager) handleDataConnection(conn net.Conn) {
-	defer conn.Close()
-	// Data replication handling will be implemented here
+	// If replication is active (this node is leader), handle as follower connection
+	if ucm.replActive {
+		ucm.handleFollowerConnection(conn)
+		return
+	}
+	// Otherwise close the connection - not ready for replication
+	conn.Close()
 }
 
 // Message types for cluster protocol
@@ -1033,6 +1151,7 @@ func (ucm *UnifiedClusterManager) sendHeartbeatTo(node *ClusterNode) {
 	addr := fmt.Sprintf("%s:%d", node.Addr, node.ClusterPort)
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
+		// Don't log every heartbeat failure - it gets noisy
 		ucm.markNodeUnhealthy(node.ID)
 		return
 	}
@@ -1079,6 +1198,58 @@ func (ucm *UnifiedClusterManager) handleHeartbeat(conn net.Conn) {
 	var msg heartbeatMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return
+	}
+
+	// Check what we knew about leadership BEFORE this heartbeat
+	ucm.nodesMu.Lock()
+	var oldLeaderID string
+	var wasLeader bool
+	if node, ok := ucm.nodes[msg.NodeID]; ok {
+		wasLeader = node.Role == RoleLeader
+		node.Role = msg.Role
+	}
+	// Find current known leader (other than the one that just sent this heartbeat)
+	for nodeID, node := range ucm.nodes {
+		if node.Role == RoleLeader && nodeID != msg.NodeID {
+			oldLeaderID = nodeID
+			break
+		}
+	}
+	// If we received a heartbeat from a new leader, clear the old leader's role
+	if msg.Role == RoleLeader && oldLeaderID != "" {
+		if oldNode, ok := ucm.nodes[oldLeaderID]; ok {
+			oldNode.Role = RoleFollower
+		}
+	}
+	ucm.nodesMu.Unlock()
+
+	// If we're a follower and we received heartbeat from a (newly discovered) leader
+	if msg.Role == RoleLeader && ucm.GetRole() == RoleFollower && !wasLeader {
+		// This is a newly discovered leader
+		leaderDataAddr := ucm.getNodeDataAddr(msg.NodeID)
+		if leaderDataAddr != "" {
+			if oldLeaderID != "" {
+				fmt.Printf("Leader changed from %s to %s\n", oldLeaderID, msg.NodeID)
+			} else {
+				fmt.Printf("Leader %s discovered via heartbeat, becoming follower\n", msg.NodeID)
+			}
+			ucm.emitEvent(ClusterEvent{
+				Type:    EventLeaderElected,
+				NodeID:  msg.NodeID,
+				Term:    msg.Term,
+				Details: "discovered leader via heartbeat",
+			})
+		}
+	}
+
+	// Split-brain resolution: if we receive a heartbeat from another leader
+	if msg.Role == RoleLeader && ucm.GetRole() == RoleLeader {
+		// Higher term wins; if same term, higher node ID wins
+		myTerm := ucm.GetTerm()
+		if msg.Term > myTerm || (msg.Term == myTerm && msg.NodeID > ucm.nodeID) {
+			fmt.Printf("Split-brain detected: stepping down for leader %s (term %d)\n", msg.NodeID, msg.Term)
+			ucm.stepDown(msg.NodeID, msg.Term)
+		}
 	}
 
 	ucm.markNodeHealthy(msg.NodeID)
@@ -1151,45 +1322,81 @@ func (ucm *UnifiedClusterManager) markNodeHealthy(nodeID string) {
 // markNodeUnhealthy marks a node as potentially unhealthy
 func (ucm *UnifiedClusterManager) markNodeUnhealthy(nodeID string) {
 	ucm.nodesMu.Lock()
-	defer ucm.nodesMu.Unlock()
 
+	triggerReelection := false
 	if node, ok := ucm.nodes[nodeID]; ok {
 		if node.State == NodeAlive {
 			node.State = NodeSuspect
+			fmt.Printf("Node %s state changed: Alive -> Suspect\n", nodeID)
 		} else if node.State == NodeSuspect {
 			node.State = NodeDead
+			fmt.Printf("Node %s state changed: Suspect -> Dead (Role: %s)\n", nodeID, node.Role)
 			ucm.emitEvent(ClusterEvent{
 				Type:    EventNodeFailed,
 				NodeID:  nodeID,
 				Details: "node failed health check",
 			})
+			// If this was the leader, trigger re-election
+			if node.Role == RoleLeader && ucm.GetRole() == RoleFollower {
+				triggerReelection = true
+			}
 		}
+	}
+
+	ucm.nodesMu.Unlock()
+
+	if triggerReelection {
+		fmt.Printf("Leader %s failed - triggering re-election\n", nodeID)
+		go ucm.electLeaderAmongNodes()
 	}
 }
 
 // checkNodeHealth checks the health of all nodes
 func (ucm *UnifiedClusterManager) checkNodeHealth() {
 	ucm.nodesMu.Lock()
-	defer ucm.nodesMu.Unlock()
 
 	healthyCount := 0
+	var leaderID string
+	leaderDead := false
+
 	for _, node := range ucm.nodes {
 		if node.State == NodeAlive {
 			healthyCount++
+		}
+
+		// Track the current known leader
+		if node.Role == RoleLeader {
+			leaderID = node.ID
 		}
 
 		// Check for stale heartbeats
 		if node.ID != ucm.nodeID && time.Since(node.LastHeartbeat) > ucm.config.ElectionTimeout {
 			if node.State == NodeAlive {
 				node.State = NodeSuspect
+			} else if node.State == NodeSuspect {
+				// Node has been suspect for too long, mark as dead
+				node.State = NodeDead
+				// Check if this was the leader
+				if node.Role == RoleLeader {
+					leaderDead = true
+					fmt.Printf("Leader %s detected as DEAD - triggering re-election\n", node.ID)
+				}
 			}
 		}
 	}
+
+	ucm.nodesMu.Unlock()
 
 	ucm.metrics.mu.Lock()
 	ucm.metrics.TotalNodes = len(ucm.nodes)
 	ucm.metrics.HealthyNodes = healthyCount
 	ucm.metrics.mu.Unlock()
+
+	// If the leader is dead and we're a follower, trigger re-election
+	if leaderDead && ucm.GetRole() == RoleFollower {
+		fmt.Printf("Starting re-election due to leader %s failure\n", leaderID)
+		go ucm.electLeaderAmongNodes()
+	}
 }
 
 // addNode adds a new node to the cluster
@@ -1215,6 +1422,17 @@ func (ucm *UnifiedClusterManager) addNode(node *ClusterNode) {
 			go ucm.rebalancePartitions()
 		}
 	}
+}
+
+// getNodeDataAddr returns the data port address for a node
+func (ucm *UnifiedClusterManager) getNodeDataAddr(nodeID string) string {
+	ucm.nodesMu.RLock()
+	defer ucm.nodesMu.RUnlock()
+
+	if node, ok := ucm.nodes[nodeID]; ok {
+		return fmt.Sprintf("%s:%d", node.Addr, node.DataPort)
+	}
+	return ""
 }
 
 // removeNode removes a node from the cluster
@@ -1255,72 +1473,92 @@ func (ucm *UnifiedClusterManager) getClusterState() clusterState {
 	}
 }
 
-// joinCluster attempts to join an existing cluster via seed nodes
+// joinCluster attempts to join an existing cluster via seed nodes with retries
 func (ucm *UnifiedClusterManager) joinCluster() {
-	for _, seed := range ucm.config.Seeds {
-		if seed == ucm.nodeAddr {
-			continue
+	// Build the self seed address to avoid connecting to ourselves
+	selfSeed := fmt.Sprintf("%s:%d", ucm.nodeAddr, ucm.config.ClusterPort)
+	selfSeedAlt := ucm.nodeID // NodeID is also in host:port format
+
+	// Retry logic with exponential backoff
+	maxRetries := 5
+	retryDelay := 500 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			fmt.Printf("Join attempt %d/%d, waiting %v before retry...\n", attempt+1, maxRetries, retryDelay)
+			time.Sleep(retryDelay)
+			retryDelay *= 2 // Exponential backoff
+			if retryDelay > 5*time.Second {
+				retryDelay = 5 * time.Second
+			}
 		}
 
-		conn, err := net.DialTimeout("tcp", seed, 5*time.Second)
-		if err != nil {
-			continue
-		}
+		for _, seed := range ucm.config.Seeds {
+			// Skip if this seed is ourselves
+			if seed == selfSeed || seed == selfSeedAlt || seed == ucm.nodeAddr {
+				continue
+			}
 
-		// Send join request
-		selfNode := ClusterNode{
-			ID:          ucm.nodeID,
-			Addr:        ucm.nodeAddr,
-			ClusterPort: ucm.config.ClusterPort,
-			DataPort:    ucm.config.DataPort,
-			State:       NodeAlive,
-			Role:        RoleFollower,
-			JoinedAt:    time.Now(),
-		}
-		data, _ := json.Marshal(selfNode)
+			conn, err := net.DialTimeout("tcp", seed, 5*time.Second)
+			if err != nil {
+				continue
+			}
 
-		conn.Write([]byte{msgJoinRequest})
-		binary.Write(conn, binary.BigEndian, uint32(len(data)))
-		conn.Write(data)
+			// Send join request
+			selfNode := ClusterNode{
+				ID:          ucm.nodeID,
+				Addr:        ucm.nodeAddr,
+				ClusterPort: ucm.config.ClusterPort,
+				DataPort:    ucm.config.DataPort,
+				State:       NodeAlive,
+				Role:        RoleFollower,
+				JoinedAt:    time.Now(),
+			}
+			data, _ := json.Marshal(selfNode)
 
-		// Read response
-		respType := make([]byte, 1)
-		if _, err := conn.Read(respType); err != nil {
+			conn.Write([]byte{msgJoinRequest})
+			binary.Write(conn, binary.BigEndian, uint32(len(data)))
+			conn.Write(data)
+
+			// Read response
+			respType := make([]byte, 1)
+			if _, err := conn.Read(respType); err != nil {
+				conn.Close()
+				continue
+			}
+
+			if respType[0] == msgJoinResponse {
+				var length uint32
+				if err := binary.Read(conn, binary.BigEndian, &length); err != nil {
+					conn.Close()
+					continue
+				}
+
+				respData := make([]byte, length)
+				if _, err := conn.Read(respData); err != nil {
+					conn.Close()
+					continue
+				}
+
+				var state clusterState
+				if err := json.Unmarshal(respData, &state); err != nil {
+					conn.Close()
+					continue
+				}
+
+				// Apply cluster state
+				ucm.applyClusterState(state)
+				conn.Close()
+				fmt.Printf("Successfully joined cluster via %s\n", seed)
+				return
+			}
+
 			conn.Close()
-			continue
 		}
-
-		if respType[0] == msgJoinResponse {
-			var length uint32
-			if err := binary.Read(conn, binary.BigEndian, &length); err != nil {
-				conn.Close()
-				continue
-			}
-
-			respData := make([]byte, length)
-			if _, err := conn.Read(respData); err != nil {
-				conn.Close()
-				continue
-			}
-
-			var state clusterState
-			if err := json.Unmarshal(respData, &state); err != nil {
-				conn.Close()
-				continue
-			}
-
-			// Apply cluster state
-			ucm.applyClusterState(state)
-			conn.Close()
-			fmt.Printf("Successfully joined cluster via %s\n", seed)
-			return
-		}
-
-		conn.Close()
 	}
 
-	// Failed to join any seed, bootstrap as single node
-	fmt.Println("Failed to join cluster, bootstrapping as single node")
+	// Failed to join any seed after all retries, bootstrap as single node
+	fmt.Println("Failed to join cluster after all retries, bootstrapping as single node")
 	ucm.bootstrapSingleNode()
 }
 
@@ -1331,10 +1569,26 @@ func (ucm *UnifiedClusterManager) applyClusterState(state clusterState) {
 		atomic.StoreUint64(&ucm.term, state.Term)
 	}
 
-	// Add nodes
+	// Add nodes and find the leader (excluding ourselves - we're joining as follower)
+	// If there are multiple leaders (stale data), pick the one with the highest term/ID
+	var leaderID string
+	var leaderNode *ClusterNode
 	for _, node := range state.Nodes {
-		if node.ID != ucm.nodeID {
-			ucm.addNode(node)
+		// Skip ourselves - when rejoining we should always become follower first
+		if node.ID == ucm.nodeID {
+			fmt.Printf("[DEBUG] applyClusterState: skipping self %s (role was %s)\n", node.ID, node.Role.String())
+			continue
+		}
+		fmt.Printf("[DEBUG] applyClusterState: node %s role=%s state=%s\n", node.ID, node.Role.String(), node.State.String())
+		ucm.addNode(node)
+		// Track who is the leader - only consider alive/suspect nodes
+		if node.Role == RoleLeader && (node.State == NodeAlive || node.State == NodeSuspect) {
+			if leaderNode == nil || node.ID > leaderNode.ID {
+				// Prefer higher node ID if there are multiple leaders
+				leaderID = node.ID
+				leaderNode = node
+				fmt.Printf("[DEBUG] applyClusterState: found leader %s from node role\n", leaderID)
+			}
 		}
 	}
 
@@ -1342,35 +1596,170 @@ func (ucm *UnifiedClusterManager) applyClusterState(state clusterState) {
 	ucm.partitionsMu.Lock()
 	for _, p := range state.Partitions {
 		ucm.partitions[p.ID] = p
+		// NOTE: Partition leader is NOT the same as cluster leader.
+		// Partition leader is the owner of that shard for data distribution.
+		// Cluster leader is elected via term-based election for replication.
 	}
 	ucm.partitionsMu.Unlock()
+
+	fmt.Printf("[DEBUG] applyClusterState: final leaderID=%s, myID=%s\n", leaderID, ucm.nodeID)
+
+	// If there's an existing leader and it's not us, become a follower
+	if leaderID != "" && leaderID != ucm.nodeID {
+		fmt.Printf("[DEBUG] applyClusterState: becoming follower of %s\n", leaderID)
+		ucm.roleMu.Lock()
+		ucm.role = RoleFollower
+		ucm.roleMu.Unlock()
+
+		// Emit event so the follower callback is triggered
+		ucm.emitEvent(ClusterEvent{
+			Type:    EventLeaderElected,
+			NodeID:  leaderID,
+			Details: "joined existing cluster as follower",
+		})
+	} else if leaderID == "" {
+		fmt.Printf("[DEBUG] applyClusterState: no leader found, starting as follower and waiting for leader heartbeat\n")
+		// No leader found yet - start as follower and wait for heartbeats
+		// The leader will be discovered via heartbeat or we'll timeout and elect
+		ucm.roleMu.Lock()
+		ucm.role = RoleFollower
+		ucm.roleMu.Unlock()
+		
+		// Start a goroutine to wait for leader discovery or timeout
+		go ucm.waitForLeaderOrElect()
+	}
 }
 
-// bootstrapSingleNode initializes as a single-node cluster
-func (ucm *UnifiedClusterManager) bootstrapSingleNode() {
+// electLeaderAmongNodes elects a leader based on highest node ID (simple bully algorithm)
+// Only alive nodes participate in the election
+func (ucm *UnifiedClusterManager) electLeaderAmongNodes() {
+	ucm.nodesMu.RLock()
+	highestID := ucm.nodeID
+	for nodeID, node := range ucm.nodes {
+		// Only consider alive or suspect nodes (not dead ones)
+		if node.State == NodeDead {
+			continue
+		}
+		if nodeID > highestID {
+			highestID = nodeID
+		}
+	}
+	ucm.nodesMu.RUnlock()
+
+	fmt.Printf("Election result: highest alive node ID is %s (self: %s)\n", highestID, ucm.nodeID)
+
+	if highestID == ucm.nodeID {
+		// We have the highest ID, become leader
+		ucm.becomeLeader()
+	} else {
+		// Someone else should be leader
+		ucm.roleMu.Lock()
+		ucm.role = RoleFollower
+		ucm.roleMu.Unlock()
+
+		ucm.emitEvent(ClusterEvent{
+			Type:    EventLeaderElected,
+			NodeID:  highestID,
+			Details: "elected by node ID comparison",
+		})
+	}
+}
+
+// waitForLeaderOrElect waits for a leader heartbeat or starts election after timeout
+func (ucm *UnifiedClusterManager) waitForLeaderOrElect() {
+	// Wait for a bit to receive heartbeats from an existing leader
+	time.Sleep(ucm.config.HeartbeatInterval * 3)
+
+	// Check if we've discovered a leader via heartbeat
+	// The handleHeartbeat function will have already emitted the event if so
+	ucm.nodesMu.RLock()
+	var leaderFound string
+	for nodeID, node := range ucm.nodes {
+		// Only consider alive leaders (not dead nodes marked as leader from stale data)
+		if node.Role == RoleLeader && node.State != NodeDead {
+			leaderFound = nodeID
+			break
+		}
+	}
+	ucm.nodesMu.RUnlock()
+
+	if leaderFound != "" {
+		// Leader already discovered via heartbeat - handleHeartbeat would have
+		// emitted the event, so we don't need to do anything here
+		fmt.Printf("Leader %s was discovered during wait period, not running election\n", leaderFound)
+		return
+	}
+
+	// No leader found, run election
+	fmt.Printf("No leader discovered after waiting, starting election\n")
+	ucm.electLeaderAmongNodes()
+}
+
+// becomeLeader transitions this node to the leader role
+func (ucm *UnifiedClusterManager) becomeLeader() {
 	ucm.IncrementTerm()
 
 	ucm.roleMu.Lock()
 	ucm.role = RoleLeader
 	ucm.roleMu.Unlock()
 
-	// Assign all partitions to self
-	ucm.partitionsMu.Lock()
-	for id := range ucm.partitions {
-		ucm.partitions[id].Leader = ucm.nodeID
-		ucm.partitions[id].Replicas = []string{ucm.nodeID}
-		ucm.partitions[id].State = PartitionHealthy
-		ucm.partitions[id].Version = 1
+	// Update self node role
+	ucm.nodesMu.Lock()
+	if self, ok := ucm.nodes[ucm.nodeID]; ok {
+		self.Role = RoleLeader
 	}
-	ucm.partitionsMu.Unlock()
+	ucm.nodesMu.Unlock()
 
-	fmt.Printf("Bootstrapped as single-node cluster (Node: %s, Term: %d)\n", ucm.nodeID, ucm.GetTerm())
+	// Assign partitions
+	ucm.rebalancePartitions()
+
+	fmt.Printf("Node %s became LEADER (Term: %d)\n", ucm.nodeID, ucm.GetTerm())
 
 	ucm.emitEvent(ClusterEvent{
 		Type:    EventLeaderElected,
 		NodeID:  ucm.nodeID,
-		Details: "single node bootstrap",
+		Details: "elected as leader",
 	})
+}
+
+// stepDown transitions this node from leader to follower when another leader is detected
+func (ucm *UnifiedClusterManager) stepDown(newLeaderID string, newTerm uint64) {
+	ucm.roleMu.Lock()
+	oldRole := ucm.role
+	ucm.role = RoleFollower
+	ucm.roleMu.Unlock()
+
+	// Update term
+	if newTerm > ucm.GetTerm() {
+		atomic.StoreUint64(&ucm.term, newTerm)
+	}
+
+	// Update self node role
+	ucm.nodesMu.Lock()
+	if self, ok := ucm.nodes[ucm.nodeID]; ok {
+		self.Role = RoleFollower
+	}
+	ucm.nodesMu.Unlock()
+
+	// Deactivate replication master
+	ucm.replActive = false
+
+	if oldRole == RoleLeader {
+		fmt.Printf("Node %s stepped down from LEADER to FOLLOWER (new leader: %s)\n", ucm.nodeID, newLeaderID)
+
+		// Emit event so the follower callback is triggered
+		ucm.emitEvent(ClusterEvent{
+			Type:    EventLeaderElected,
+			NodeID:  newLeaderID,
+			Details: "stepped down for new leader",
+		})
+	}
+}
+
+// bootstrapSingleNode initializes as a single-node cluster
+func (ucm *UnifiedClusterManager) bootstrapSingleNode() {
+	fmt.Printf("Bootstrapping as single-node cluster (Node: %s)\n", ucm.nodeID)
+	ucm.becomeLeader()
 }
 
 // rebalancePartitions redistributes partitions across nodes
@@ -1676,23 +2065,18 @@ func (ucm *UnifiedClusterManager) GetConfig() ClusterConfig {
 // ============================================================================
 
 // StartReplicationMaster starts the WAL replication server for leader mode.
-// This listens for follower connections and streams WAL updates to them.
+// This reuses the existing dataListener (started in Start()) and sets replActive
+// so that handleDataConnection delegates to handleFollowerConnection.
 func (ucm *UnifiedClusterManager) StartReplicationMaster(port string) error {
 	if ucm.wal == nil {
 		return fmt.Errorf("WAL not configured - call SetWAL first")
 	}
 
-	ln, err := net.Listen("tcp", port)
-	if err != nil {
-		return fmt.Errorf("failed to start replication listener: %w", err)
-	}
-	ucm.replListener = ln
+	// Mark replication as active - dataListener will now handle follower connections
+	ucm.replActive = true
 
-	fmt.Printf("Replication Master listening on %s (consistency: %s)\n",
-		port, ucm.config.DefaultConsistency)
-
-	ucm.wg.Add(1)
-	go ucm.acceptReplicationConnections()
+	fmt.Printf("Replication Master active on data port (consistency: %s)\n",
+		ucm.config.DefaultConsistency)
 
 	return nil
 }
@@ -1778,6 +2162,7 @@ func (ucm *UnifiedClusterManager) handleFollowerConnection(conn net.Conn) {
 	defer ticker.Stop()
 
 	currentOffset := offset
+	var sendError error
 
 	for {
 		select {
@@ -1786,14 +2171,27 @@ func (ucm *UnifiedClusterManager) handleFollowerConnection(conn net.Conn) {
 		case <-ticker.C:
 			size, err := ucm.wal.Size()
 			if err != nil {
+				fmt.Printf("[DEBUG] WAL size error: %v\n", err)
 				continue
 			}
 
 			if size > currentOffset {
 				bytesReplicated := int64(0)
+				sendError = nil
 
-				err := ucm.wal.Replay(currentOffset, func(op byte, key string, value []byte) {
-					// Serialize the WAL entry
+				// Check if WAL is configured
+				if ucm.wal == nil {
+					return
+				}
+
+				// Use ReplayWithPosition to get the actual new file offset
+				// This is critical for encrypted WALs where file position != data size
+				newOffset, err := ucm.wal.ReplayWithPosition(currentOffset, func(op byte, key string, value []byte) {
+					if sendError != nil {
+						return // Skip if we've already had a send error
+					}
+
+					// Serialize the WAL entry in unencrypted format for network transfer
 					buf := make([]byte, 1+4+len(key)+4+len(value))
 					buf[0] = op
 					binary.BigEndian.PutUint32(buf[1:], uint32(len(key)))
@@ -1803,7 +2201,8 @@ func (ucm *UnifiedClusterManager) handleFollowerConnection(conn net.Conn) {
 					copy(buf[off+4:], value)
 
 					// Send to follower
-					if _, err := conn.Write(buf); err != nil {
+					if _, werr := conn.Write(buf); werr != nil {
+						sendError = werr
 						follower.mu.Lock()
 						follower.FailedSends++
 						if follower.FailedSends >= 3 {
@@ -1814,13 +2213,21 @@ func (ucm *UnifiedClusterManager) handleFollowerConnection(conn net.Conn) {
 					}
 
 					bytesReplicated += int64(len(buf))
-					currentOffset += int64(len(buf))
 				})
+
+				// Handle send errors
+				if sendError != nil {
+					fmt.Printf("Send error for %s: %v\n", followerAddr, sendError)
+					return
+				}
 
 				if err != nil && err != io.EOF {
 					fmt.Printf("Replay error for %s: %v\n", followerAddr, err)
 					return
 				}
+
+				// Update current offset to the actual file position returned by ReplayWithPosition
+				currentOffset = newOffset
 
 				// Update metrics
 				ucm.metrics.mu.Lock()
@@ -1848,13 +2255,22 @@ func (ucm *UnifiedClusterManager) StartReplicationFollower(leaderAddr string) er
 		return fmt.Errorf("Store not configured - call SetStore first")
 	}
 
+	// Stop any existing follower replication loop
+	ucm.followerStopMu.Lock()
+	if ucm.followerStopCh != nil {
+		close(ucm.followerStopCh)
+	}
+	ucm.followerStopCh = make(chan struct{})
+	stopCh := ucm.followerStopCh
+	ucm.followerStopMu.Unlock()
+
 	ucm.wg.Add(1)
-	go ucm.followerReplicationLoop(leaderAddr)
+	go ucm.followerReplicationLoop(leaderAddr, stopCh)
 	return nil
 }
 
 // followerReplicationLoop continuously syncs with the leader
-func (ucm *UnifiedClusterManager) followerReplicationLoop(leaderAddr string) {
+func (ucm *UnifiedClusterManager) followerReplicationLoop(leaderAddr string, stopCh chan struct{}) {
 	defer ucm.wg.Done()
 
 	reconnectInterval := 3 * time.Second
@@ -1863,11 +2279,23 @@ func (ucm *UnifiedClusterManager) followerReplicationLoop(leaderAddr string) {
 		select {
 		case <-ucm.stopCh:
 			return
+		case <-stopCh:
+			fmt.Printf("Follower replication to %s stopped (leader changed)\n", leaderAddr)
+			return
 		default:
 		}
 
-		err := ucm.connectAndSyncWithLeader(leaderAddr)
+		err := ucm.connectAndSyncWithLeader(leaderAddr, stopCh)
 		if err != nil {
+			// Check if we should stop before reconnecting
+			select {
+			case <-stopCh:
+				fmt.Printf("Follower replication to %s stopped (leader changed)\n", leaderAddr)
+				return
+			case <-ucm.stopCh:
+				return
+			default:
+			}
 			fmt.Printf("Replication connection lost: %v. Reconnecting in %v...\n",
 				err, reconnectInterval)
 			time.Sleep(reconnectInterval)
@@ -1877,7 +2305,7 @@ func (ucm *UnifiedClusterManager) followerReplicationLoop(leaderAddr string) {
 }
 
 // connectAndSyncWithLeader establishes connection and syncs with leader
-func (ucm *UnifiedClusterManager) connectAndSyncWithLeader(leaderAddr string) error {
+func (ucm *UnifiedClusterManager) connectAndSyncWithLeader(leaderAddr string, stopCh chan struct{}) error {
 	conn, err := net.DialTimeout("tcp", leaderAddr, 5*time.Second)
 	if err != nil {
 		return err
@@ -1893,18 +2321,18 @@ func (ucm *UnifiedClusterManager) connectAndSyncWithLeader(leaderAddr string) er
 		return err
 	}
 
-	// Get current WAL size as starting offset
-	offset, err := ucm.wal.Size()
-	if err != nil {
-		return err
-	}
+	// Request full WAL from leader starting at position 0
+	// The leader will start reading from WALHeaderSize (position after header)
+	// Each follower needs the complete WAL from the leader - not from its own WAL position
+	// because the leader and follower have independent WAL files
+	offset := int64(0)
 
 	// Send our offset
 	if err := binary.Write(conn, binary.BigEndian, offset); err != nil {
 		return err
 	}
 
-	fmt.Printf("Connected to Leader at %s with offset %d\n", leaderAddr, offset)
+	fmt.Printf("Connected to Leader at %s requesting full WAL sync\n", leaderAddr)
 
 	reader := bufio.NewReader(conn)
 
@@ -1913,6 +2341,8 @@ func (ucm *UnifiedClusterManager) connectAndSyncWithLeader(leaderAddr string) er
 		select {
 		case <-ucm.stopCh:
 			return nil
+		case <-stopCh:
+			return fmt.Errorf("leader changed")
 		default:
 		}
 
@@ -1950,15 +2380,40 @@ func (ucm *UnifiedClusterManager) connectAndSyncWithLeader(leaderAddr string) er
 			return fmt.Errorf("failed to read value: %w", err)
 		}
 
-		// Apply the operation to local storage
-		switch op {
-		case OpPut:
-			if err := ucm.store.Put(key, valBuf); err != nil {
-				fmt.Printf("Failed to apply PUT %s: %v\n", key, err)
+		// Apply the replicated operation using the proper MySQL/PostgreSQL pattern:
+		// 1. Write to local WAL first (for crash recovery)
+		// 2. Apply to storage WITHOUT re-writing to WAL
+		//
+		// Check if store supports ReplicatedStorageEngine interface
+		if replStore, ok := ucm.store.(ReplicatedStorageEngine); ok {
+			// Step 1: Write to local WAL for crash recovery
+			if err := replStore.WriteReplicatedWAL(op, key, valBuf); err != nil {
+				fmt.Printf("Failed to write replicated WAL for %s: %v\n", key, err)
+				// Continue anyway - the data will still be applied
 			}
-		case OpDelete:
-			if err := ucm.store.Delete(key); err != nil {
-				fmt.Printf("Failed to apply DELETE %s: %v\n", key, err)
+
+			// Step 2: Apply to storage without re-writing to WAL
+			switch op {
+			case OpPut:
+				if err := replStore.ApplyReplicatedPut(key, valBuf); err != nil {
+					fmt.Printf("Failed to apply replicated PUT %s: %v\n", key, err)
+				}
+			case OpDelete:
+				if err := replStore.ApplyReplicatedDelete(key); err != nil {
+					fmt.Printf("Failed to apply replicated DELETE %s: %v\n", key, err)
+				}
+			}
+		} else {
+			// Fallback: use regular Put/Delete (will write to WAL twice)
+			switch op {
+			case OpPut:
+				if err := ucm.store.Put(key, valBuf); err != nil {
+					fmt.Printf("Failed to apply PUT %s: %v\n", key, err)
+				}
+			case OpDelete:
+				if err := ucm.store.Delete(key); err != nil {
+					fmt.Printf("Failed to apply DELETE %s: %v\n", key, err)
+				}
 			}
 		}
 	}

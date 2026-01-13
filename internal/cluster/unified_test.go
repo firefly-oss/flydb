@@ -354,6 +354,16 @@ func (m *mockWAL) Replay(startOffset int64, fn func(op byte, key string, value [
 	return nil
 }
 
+func (m *mockWAL) ReplayWithPosition(startOffset int64, fn func(op byte, key string, value []byte)) (int64, error) {
+	currentOffset := startOffset
+	for _, e := range m.entries {
+		fn(e.op, e.key, e.value)
+		// Calculate the record size
+		currentOffset += int64(1 + 4 + len(e.key) + 4 + len(e.value))
+	}
+	return currentOffset, nil
+}
+
 func (m *mockWAL) Close() error {
 	return nil
 }
