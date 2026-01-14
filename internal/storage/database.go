@@ -276,12 +276,76 @@ func (d *Database) GetCreatedAt() time.Time {
 	return d.CreatedAt
 }
 
+// Key prefix for database catalog in system DB
+const databaseCatalogPrefix = "_sys_catalog:db:"
+
 // DatabaseManager manages multiple databases within a data directory.
 type DatabaseManager struct {
 	dataDir   string               // Base directory for all database files
 	databases map[string]*Database // Loaded databases (lazy-loaded)
 	encConfig EncryptionConfig     // Encryption configuration
 	mu        sync.RWMutex         // Protects databases map
+	systemStore Engine             // Reference to system DB store for catalog replication
+}
+
+// SetSystemStore sets the system database store.
+// This is required for replicating database creation/deletion events.
+func (m *DatabaseManager) SetSystemStore(store Engine) {
+	m.systemStore = store
+}
+
+// HandleReplicatedDatabaseEvent handles replication events from the system DB.
+// It watches for _sys_catalog:db:<name> keys and creates/drops databases accordingly.
+func (m *DatabaseManager) HandleReplicatedDatabaseEvent(key string, value []byte) {
+	if !strings.HasPrefix(key, databaseCatalogPrefix) {
+		return
+	}
+
+	dbName := strings.TrimPrefix(key, databaseCatalogPrefix)
+	if dbName == "" {
+		return
+	}
+
+	// This is a replicated event (from leader).
+	// We need to ensure the physical database exists locally.
+	
+	// Check if database exists on disk
+	dbPath := m.getDatabasePath(dbName)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		fmt.Printf("Replicating database creation for '%s'...\n", dbName)
+		// Create data directory
+		if err := os.MkdirAll(dbPath, 0755); err != nil {
+			fmt.Printf("Failed to replicate database '%s': %v\n", dbName, err)
+			return
+		}
+
+		// Initialize storage engine to create WAL/files
+		store, err := m.createStorageEngine(dbPath)
+		if err != nil {
+			fmt.Printf("Failed to initialize replicated database '%s': %v\n", dbName, err)
+			return
+		}
+		
+		// Create default metadata
+		meta := DefaultDatabaseMetadata(dbName)
+		db := &Database{
+			Name:      dbName,
+			Path:      dbPath,
+			Store:     store,
+			Metadata:  meta,
+			CreatedAt: meta.CreatedAt,
+		}
+		
+		if err := db.SaveMetadata(); err != nil {
+			store.Close()
+			return
+		}
+		
+		m.mu.Lock()
+		m.databases[dbName] = db
+		m.mu.Unlock()
+		fmt.Printf("Database '%s' replicated successfully\n", dbName)
+	}
 }
 
 // NewDatabaseManager creates a new DatabaseManager with the specified data directory.
@@ -487,6 +551,16 @@ func (m *DatabaseManager) CreateDatabaseWithOptions(name string, opts CreateData
 		store.Close()
 		os.RemoveAll(dbPath)
 		return fmt.Errorf("failed to save database metadata: %w", err)
+	}
+
+	// Persist metadata to the system store for replication
+	if m.systemStore != nil {
+		catalogKey := databaseCatalogPrefix + name
+		// We just store the name as value for now
+		if err := m.systemStore.Put(catalogKey, []byte(name)); err != nil {
+			// Log error but continue - local creation succeeded
+			fmt.Printf("Warning: failed to replicate database creation: %v\n", err)
+		}
 	}
 
 	// Store in the map

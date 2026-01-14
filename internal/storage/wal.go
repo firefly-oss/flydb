@@ -471,6 +471,12 @@ func (w *WAL) Write(op byte, key string, value []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// CRITICAL: Always seek to end before writing.
+	// Other methods like ReplayWithPosition move the file pointer.
+	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
+		return fmt.Errorf("failed to seek to end of WAL: %w", err)
+	}
+
 	// Calculate buffer size: Op(1) + KeyLen(4) + Key + ValueLen(4) + Value
 	buf := make([]byte, 1+4+len(key)+4+len(value))
 

@@ -142,6 +142,13 @@ type UnifiedStorageEngine struct {
 	diskEngine *disk.DiskStorageEngine
 	wal        *WAL
 	config     StorageConfig
+	replicationHook func(key string, value []byte)
+}
+
+// SetReplicationHook sets a callback to be invoked when a replicated PUT is applied.
+// This is used to trigger side effects (like database creation) on followers.
+func (e *UnifiedStorageEngine) SetReplicationHook(fn func(key string, value []byte)) {
+	e.replicationHook = fn
 }
 
 // replayWAL replays the WAL to recover any operations not yet in the disk engine.
@@ -244,7 +251,11 @@ func (e *UnifiedStorageEngine) DiskEngine() *disk.DiskStorageEngine {
 // This is used by followers in cluster mode to apply changes received from the leader.
 // The WAL entry is written separately via WriteReplicatedWAL.
 func (e *UnifiedStorageEngine) ApplyReplicatedPut(key string, value []byte) error {
-	return e.diskEngine.ApplyReplicatedPut(key, value)
+	err := e.diskEngine.ApplyReplicatedPut(key, value)
+	if err == nil && e.replicationHook != nil {
+		e.replicationHook(key, value)
+	}
+	return err
 }
 
 // ApplyReplicatedDelete applies a replicated DELETE operation without writing to WAL.
