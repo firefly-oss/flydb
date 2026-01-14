@@ -93,6 +93,10 @@ const (
 	EnvConfigFile           = "FLYDB_CONFIG_FILE"
 	EnvEncryptionEnabled    = "FLYDB_ENCRYPTION_ENABLED"
 	EnvEncryptionPassphrase = "FLYDB_ENCRYPTION_PASSPHRASE"
+	EnvTLSEnabled           = "FLYDB_TLS_ENABLED"
+	EnvTLSCertFile          = "FLYDB_TLS_CERT_FILE"
+	EnvTLSKeyFile           = "FLYDB_TLS_KEY_FILE"
+	EnvTLSAutoGen           = "FLYDB_TLS_AUTO_GEN"
 	EnvReplicationMode      = "FLYDB_REPLICATION_MODE"
 	EnvHeartbeatInterval    = "FLYDB_HEARTBEAT_INTERVAL_MS"
 	EnvHeartbeatTimeout     = "FLYDB_HEARTBEAT_TIMEOUT_MS"
@@ -183,6 +187,12 @@ type Config struct {
 	EncryptionEnabled    bool   `toml:"encryption_enabled" json:"encryption_enabled"`
 	EncryptionPassphrase string `toml:"-" json:"-"` // Not persisted to file for security
 
+	// TLS configuration
+	TLSEnabled  bool   `toml:"tls_enabled" json:"tls_enabled"`     // Enable TLS for server connections
+	TLSCertFile string `toml:"tls_cert_file" json:"tls_cert_file"` // Path to TLS certificate file
+	TLSKeyFile  string `toml:"tls_key_file" json:"tls_key_file"`   // Path to TLS private key file
+	TLSAutoGen  bool   `toml:"tls_auto_gen" json:"tls_auto_gen"`   // Auto-generate self-signed certificates if not found
+
 	// Logging configuration
 	LogLevel string `toml:"log_level" json:"log_level"`
 	LogJSON  bool   `toml:"log_json" json:"log_json"`
@@ -251,6 +261,12 @@ func DefaultConfig() *Config {
 		// Encryption
 		EncryptionEnabled:    true, // Encryption enabled by default for security
 		EncryptionPassphrase: "",
+
+		// TLS
+		TLSEnabled:  true,  // TLS enabled by default for security
+		TLSCertFile: "",    // Auto-determined based on user privileges
+		TLSKeyFile:  "",    // Auto-determined based on user privileges
+		TLSAutoGen:  true,  // Auto-generate self-signed certificates if not found
 
 		// Logging
 		LogLevel: "info",
@@ -469,6 +485,20 @@ func (m *Manager) LoadFromEnv() {
 		cfg.EncryptionPassphrase = v
 	}
 
+	// TLS configuration
+	if v := os.Getenv(EnvTLSEnabled); v != "" {
+		cfg.TLSEnabled = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvTLSCertFile); v != "" {
+		cfg.TLSCertFile = v
+	}
+	if v := os.Getenv(EnvTLSKeyFile); v != "" {
+		cfg.TLSKeyFile = v
+	}
+	if v := os.Getenv(EnvTLSAutoGen); v != "" {
+		cfg.TLSAutoGen = strings.ToLower(v) == "true" || v == "1"
+	}
+
 	// Cluster configuration
 	if v := os.Getenv(EnvClusterPort); v != "" {
 		if port, err := strconv.Atoi(v); err == nil {
@@ -667,6 +697,16 @@ func applyConfigValue(cfg *Config, key, value string) error {
 	case "encryption_enabled":
 		cfg.EncryptionEnabled = strings.ToLower(value) == "true" || value == "1"
 
+	// TLS configuration
+	case "tls_enabled":
+		cfg.TLSEnabled = strings.ToLower(value) == "true" || value == "1"
+	case "tls_cert_file":
+		cfg.TLSCertFile = value
+	case "tls_key_file":
+		cfg.TLSKeyFile = value
+	case "tls_auto_gen":
+		cfg.TLSAutoGen = strings.ToLower(value) == "true" || value == "1"
+
 	// Cluster configuration
 	case "cluster_port":
 		port, err := strconv.Atoi(value)
@@ -841,6 +881,22 @@ func (c *Config) ToTOML() string {
 	sb.WriteString("# To disable encryption, set encryption_enabled = false\n")
 	sb.WriteString("# WARNING: Keep your passphrase safe - data cannot be recovered without it!\n")
 	sb.WriteString(fmt.Sprintf("encryption_enabled = %v\n\n", c.EncryptionEnabled))
+
+	sb.WriteString("# TLS Configuration (ENABLED BY DEFAULT for security)\n")
+	sb.WriteString("# TLS encrypts client-server connections using TLS 1.2+\n")
+	sb.WriteString(fmt.Sprintf("tls_enabled = %v\n", c.TLSEnabled))
+	if c.TLSCertFile != "" {
+		sb.WriteString(fmt.Sprintf("tls_cert_file = \"%s\"\n", c.TLSCertFile))
+	} else {
+		sb.WriteString("# tls_cert_file = \"/etc/flydb/certs/server.crt\"  # Auto-determined if not set\n")
+	}
+	if c.TLSKeyFile != "" {
+		sb.WriteString(fmt.Sprintf("tls_key_file = \"%s\"\n", c.TLSKeyFile))
+	} else {
+		sb.WriteString("# tls_key_file = \"/etc/flydb/certs/server.key\"   # Auto-determined if not set\n")
+	}
+	sb.WriteString("# Auto-generate self-signed certificates if not found (for development/testing)\n")
+	sb.WriteString(fmt.Sprintf("tls_auto_gen = %v\n\n", c.TLSAutoGen))
 
 	sb.WriteString("# Logging\n")
 	sb.WriteString(fmt.Sprintf("log_level = \"%s\"\n", c.LogLevel))
