@@ -36,7 +36,7 @@ The FlyDB server is designed with a layered architecture that separates concerns
 
   3. Server Layer (internal/server):
      - TCP Server: Handles client connections and command dispatch
-     - Replicator: Implements Leader-Follower replication
+     - Replicator: Implements Cluster replication
 
   4. Auth Layer (internal/auth):
      - AuthManager: Handles user authentication and authorization
@@ -47,7 +47,7 @@ Startup Flow:
 
   1. Parse command-line flags and load configuration
   2. Initialize the storage engine (auto-sizes buffer pool, replays WAL)
-  3. Create the Replicator based on the server role (master/slave)
+  3. Create the Replicator based on the server role (cluster/standalone)
   4. Start replication in a background goroutine
   5. Create and start the TCP server to accept client connections
 
@@ -55,9 +55,8 @@ Command-Line Flags:
 ===================
 
   -port      : TCP port for client connections (default: 8889)
-  -repl-port : TCP port for replication (master only, default: 9999)
-  -role      : Server role - "master" or "slave" (default: master)
-  -master    : Master address for slave nodes (format: host:port)
+  -repl-port : TCP port for replication (cluster only, default: 9999)
+  -role      : Server role - "standalone" or "cluster" (default: standalone)
   -data-dir  : Directory for database storage (default: ./data)
 
 Usage Examples:
@@ -66,11 +65,8 @@ Usage Examples:
   Start a standalone server:
     ./flydb -data-dir ./data
 
-  Start a master node:
-    ./flydb -port 8889 -repl-port 9999 -role master -data-dir ./data
-
-  Start a slave node:
-    ./flydb -port 8890 -role slave -master localhost:9999 -data-dir ./data
+  Start a cluster node:
+    ./flydb -port 8889 -repl-port 9999 -role cluster -data-dir ./data
 */
 package main
 
@@ -111,10 +107,11 @@ func printUsage() {
 
 	fmt.Println(cli.Highlight("OPTIONS:"))
 	fmt.Println("  -port <port>             Server port for client connections (default: 8889)")
-	fmt.Println("  -repl-port <port>        Replication port for master mode (default: 9999)")
-	fmt.Println("  -role <role>             Server role: standalone, master, slave (default: master)")
-	fmt.Println("  -master <host:port>      Master address for slave mode")
+	fmt.Println("  -repl-port <port>        Replication port (default: 9999)")
+	fmt.Println("  -role <role>             Server role: standalone, cluster (default: standalone)")
 	fmt.Printf("  -data-dir <path>         Directory for database storage (default: %s)\n", config.GetDefaultDataDir())
+	fmt.Println("  -cluster-port <port>     Cluster communication port (default: 9998)")
+	fmt.Println("  -cluster-peers <peers>   Comma-separated list of cluster peers")
 	fmt.Println("  -log-level <level>       Log level: debug, info, warn, error (default: info)")
 	fmt.Println("  -log-json                Enable JSON log output")
 	fmt.Println("  -version                 Show version information")
@@ -146,12 +143,6 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("  " + cli.Dimmed("# Start standalone server (development)"))
 	fmt.Println("  flydb -role standalone -port 8889")
-	fmt.Println()
-	fmt.Println("  " + cli.Dimmed("# Start master server (production)"))
-	fmt.Println("  flydb -role master -port 8889 -repl-port 9999 -db /var/lib/flydb/data.fdb")
-	fmt.Println()
-	fmt.Println("  " + cli.Dimmed("# Start slave server"))
-	fmt.Println("  flydb -role slave -master localhost:9999 -db /var/lib/flydb/slave.fdb")
 	fmt.Println()
 	fmt.Println("  " + cli.Dimmed("# Start with debug logging"))
 	fmt.Println("  flydb -log-level debug -log-json")
@@ -197,11 +188,12 @@ func main() {
 	// modifying code, following the 12-factor app methodology.
 	// Default values come from the loaded configuration.
 	port := flag.String("port", strconv.Itoa(cfg.Port), "Server port for client connections (binary protocol)")
-	replPort := flag.String("repl-port", strconv.Itoa(cfg.ReplPort), "Replication port (master only)")
-	role := flag.String("role", cfg.Role, "Server role: 'master', 'slave', or 'standalone'")
-	masterAddr := flag.String("master", cfg.MasterAddr, "Master address (host:port) for slave mode")
+	replPort := flag.String("repl-port", strconv.Itoa(cfg.ReplPort), "Replication port")
+	role := flag.String("role", cfg.Role, "Server role: 'cluster' or 'standalone'")
 	dbPath := flag.String("db", cfg.DBPath, "Path to the WAL database file")
 	dataDir := flag.String("data-dir", cfg.DataDir, "Directory for multi-database storage (enables multi-database mode)")
+	clusterPort := flag.Int("cluster-port", cfg.ClusterPort, "Cluster communication port")
+	clusterPeers := flag.String("cluster-peers", strings.Join(cfg.ClusterPeers, ","), "Comma-separated list of cluster peers")
 	logLevel := flag.String("log-level", cfg.LogLevel, "Log level: debug, info, warn, error")
 	logJSON := flag.Bool("log-json", cfg.LogJSON, "Enable JSON log output")
 	configFile := flag.String("config", "", "Path to configuration file")
@@ -294,12 +286,16 @@ func main() {
 				}
 			case "role":
 				cfg.Role = *role
-			case "master":
-				cfg.MasterAddr = *masterAddr
 			case "db":
 				cfg.DBPath = *dbPath
 			case "data-dir":
 				cfg.DataDir = *dataDir
+			case "cluster-port":
+				cfg.ClusterPort = *clusterPort
+			case "cluster-peers":
+				if *clusterPeers != "" {
+					cfg.ClusterPeers = strings.Split(*clusterPeers, ",")
+				}
 			case "log-level":
 				cfg.LogLevel = *logLevel
 			case "log-json":
@@ -487,6 +483,14 @@ func main() {
 	// This ensures users are global across all databases.
 	authMgr := auth.NewAuthManager(store)
 
+	// Set the system store in DatabaseManager for replication
+	dbManager.SetSystemStore(store)
+
+	// Wire up replication hook for multi-database replication
+	if unified, ok := store.(*storage.UnifiedStorageEngine); ok {
+		unified.SetReplicationHook(dbManager.HandleReplicatedDatabaseEvent)
+	}
+
 	// Initialize built-in RBAC roles BEFORE creating admin user.
 	// This ensures the admin role exists when we try to assign it.
 	if err := authMgr.InitializeBuiltInRoles(); err != nil {
@@ -577,10 +581,9 @@ func main() {
 	}
 
 	// Determine the server role and initialize the Replicator.
-	// FlyDB supports three operative modes:
+	// FlyDB supports two operative modes:
 	//   - Standalone: Single server mode (no replication)
-	//   - Master: Accepts writes and streams WAL updates to slaves
-	//   - Slave: Receives WAL updates from master and applies them locally
+	//   - Cluster: Distributed mode with automatic leader election and replication
 	//
 	// This architecture provides read scalability and fault tolerance.
 	replLog := logging.NewLogger("replication")
@@ -589,55 +592,6 @@ func main() {
 	case "standalone":
 		// Standalone Mode: No replication, single server for development.
 		log.Info("Running in standalone mode (no replication)")
-
-	case "master":
-		// Master Mode: Start the replication server in a background goroutine.
-		// The replication server listens for slave connections and streams
-		// WAL updates to keep slaves synchronized.
-		if unified, ok := store.(*storage.UnifiedStorageEngine); ok {
-			replicator := server.NewReplicator(unified.WAL(), store, true)
-			go func() {
-				replLog.Info("Starting replication master", "port", cfg.ReplPort)
-				if err := replicator.StartMaster(fmt.Sprintf(":%d", cfg.ReplPort)); err != nil {
-					replLog.Error("Replication master error", "error", err)
-				}
-			}()
-		} else {
-			log.Error("Replication requires unified storage engine")
-			os.Exit(1)
-		}
-
-	case "slave":
-		// Slave Mode: Validate configuration and start the replication client.
-		// Note: Validation already done above, but double-check for safety
-		if cfg.MasterAddr == "" {
-			log.Error("Master address is required for slave mode")
-			os.Exit(1)
-		}
-
-		// Start the replication client in a background goroutine.
-		// The client connects to the master and receives WAL updates.
-		// A retry loop ensures the slave reconnects if the connection is lost.
-		unified, ok := store.(*storage.UnifiedStorageEngine)
-		if !ok {
-			log.Error("Replication requires unified storage engine")
-			os.Exit(1)
-		}
-		replicator := server.NewReplicator(unified.WAL(), store, false)
-		go func() {
-			for {
-				replLog.Info("Connecting to master", "address", cfg.MasterAddr)
-				if err := replicator.StartSlave(cfg.MasterAddr); err != nil {
-					replLog.Warn("Replication slave error, retrying",
-						"error", err,
-						"retry_in", "5s",
-					)
-					// Wait before retrying to avoid overwhelming the master
-					// and to allow transient network issues to resolve.
-					time.Sleep(5 * time.Second)
-				}
-			}
-		}()
 
 	case "cluster":
 		// Cluster Mode: Start the unified cluster manager for distributed operation
@@ -680,12 +634,12 @@ func main() {
 		clusterMgr.SetWAL(unified.WAL())
 		clusterMgr.SetStore(store)
 
-		// Set up callback for leader transitions - start integrated replication master
+		// Set up callback for leader transitions - start integrated replication leader
 		clusterMgr.SetLeaderCallback(func() {
-			replLog.Info("This node is now the LEADER - starting integrated replication master")
+			replLog.Info("This node is now the LEADER - starting integrated replication leader")
 			go func() {
-				if err := clusterMgr.StartReplicationMaster(fmt.Sprintf(":%d", cfg.ReplPort)); err != nil {
-					replLog.Error("Replication master error", "error", err)
+				if err := clusterMgr.StartReplicationLeader(fmt.Sprintf(":%d", cfg.ReplPort)); err != nil {
+					replLog.Error("Replication leader error", "error", err)
 				}
 			}()
 		})
@@ -693,18 +647,16 @@ func main() {
 		// Set up callback for follower transitions - start integrated replication follower
 		clusterMgr.SetFollowerCallback(func(leaderID string) {
 			replLog.Info("This node is now a FOLLOWER", "leader", leaderID)
-			// Extract leader address from leaderID (format: hostname:clusterPort)
-			// The replication port is DataPort in the config
-			leaderAddr := fmt.Sprintf("%s", leaderID)
-			// Replace cluster port with replication port
-			if idx := len(leaderAddr) - 1; idx > 0 {
-				for i := len(leaderAddr) - 1; i >= 0; i-- {
-					if leaderAddr[i] == ':' {
-						leaderAddr = leaderAddr[:i+1] + fmt.Sprintf("%d", cfg.ReplPort)
-						break
-					}
-				}
+			
+			// Get leader node to find its data port
+			leaderNode := clusterMgr.GetNode(leaderID)
+			if leaderNode == nil {
+				replLog.Error("Failed to find leader node details", "leader_id", leaderID)
+				return
 			}
+			
+			leaderAddr := fmt.Sprintf("%s:%d", leaderNode.Addr, leaderNode.DataPort)
+			
 			go func() {
 				if err := clusterMgr.StartReplicationFollower(leaderAddr); err != nil {
 					replLog.Error("Replication follower error", "error", err)
@@ -763,7 +715,7 @@ func main() {
 		)
 
 	default:
-		log.Error("Invalid role specified", "role", cfg.Role, "valid_roles", "standalone, master, slave, cluster")
+		log.Error("Invalid role specified", "role", cfg.Role, "valid_roles", "standalone, cluster")
 		os.Exit(1)
 	}
 

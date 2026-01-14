@@ -1741,7 +1741,7 @@ func (ucm *UnifiedClusterManager) stepDown(newLeaderID string, newTerm uint64) {
 	}
 	ucm.nodesMu.Unlock()
 
-	// Deactivate replication master
+	// Deactivate replication leader
 	ucm.replActive = false
 
 	if oldRole == RoleLeader {
@@ -2064,10 +2064,10 @@ func (ucm *UnifiedClusterManager) GetConfig() ClusterConfig {
 // WAL-Based Replication Methods
 // ============================================================================
 
-// StartReplicationMaster starts the WAL replication server for leader mode.
+// StartReplicationLeader starts the WAL replication server for leader mode.
 // This reuses the existing dataListener (started in Start()) and sets replActive
 // so that handleDataConnection delegates to handleFollowerConnection.
-func (ucm *UnifiedClusterManager) StartReplicationMaster(port string) error {
+func (ucm *UnifiedClusterManager) StartReplicationLeader(port string) error {
 	if ucm.wal == nil {
 		return fmt.Errorf("WAL not configured - call SetWAL first")
 	}
@@ -2075,7 +2075,7 @@ func (ucm *UnifiedClusterManager) StartReplicationMaster(port string) error {
 	// Mark replication as active - dataListener will now handle follower connections
 	ucm.replActive = true
 
-	fmt.Printf("Replication Master active on data port (consistency: %s)\n",
+	fmt.Printf("Replication Leader active on data port (consistency: %s)\n",
 		ucm.config.DefaultConsistency)
 
 	return nil
