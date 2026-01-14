@@ -32,7 +32,7 @@ Whether you are building microservices that need local persistence, edge applica
 - **Zero Dependencies** — Pure Go implementation with no CGO. Deploy a single binary anywhere Go runs.
 - **Production Storage Engine** — 8KB slotted pages, LRU-K buffer pool, and write-ahead logging deliver the durability and performance you expect from a real database.
 - **Security by Default** — AES-256-GCM encryption at rest and row-level security policies protect sensitive data without additional configuration.
-- **Scale When Ready** — Start embedded, then seamlessly transition to leader-follower replication with automatic failover as your needs grow.
+- **Scale When Ready** — Start embedded, then seamlessly transition to cluster mode with automatic failover as your needs grow.
 - **Full SQL Support** — Joins, subqueries, transactions, stored procedures, triggers, and prepared statements. No compromises on query capabilities.
 - **JSONB Support** — Store and query semi-structured JSON data with PostgreSQL-compatible operators (`->`, `->>`, `@>`, `<@`, `?`) and functions.
 - **ODBC/JDBC Ready** — Binary wire protocol with complete metadata APIs enables building standard database drivers for any language or platform.
@@ -105,8 +105,7 @@ SELECT * FROM users WHERE name LIKE 'A%';
   - [Row-Level Security](#row-level-security)
 - [Replication & Clustering](#replication--clustering)
   - [Unified Architecture](#unified-architecture)
-  - [Start a Leader](#start-a-leader)
-  - [Start a Follower](#start-a-follower)
+  - [Start a Cluster](#start-a-cluster)
   - [Consistency Levels](#consistency-levels)
   - [Cluster Features](#cluster-features)
   - [HA Client Connections](#ha-client-connections)
@@ -365,7 +364,7 @@ The binary protocol enables efficient client-server communication:
 
 ### Replication
 
-Leader-follower replication provides read scalability and fault tolerance:
+FlyDB uses Raft-based consensus and log replication in cluster mode:
 
 **Replication Flow:**
 1. Follower connects to leader's replication port (default: 9999)
@@ -540,11 +539,8 @@ flydb -role standalone
 # Start with custom data directory
 flydb -data-dir /var/lib/flydb -port 8889
 
-# Start as master node for replication
-flydb -role master -port 8889 -repl-port 9999 -data-dir /var/lib/flydb
-
-# Start as slave node
-flydb -role slave -master localhost:9999 -data-dir /var/lib/flydb/slave
+# Start as cluster node
+flydb -role cluster -port 8889 -repl-port 9999 -data-dir /var/lib/flydb
 ```
 
 **Server Options:**
@@ -552,9 +548,8 @@ flydb -role slave -master localhost:9999 -data-dir /var/lib/flydb/slave
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-port` | Server port (binary protocol) | 8889 |
-| `-repl-port` | Replication port (master only) | 9999 |
-| `-role` | Server role: `standalone`, `master`, `slave` | master |
-| `-master` | Master address for slave mode | - |
+| `-repl-port` | Replication port | 9999 |
+| `-role` | Server role: `standalone`, `cluster` | standalone |
 | `-data-dir` | Data storage directory | `~/.local/share/flydb` |
 | `-log-level` | Log level: `debug`, `info`, `warn`, `error` | info |
 | `-log-json` | Enable JSON log output | false |
@@ -722,8 +717,7 @@ Step 1: Select Operative Mode
 ─────────────────────────────────────────────────────────────
 
   1) Standalone  - Single server (development/small deployments)
-  2) Master      - Leader node (accepts writes, replicates to slaves)
-  3) Slave       - Follower node (receives replication from master)
+  2) Cluster     - Distributed cluster with automatic failover
 ```
 
 The wizard prompts for all relevant settings based on your selected mode and displays a summary before starting.
@@ -733,8 +727,7 @@ The wizard prompts for all relevant settings based on your selected mode and dis
 | Mode | Description | Use Case |
 |------|-------------|----------|
 | `standalone` | Single server, no replication | Development, small deployments |
-| `master` | Leader node with replication | Production leader |
-| `slave` | Follower node | Read replicas, failover |
+| `cluster` | Cluster with automatic failover | Production distributed deployments |
 
 ### Configuration File
 
@@ -749,7 +742,7 @@ FlyDB supports TOML configuration files for easier deployment and management. Th
 Example configuration file:
 
 ```toml
-# Server role: standalone, master, or slave
+# Server role: standalone or cluster
 role = "standalone"
 
 # Network ports
@@ -774,9 +767,6 @@ encryption_enabled = true
 # Logging
 log_level = "info"
 log_json = false
-
-# Master address for slave mode
-# master_addr = "localhost:9999"
 ```
 
 ### Configuration Precedence
@@ -794,8 +784,7 @@ Configuration values are applied in the following order (highest priority first)
 |----------|-------------|
 | `FLYDB_PORT` | Server port (binary protocol) |
 | `FLYDB_REPL_PORT` | Replication port |
-| `FLYDB_ROLE` | Server role (standalone, master, slave) |
-| `FLYDB_MASTER_ADDR` | Master address for slave mode |
+| `FLYDB_ROLE` | Server role (standalone, cluster) |
 | `FLYDB_DB_PATH` | Path to database file |
 | `FLYDB_DATA_DIR` | Directory for multi-database storage |
 | `FLYDB_DEFAULT_ENCODING` | Default encoding for new databases (UTF8, LATIN1, ASCII, UTF16) |
@@ -813,10 +802,9 @@ Configuration values are applied in the following order (highest priority first)
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-port` | `8889` | Server port (binary protocol) |
-| `-repl-port` | `9999` | Replication port (master only) |
+| `-repl-port` | `9999` | Replication port (cluster only) |
 | `-data-dir` | `/var/lib/flydb` | Directory for database storage |
-| `-role` | `standalone` | Server role: `standalone`, `master`, or `slave` |
-| `-master` | - | Leader address for followers |
+| `-role` | `standalone` | Server role: `standalone`, `cluster` |
 | `-log-level` | `info` | Log level: debug, info, warn, error |
 | `-log-json` | `false` | JSON log output |
 | `-config` | - | Path to configuration file |
@@ -886,16 +874,10 @@ Standalone server (development):
 ./flydb -role standalone -data-dir /var/lib/flydb
 ```
 
-Leader with replication:
+Cluster node:
 
 ```bash
-./flydb -port 8889 -repl-port 9999 -role master -data-dir /var/lib/flydb
-```
-
-Follower:
-
-```bash
-./flydb -port 8890 -role slave -master localhost:9999 -data-dir /var/lib/flydb-replica
+./flydb -port 8889 -repl-port 9999 -role cluster -data-dir /var/lib/flydb
 ```
 
 ---
@@ -978,21 +960,7 @@ FlyDB supports multiple deployment modes:
 | Mode | Description | Use Case |
 |------|-------------|----------|
 | `standalone` | Single server, no replication | Development, small deployments |
-| `master` | Leader node with legacy replication | Simple master/slave setups |
-| `slave` | Follower node with legacy replication | Read replicas for master mode |
 | `cluster` | Unified cluster with integrated replication | Production distributed deployments |
-
-### Simple Master/Slave (Legacy)
-
-For simple deployments, use the master/slave mode:
-
-```bash
-# Start leader
-./flydb -role master -port 8889 -repl-port 9999 -data-dir ./data
-
-# Start follower
-./flydb -role slave -port 8890 -master localhost:9999 -data-dir ./data-replica
-```
 
 ### Cluster Mode (Recommended for Production)
 

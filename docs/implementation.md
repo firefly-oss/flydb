@@ -1411,7 +1411,7 @@ A single database server has two critical limitations:
 
 ### Leader-Follower Architecture
 
-FlyDB uses **leader-follower** (also called master-slave) replication:
+FlyDB uses **leader-follower** replication:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐

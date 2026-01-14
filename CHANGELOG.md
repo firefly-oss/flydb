@@ -893,8 +893,8 @@ FlyDB now operates in multi-database mode by default. This is a fundamental chan
 
 ## [Unreleased]
 
-### Planned
-- Window functions: `OVER`, `PARTITION BY`, `ROW_NUMBER`
+### Removed
+- **Master/Slave Modes**: Removed legacy `master` and `slave` server roles. Use `cluster` mode for distributed deployments.
 
 ---
 

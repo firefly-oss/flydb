@@ -1573,12 +1573,11 @@ The wizard guides you through:
 
 1. **Operative Mode Selection**
    - **Standalone**: Single server for development or small deployments
-   - **Master**: Leader node that accepts writes and replicates to slaves
-   - **Slave**: Follower node that receives replication from master
+   - **Cluster**: Distributed cluster with automatic failover
 
 2. **Network Configuration**
    - Server port (default: 8889)
-   - Replication port (master only, default: 9999)
+   - Replication port (cluster only, default: 9999)
 
 3. **Storage Configuration**
    - Database file path (default: flydb.fdb)
@@ -1598,10 +1597,9 @@ FlyDB is configured via command-line flags:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-port` | `8889` | Server port (binary protocol) |
-| `-repl-port` | `9999` | Replication port (master only) |
+| `-repl-port` | `9999` | Replication port (cluster only) |
 | `-db` | `flydb.fdb` | WAL file path |
-| `-role` | `master` | Server role: `standalone`, `master`, `slave`, or `cluster` |
-| `-master` | - | Master address for slave mode (host:port) |
+| `-role` | `standalone` | Server role: `standalone`, or `cluster` |
 | `-cluster-port` | `9998` | Cluster communication port (cluster mode only) |
 | `-cluster-peers` | - | Comma-separated list of peer addresses (cluster mode) |
 | `-log-level` | `info` | Log level: debug, info, warn, error |
@@ -1612,8 +1610,6 @@ FlyDB is configured via command-line flags:
 | Mode | Description | Replication |
 |------|-------------|-------------|
 | `standalone` | Single server mode | None |
-| `master` | Leader node | Accepts slaves on repl-port |
-| `slave` | Follower node | Connects to master |
 | `cluster` | Cluster node with automatic failover | Automatic leader election, quorum-based decisions |
 
 ### Cluster Configuration
@@ -1730,14 +1726,6 @@ export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
 # Standalone mode without encryption
 export FLYDB_ENCRYPTION_ENABLED=false
 ./flydb -role standalone -db dev.fdb
-
-# Master with replication
-export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
-./flydb -port 8889 -repl-port 9999 -role master -db master.fdb
-
-# Slave connecting to master
-export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
-./flydb -port 8890 -role slave -master localhost:9999 -db slave.fdb
 
 # Cluster mode (3-node example)
 # Node 1:
