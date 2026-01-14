@@ -31,7 +31,7 @@ Whether you are building microservices that need local persistence, edge applica
 
 - **Zero Dependencies** — Pure Go implementation with no CGO. Deploy a single binary anywhere Go runs.
 - **Production Storage Engine** — 8KB slotted pages, LRU-K buffer pool, and write-ahead logging deliver the durability and performance you expect from a real database.
-- **Security by Default** — AES-256-GCM encryption at rest and row-level security policies protect sensitive data without additional configuration.
+- **Security by Default** — TLS 1.2+ for connections, AES-256-GCM encryption at rest, and row-level security policies protect sensitive data without additional configuration.
 - **Scale When Ready** — Start embedded, then seamlessly transition to cluster mode with automatic failover as your needs grow.
 - **Full SQL Support** — Joins, subqueries, transactions, stored procedures, triggers, and prepared statements. No compromises on query capabilities.
 - **JSONB Support** — Store and query semi-structured JSON data with PostgreSQL-compatible operators (`->`, `->>`, `@>`, `<@`, `?`) and functions.
@@ -100,9 +100,11 @@ SELECT * FROM users WHERE name LIKE 'A%';
   - [Multi-line Editing](#multi-line-editing)
   - [Examples](#examples)
 - [Security](#security)
+  - [TLS Encryption (Transport Security)](#tls-encryption-transport-security)
   - [Authentication](#authentication)
   - [Encryption at Rest](#encryption-at-rest-1)
   - [Row-Level Security](#row-level-security)
+  - [TLS Troubleshooting](#tls-troubleshooting)
 - [Replication & Clustering](#replication--clustering)
   - [Unified Architecture](#unified-architecture)
   - [Start a Cluster](#start-a-cluster)
@@ -759,6 +761,13 @@ default_encoding = "UTF8"
 default_locale = "en_US"
 default_collation = "default"
 
+# TLS Configuration (ENABLED BY DEFAULT for security)
+# TLS encrypts client-server connections using TLS 1.2+
+tls_enabled = true
+# tls_cert_file = "/etc/flydb/certs/server.crt"  # Auto-determined if not set
+# tls_key_file = "/etc/flydb/certs/server.key"   # Auto-determined if not set
+tls_auto_gen = true  # Auto-generate self-signed certificates if not found
+
 # Data-at-rest encryption (ENABLED BY DEFAULT)
 # When enabled, you MUST set FLYDB_ENCRYPTION_PASSPHRASE environment variable
 # To disable encryption, set encryption_enabled = false
@@ -790,6 +799,10 @@ Configuration values are applied in the following order (highest priority first)
 | `FLYDB_DEFAULT_ENCODING` | Default encoding for new databases (UTF8, LATIN1, ASCII, UTF16) |
 | `FLYDB_DEFAULT_LOCALE` | Default locale for new databases (e.g., en_US, de_DE) |
 | `FLYDB_DEFAULT_COLLATION` | Default collation for new databases (default, binary, nocase, unicode) |
+| `FLYDB_TLS_ENABLED` | Enable TLS for client connections (true/false, default: **true**) |
+| `FLYDB_TLS_CERT_FILE` | Path to TLS certificate file (auto-determined if not set) |
+| `FLYDB_TLS_KEY_FILE` | Path to TLS private key file (auto-determined if not set) |
+| `FLYDB_TLS_AUTO_GEN` | Auto-generate self-signed certificates (true/false, default: **true**) |
 | `FLYDB_ENCRYPTION_ENABLED` | Enable data-at-rest encryption (true/false, default: **true**) |
 | `FLYDB_ENCRYPTION_PASSPHRASE` | **Required** when encryption enabled - passphrase for key derivation |
 | `FLYDB_LOG_LEVEL` | Log level (debug, info, warn, error) |
@@ -805,6 +818,10 @@ Configuration values are applied in the following order (highest priority first)
 | `-repl-port` | `9999` | Replication port (cluster only) |
 | `-data-dir` | `/var/lib/flydb` | Directory for database storage |
 | `-role` | `standalone` | Server role: `standalone`, `cluster` |
+| `-tls-enabled` | `true` | Enable TLS for client connections |
+| `-tls-cert-file` | auto | Path to TLS certificate file |
+| `-tls-key-file` | auto | Path to TLS private key file |
+| `-tls-auto-gen` | `true` | Auto-generate self-signed certificates |
 | `-log-level` | `info` | Log level: debug, info, warn, error |
 | `-log-json` | `false` | JSON log output |
 | `-config` | - | Path to configuration file |
@@ -819,6 +836,8 @@ Configuration values are applied in the following order (highest priority first)
 | `-v`, `--verbose` | `false` | Verbose mode (show query timing) |
 | `-f`, `--format` | `table` | Output format: table, json, plain |
 | `--target-primary` | `false` | Prefer connecting to primary/leader in cluster |
+| `--no-tls` | `false` | Disable TLS (connect to legacy servers) |
+| `--tls-insecure` | `false` | Skip TLS certificate verification (for self-signed certs) |
 
 ### CLI Local Commands
 
@@ -884,6 +903,52 @@ Cluster node:
 
 ## Security
 
+FlyDB provides comprehensive security features enabled by default to protect your data both at rest and in transit.
+
+### TLS Encryption (Transport Security)
+
+**TLS is enabled by default** for all client-server connections, encrypting data in transit using TLS 1.2+.
+
+**Auto-Generated Certificates (Development/Testing):**
+
+```bash
+# TLS is enabled automatically with self-signed certificates
+./flydb -data-dir ./data
+
+# Server will auto-generate certificates at:
+# - Root user: /etc/flydb/certs/
+# - Non-root: ~/.config/flydb/certs/
+```
+
+**Custom Certificates (Production):**
+
+```bash
+# Use your own certificates from a trusted CA
+./flydb -data-dir ./data \
+  -tls-cert-file /path/to/server.crt \
+  -tls-key-file /path/to/server.key
+```
+
+**Disable TLS (Legacy/Testing):**
+
+```bash
+# Disable TLS for backward compatibility
+export FLYDB_TLS_ENABLED=false
+./flydb -data-dir ./data
+
+# Or via config file: tls_enabled = false
+```
+
+**Client Connections:**
+
+```bash
+# Connect with TLS (default, skips certificate verification for self-signed certs)
+flydb-shell --host localhost --port 8889 --tls-insecure
+
+# Connect without TLS (to legacy servers)
+flydb-shell --host localhost --port 8889 --no-tls
+```
+
 ### Authentication
 
 FlyDB uses bcrypt for password hashing. On first startup, an admin user is created:
@@ -919,6 +984,60 @@ Grant access to specific rows using predicate filters:
 ```sql
 -- User can only see their own orders
 GRANT SELECT ON orders WHERE user_id = 'alice' TO alice;
+```
+
+### TLS Troubleshooting
+
+**Certificate Verification Errors:**
+
+If you see certificate verification errors when connecting:
+
+```bash
+# For self-signed certificates (development/testing)
+flydb-shell --host localhost --port 8889 --tls-insecure
+
+# For production, use certificates from a trusted CA
+flydb-shell --host localhost --port 8889
+```
+
+**Certificate Location:**
+
+Auto-generated certificates are stored at:
+- **Root user:** `/etc/flydb/certs/server.crt` and `/etc/flydb/certs/server.key`
+- **Non-root user:** `~/.config/flydb/certs/server.crt` and `~/.config/flydb/certs/server.key`
+
+**Certificate Permissions:**
+
+Ensure correct permissions:
+```bash
+chmod 644 /path/to/server.crt
+chmod 600 /path/to/server.key
+```
+
+**Regenerate Certificates:**
+
+To regenerate auto-generated certificates:
+```bash
+# Remove existing certificates
+rm -rf ~/.config/flydb/certs/
+
+# Restart server - new certificates will be generated
+./flydb -data-dir ./data
+```
+
+**Connection Refused:**
+
+If you can't connect, verify TLS is enabled on both client and server:
+```bash
+# Check server logs for "TLS protocol listening"
+# If not present, TLS may be disabled
+
+# Enable TLS on server
+export FLYDB_TLS_ENABLED=true
+./flydb -data-dir ./data
+
+# Connect with TLS
+flydb-shell --host localhost --port 8889 --tls-insecure
 ```
 
 ---

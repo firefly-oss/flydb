@@ -155,6 +155,21 @@ The auth layer provides security features:
 |-----------|------|---------|
 | AuthManager | `auth.go` | User management, authentication, authorization |
 
+### TLS Layer (`internal/tls/`)
+
+The TLS layer provides transport security for client-server connections:
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| Certificate Manager | `certs.go` | TLS certificate generation, validation, and loading |
+
+**Features:**
+- **Auto-generation:** Self-signed certificates using ECDSA (P-256/P-384)
+- **Validation:** Certificate expiration checking with 30-day warnings
+- **Secure defaults:** TLS 1.2+ with modern cipher suites (ECDHE-ECDSA/RSA-AES-GCM, ChaCha20-Poly1305)
+- **Automatic paths:** `/etc/flydb/certs/` for root, `~/.config/flydb/certs/` for users
+- **Proper permissions:** 0644 for certificates, 0600 for private keys
+
 ### Storage Layer (`internal/storage/`)
 
 The storage layer provides persistence and data management using a unified disk-based engine:

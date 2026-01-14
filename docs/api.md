@@ -113,6 +113,34 @@ See [Driver Development Guide](driver-development.md) for complete protocol spec
 
 The `fsql` interactive client (flydb-shell) provides local commands (prefixed with `\`) that are processed locally without server communication. These commands are inspired by PostgreSQL's `psql` client.
 
+#### Connection Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-H`, `--host` | `localhost` | Server hostname(s), comma-separated for HA cluster |
+| `-p`, `--port` | `8889` | Server port |
+| `-d`, `--database` | `default` | Database to connect to |
+| `-U`, `--username` | - | Username for authentication |
+| `-P`, `--password` | - | Prompt for password (secure) |
+| `--no-tls` | `false` | Disable TLS (connect to legacy servers) |
+| `--tls-insecure` | `false` | Skip TLS certificate verification (for self-signed certs) |
+| `-v`, `--verbose` | `false` | Verbose mode (show query timing) |
+| `-f`, `--format` | `table` | Output format: table, json, plain |
+| `--target-primary` | `false` | Prefer connecting to primary/leader in cluster |
+
+**TLS Connection Examples:**
+
+```bash
+# Connect with TLS (default, skip cert verification for self-signed)
+flydb-shell --host localhost --port 8889 --tls-insecure
+
+# Connect without TLS (to legacy servers)
+flydb-shell --host localhost --port 8889 --no-tls
+
+# Connect with TLS and proper certificate verification
+flydb-shell --host myserver.com --port 8889
+```
+
 #### Navigation and Help
 
 | Command | Aliases | Description |
@@ -1602,8 +1630,31 @@ FlyDB is configured via command-line flags:
 | `-role` | `standalone` | Server role: `standalone`, or `cluster` |
 | `-cluster-port` | `9998` | Cluster communication port (cluster mode only) |
 | `-cluster-peers` | - | Comma-separated list of peer addresses (cluster mode) |
+| `-tls-enabled` | `true` | Enable TLS for client connections |
+| `-tls-cert-file` | auto | Path to TLS certificate file |
+| `-tls-key-file` | auto | Path to TLS private key file |
+| `-tls-auto-gen` | `true` | Auto-generate self-signed certificates |
 | `-log-level` | `info` | Log level: debug, info, warn, error |
 | `-log-json` | `false` | Enable JSON log output |
+
+**TLS Configuration:**
+
+TLS is **enabled by default** for all client-server connections. The server will automatically generate self-signed certificates if none are provided.
+
+**Environment Variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `FLYDB_TLS_ENABLED` | Enable/disable TLS (true/false, default: true) |
+| `FLYDB_TLS_CERT_FILE` | Path to TLS certificate file |
+| `FLYDB_TLS_KEY_FILE` | Path to TLS private key file |
+| `FLYDB_TLS_AUTO_GEN` | Auto-generate certificates (true/false, default: true) |
+
+**Certificate Locations:**
+
+Auto-generated certificates are stored at:
+- **Root user:** `/etc/flydb/certs/server.crt` and `/etc/flydb/certs/server.key`
+- **Non-root user:** `~/.config/flydb/certs/server.crt` and `~/.config/flydb/certs/server.key`
 
 ### Operative Modes
 
