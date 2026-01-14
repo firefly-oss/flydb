@@ -87,6 +87,7 @@ import (
 	"flydb/internal/logging"
 	"flydb/internal/server"
 	"flydb/internal/storage"
+	flydbtls "flydb/internal/tls"
 	"flydb/internal/wizard"
 	"flydb/pkg/cli"
 )
@@ -734,6 +735,45 @@ func main() {
 		dbManager,
 	)
 
+	// Configure TLS if enabled
+	if cfg.TLSEnabled {
+		// Determine certificate paths
+		certPath := cfg.TLSCertFile
+		keyPath := cfg.TLSKeyFile
+
+		if certPath == "" || keyPath == "" {
+			// Use default paths based on user privileges
+			_, certPath, keyPath = flydbtls.GetDefaultCertPaths()
+		}
+
+		// Auto-generate certificates if enabled and they don't exist
+		if cfg.TLSAutoGen {
+			certConfig := flydbtls.DefaultCertConfig()
+			if err := flydbtls.EnsureCertificates(certPath, keyPath, certConfig); err != nil {
+				log.Error("Failed to ensure TLS certificates", "error", err)
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		// Enable TLS on the server
+		tlsConfig := server.TLSConfig{
+			CertFile: certPath,
+			KeyFile:  keyPath,
+			Address:  fmt.Sprintf(":%d", cfg.Port),
+		}
+
+		if err := srv.EnableTLS(tlsConfig); err != nil {
+			log.Error("Failed to enable TLS", "error", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "\nTo disable TLS, set tls_enabled = false in your config file\n")
+			fmt.Fprintf(os.Stderr, "or set FLYDB_TLS_ENABLED=false environment variable\n")
+			os.Exit(1)
+		}
+
+		log.Info("TLS enabled", "cert", certPath, "key", keyPath)
+	}
+
 	// Set up graceful shutdown handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -763,11 +803,20 @@ func main() {
 	fmt.Println()
 	cli.PrintSuccess("FlyDB server is ready!")
 	fmt.Println()
-	cli.KeyValue("Server", fmt.Sprintf("localhost:%d", cfg.Port), 20)
+
+	// Show connection protocol
+	protocol := "tcp"
+	if cfg.TLSEnabled {
+		protocol = "tls"
+	}
+	cli.KeyValue("Server", fmt.Sprintf("%s://localhost:%d", protocol, cfg.Port), 20)
 	cli.KeyValue("Role", cfg.Role, 20)
 	cli.KeyValue("Data Directory", cfg.DataDir, 20)
 	if cfg.EncryptionEnabled {
 		cli.KeyValue("Encryption", "enabled", 20)
+	}
+	if cfg.TLSEnabled {
+		cli.KeyValue("TLS", "enabled", 20)
 	}
 	if cfg.ConfigFile != "" {
 		cli.KeyValue("Config File", cfg.ConfigFile, 20)

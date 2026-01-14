@@ -857,14 +857,18 @@ func (s *Server) startTLSListener(ready chan<- struct{}) {
 //
 // Returns an error only if the initial Listen call fails.
 func (s *Server) Start() error {
-	// Use a channel to signal when TLS listener is ready
-	tlsReady := make(chan struct{})
-
-	// Start TLS listener if configured.
+	// If TLS is configured, use TLS listener exclusively
 	if s.tlsConfig != nil && s.tlsAddr != "" {
+		// Use a channel to signal when TLS listener is ready
+		tlsReady := make(chan struct{})
 		go s.startTLSListener(tlsReady)
-	} else {
-		close(tlsReady)
+		<-tlsReady
+
+		// Block forever - the TLS listener runs in its own goroutine
+		// Wait for stop signal
+		<-s.stopCh
+		log.Info("Server stopped")
+		return nil
 	}
 
 	// Create a TCP listener on the configured address for binary protocol.
@@ -880,9 +884,6 @@ func (s *Server) Start() error {
 	s.listenersMu.Unlock()
 
 	log.Info("Binary protocol listening", "address", s.addr)
-
-	// Wait for TLS listener to be ready before accepting connections
-	<-tlsReady
 
 	// Accept loop: continuously accept new connections.
 	// This loop runs until the server is stopped.
