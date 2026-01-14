@@ -60,16 +60,13 @@ RESOLVED_INSTALL_MODE=""
 # Server Configuration (for interactive wizard)
 # =============================================================================
 
-# Server role: standalone, master, slave, cluster
+# Server role: standalone, cluster
 SERVER_ROLE="standalone"
 
 # Network ports
 PORT="8889"
 REPL_PORT="9999"
 CLUSTER_PORT="9998"
-
-# Master address for slave mode
-MASTER_ADDR=""
 
 # Cluster configuration
 CLUSTER_PEERS=""
@@ -299,8 +296,6 @@ print_welcome_message() {
     echo "  modern applications. It supports multiple deployment modes:"
     echo ""
     echo -e "  ${GREEN}●${RESET} ${BOLD}Standalone${RESET}  - Single server for development or small deployments"
-    echo -e "  ${BLUE}●${RESET} ${BOLD}Master${RESET}      - Leader node that accepts writes and replicates to slaves"
-    echo -e "  ${YELLOW}●${RESET} ${BOLD}Slave${RESET}       - Follower node that receives replication from master"
     echo -e "  ${MAGENTA}●${RESET} ${BOLD}Cluster${RESET}     - Distributed cluster with automatic failover"
     echo ""
     echo "  Key Features:"
@@ -350,11 +345,10 @@ print_help() {
     echo -e "                              (passes --yes, --prefix to uninstall.sh)"
     echo ""
     echo -e "${BOLD}SERVER CONFIGURATION OPTIONS:${RESET}"
-    echo -e "    ${BOLD}--role <role>${RESET}             Server role: standalone, master, slave, cluster"
+    echo -e "    ${BOLD}--role <role>${RESET}             Server role: standalone, cluster"
     echo -e "    ${BOLD}--port <port>${RESET}             Server port (default: 8889)"
     echo -e "    ${BOLD}--repl-port <port>${RESET}        Replication port (default: 9999)"
     echo -e "    ${BOLD}--cluster-port <port>${RESET}     Cluster communication port (default: 9998)"
-    echo -e "    ${BOLD}--master-addr <host:port>${RESET} Master address for slave mode"
     echo -e "    ${BOLD}--data-dir <path>${RESET}         Data directory for database storage"
     echo ""
     echo -e "${BOLD}CLUSTER OPTIONS:${RESET}"
@@ -407,12 +401,6 @@ print_help() {
     echo "    # Install as standalone server"
     echo "    ./install.sh --role standalone --port 8889 --yes"
     echo ""
-    echo "    # Install as master node for replication"
-    echo "    ./install.sh --role master --repl-port 9999 --yes"
-    echo ""
-    echo "    # Install as slave node"
-    echo "    ./install.sh --role slave --master-addr master.example.com:9999 --yes"
-    echo ""
     echo "    # Bootstrap first cluster node (becomes leader)"
     echo "    ./install.sh --role cluster --cluster-bootstrap --yes"
     echo ""
@@ -433,12 +421,6 @@ print_help() {
     echo -e "${BOLD}SERVER ROLES:${RESET}"
     echo -e "    ${GREEN}standalone${RESET}  Single server mode (default, no replication)"
     echo "              Best for: Development, testing, small single-server deployments"
-    echo ""
-    echo -e "    ${BLUE}master${RESET}      Leader node that accepts writes and replicates to slaves"
-    echo "              Best for: Simple master/slave setups with manual failover"
-    echo ""
-    echo -e "    ${YELLOW}slave${RESET}       Follower node that receives replication from master"
-    echo "              Best for: Read replicas, backup nodes in master/slave setup"
     echo ""
     echo -e "    ${MAGENTA}cluster${RESET}     Distributed cluster with automatic failover"
     echo "              Best for: Production deployments requiring high availability"
@@ -1105,13 +1087,7 @@ wizard_step_server_role() {
     echo -e "  ${GREEN}[1]${RESET} ${BOLD}Standalone${RESET}  ${DIM}Single server, no replication${RESET}"
     echo -e "      ${DIM}Best for: Development, testing, small deployments${RESET}"
     echo ""
-    echo -e "  ${BLUE}[2]${RESET} ${BOLD}Master${RESET}      ${DIM}Leader node that accepts writes${RESET}"
-    echo -e "      ${DIM}Best for: Simple master/slave setups with manual failover${RESET}"
-    echo ""
-    echo -e "  ${YELLOW}[3]${RESET} ${BOLD}Slave${RESET}       ${DIM}Follower node receiving replication${RESET}"
-    echo -e "      ${DIM}Best for: Read replicas, backup nodes${RESET}"
-    echo ""
-    echo -e "  ${MAGENTA}[4]${RESET} ${BOLD}Cluster${RESET}     ${DIM}Distributed with automatic failover${RESET}"
+    echo -e "  ${MAGENTA}[2]${RESET} ${BOLD}Cluster${RESET}     ${DIM}Distributed with automatic failover${RESET}"
     echo -e "      ${DIM}Best for: Production high-availability deployments${RESET}"
     echo ""
 
@@ -1121,9 +1097,7 @@ wizard_step_server_role() {
 
     case "$choice" in
         1) SERVER_ROLE="standalone" ;;
-        2) SERVER_ROLE="master" ;;
-        3) SERVER_ROLE="slave" ;;
-        4) SERVER_ROLE="cluster" ;;
+        2) SERVER_ROLE="cluster" ;;
         *)
             print_warning "Invalid selection, using standalone mode"
             SERVER_ROLE="standalone"
@@ -1139,7 +1113,7 @@ wizard_step_network_ports() {
     echo "  Configure network ports for FlyDB services:"
     echo ""
     echo -e "  ${DIM}• Server port: Binary protocol for fsql CLI, JDBC/ODBC drivers${RESET}"
-    if [[ "$SERVER_ROLE" == "master" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
         echo -e "  ${DIM}• Replication port: WAL streaming for data replication to followers${RESET}"
     fi
     if [[ "$SERVER_ROLE" == "cluster" ]]; then
@@ -1149,7 +1123,7 @@ wizard_step_network_ports() {
 
     PORT=$(prompt_port "Server port" "$PORT")
 
-    if [[ "$SERVER_ROLE" == "master" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
         REPL_PORT=$(prompt_port "Replication port" "$REPL_PORT")
     fi
 
@@ -1161,24 +1135,6 @@ wizard_step_network_ports() {
     print_success "Network ports configured"
 }
 
-wizard_step_slave_config() {
-    if [[ "$SERVER_ROLE" != "slave" ]]; then
-        return
-    fi
-
-    wizard_step_header "4" "Master Connection"
-
-    echo "  Configure the master server to replicate from:"
-    echo ""
-    echo -e "  ${DIM}• The master must be running and accessible${RESET}"
-    echo -e "  ${DIM}• Use the master's replication port (default: 9999)${RESET}"
-    echo ""
-
-    MASTER_ADDR=$(prompt_address "Master address (host:port)" "localhost:9999")
-
-    echo ""
-    print_success "Master address: ${MASTER_ADDR}"
-}
 
 wizard_step_cluster_config() {
     if [[ "$SERVER_ROLE" != "cluster" ]]; then
@@ -1388,9 +1344,9 @@ wizard_step_cluster_advanced() {
 }
 
 wizard_step_storage() {
-    # Step number depends on role: standalone=4, master=4, slave=5, cluster=5
+    # Step number depends on role: standalone=4, cluster=5
     local step_num="4"
-    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
         step_num="5"
     fi
 
@@ -1427,9 +1383,9 @@ wizard_step_storage() {
 }
 
 wizard_step_security() {
-    # Step number depends on role: standalone=5, master=5, slave=6, cluster=6
+    # Step number depends on role: standalone=5, cluster=6
     local step_num="5"
-    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
         step_num="6"
     fi
 
@@ -1477,9 +1433,9 @@ wizard_step_security() {
 }
 
 wizard_step_performance() {
-    # Step number depends on role: standalone=6, master=6, slave=7, cluster=7
+    # Step number depends on role: standalone=6, cluster=7
     local step_num="6"
-    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
         step_num="7"
     fi
 
@@ -1562,9 +1518,9 @@ wizard_step_performance() {
 }
 
 wizard_step_logging() {
-    # Step number depends on role: standalone=7, master=7, slave=8, cluster=8
+    # Step number depends on role: standalone=7, cluster=8
     local step_num="7"
-    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
         step_num="8"
     fi
 
@@ -1599,10 +1555,10 @@ wizard_step_logging() {
 }
 
 wizard_step_service() {
-    # Step number depends on role: standalone=7, master=7, slave=8, cluster=8
-    local step_num="7"
-    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
-        step_num="8"
+    # Step number depends on role: standalone=8, cluster=9
+    local step_num="8"
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        step_num="9"
     fi
 
     wizard_step_header "$step_num" "System Service"
@@ -1629,10 +1585,10 @@ wizard_step_service() {
 }
 
 wizard_step_init_database() {
-    # Step number depends on role: standalone=8, master=8, slave=9, cluster=9
-    local step_num="8"
-    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
-        step_num="9"
+    # Step number depends on role: standalone=9, cluster=10
+    local step_num="9"
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        step_num="10"
     fi
 
     wizard_step_header "$step_num" "Database Initialization"
@@ -1693,7 +1649,6 @@ run_interactive_wizard() {
     wizard_step_network_ports
 
     # Role-specific configuration
-    wizard_step_slave_config
     wizard_step_cluster_config
 
     # Common configuration
@@ -1756,8 +1711,6 @@ print_installation_summary() {
     local role_display
     case "$SERVER_ROLE" in
         standalone) role_display="${GREEN}Standalone${RESET}" ;;
-        master) role_display="${BLUE}Master${RESET}" ;;
-        slave) role_display="${YELLOW}Slave${RESET}" ;;
         cluster) role_display="${MAGENTA}Cluster${RESET}" ;;
         *) role_display="$SERVER_ROLE" ;;
     esac
@@ -1765,17 +1718,13 @@ print_installation_summary() {
 
     # Network ports
     print_kv "Server Port" "$PORT"
-    if [[ "$SERVER_ROLE" == "master" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
         print_kv "Replication Port" "$REPL_PORT"
     fi
     if [[ "$SERVER_ROLE" == "cluster" ]]; then
         print_kv "Cluster Port" "$CLUSTER_PORT"
     fi
 
-    # Role-specific settings
-    if [[ "$SERVER_ROLE" == "slave" ]]; then
-        print_kv "Master Address" "$MASTER_ADDR"
-    fi
     echo ""
 
     # Cluster Configuration (if applicable)
@@ -2216,13 +2165,6 @@ create_config_file() {
         cluster_peers_toml="[${peers_array}]"
     fi
 
-    # Build master_addr line
-    local master_addr_line=""
-    if [[ "$SERVER_ROLE" == "slave" ]] && [[ -n "$MASTER_ADDR" ]]; then
-        master_addr_line="master_addr = \"${MASTER_ADDR}\""
-    else
-        master_addr_line="# master_addr = \"localhost:9999\""
-    fi
 
     local config_content="# FlyDB Configuration File
 # Generated by install.sh on $(date)
@@ -2240,10 +2182,8 @@ create_config_file() {
 # Server Configuration
 # =============================================================================
 
-# Server role: standalone, master, slave, or cluster
+# Server role: standalone or cluster
 # - standalone: Single server mode (no replication)
-# - master: Leader node that accepts writes and replicates to slaves
-# - slave: Follower node that receives replication from master
 # - cluster: Automatic failover cluster with leader election
 role = \"${SERVER_ROLE}\"
 
@@ -2254,14 +2194,12 @@ role = \"${SERVER_ROLE}\"
 # Server port (binary protocol for fsql client connections)
 port = ${PORT}
 
-# Replication port (for master/cluster modes)
+# Replication port (for cluster mode)
 replication_port = ${REPL_PORT}
 
 # Cluster communication port (for cluster mode)
 cluster_port = ${CLUSTER_PORT}
 
-# Master address for slave mode (format: host:port)
-${master_addr_line}
 
 # =============================================================================
 # Storage Configuration
@@ -2916,11 +2854,11 @@ parse_args() {
             --role)
                 if [[ -n "${2:-}" ]]; then
                     case "$2" in
-                        standalone|master|slave|cluster)
+                        standalone|cluster)
                             SERVER_ROLE="$2"
                             ;;
                         *)
-                            print_error "Invalid role: $2. Must be standalone, master, slave, or cluster"
+                            print_error "Invalid role: $2. Must be standalone or cluster"
                             exit 1
                             ;;
                     esac
@@ -2933,11 +2871,11 @@ parse_args() {
             --role=*)
                 local role="${1#*=}"
                 case "$role" in
-                    standalone|master|slave|cluster)
+                    standalone|cluster)
                         SERVER_ROLE="$role"
                         ;;
                     *)
-                        print_error "Invalid role: $role. Must be standalone, master, slave, or cluster"
+                        print_error "Invalid role: $role. Must be standalone or cluster"
                         exit 1
                         ;;
                 esac
@@ -2998,19 +2936,6 @@ parse_args() {
                     print_error "--cluster-port requires a valid port number (1-65535)"
                     exit 1
                 fi
-                shift
-                ;;
-            --master-addr)
-                if [[ -n "${2:-}" ]]; then
-                    MASTER_ADDR="$2"
-                    shift 2
-                else
-                    print_error "--master-addr requires a host:port argument"
-                    exit 1
-                fi
-                ;;
-            --master-addr=*)
-                MASTER_ADDR="${1#*=}"
                 shift
                 ;;
             --data-dir)
