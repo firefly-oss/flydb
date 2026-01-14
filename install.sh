@@ -91,6 +91,12 @@ CHECKPOINT_SECS="60"
 ENCRYPTION_ENABLED="true"
 ENCRYPTION_PASSPHRASE=""
 
+# TLS configuration
+TLS_ENABLED="true"
+TLS_CERT_FILE=""
+TLS_KEY_FILE=""
+TLS_AUTO_GEN="true"
+
 # Logging configuration
 LOG_LEVEL="info"
 LOG_JSON="false"
@@ -1432,11 +1438,68 @@ wizard_step_security() {
     print_success "Security configuration complete"
 }
 
-wizard_step_performance() {
+wizard_step_tls() {
     # Step number depends on role: standalone=6, cluster=7
     local step_num="6"
     if [[ "$SERVER_ROLE" == "cluster" ]]; then
         step_num="7"
+    fi
+
+    wizard_step_header "$step_num" "TLS Configuration"
+
+    echo "  Configure TLS for client-server connections:"
+    echo ""
+    echo -e "  ${DIM}• Encrypts client-server connections using TLS 1.2+${RESET}"
+    echo -e "  ${YELLOW}${ICON_WARNING}${RESET} ${YELLOW}TLS is enabled by default for security${RESET}"
+    echo -e "  ${DIM}• Protects data in transit between clients and server${RESET}"
+    echo ""
+
+    if prompt_yes_no "Enable TLS?" "y"; then
+        TLS_ENABLED="true"
+
+        echo ""
+        echo "  Certificate options:"
+        echo ""
+        echo -e "  ${GREEN}[1]${RESET} Auto-generate ${DIM}(recommended for dev/test) - Self-signed certificates${RESET}"
+        echo -e "  ${CYAN}[2]${RESET} Custom files ${DIM}(production) - Provide your own certificate files${RESET}"
+        echo ""
+
+        local cert_choice
+        cert_choice=$(prompt "Select certificate option" "1")
+
+        if [[ "$cert_choice" == "1" ]]; then
+            TLS_AUTO_GEN="true"
+            echo ""
+            print_success "Certificates will be auto-generated on first startup"
+            echo ""
+            echo -e "  ${YELLOW}${ICON_WARNING}${RESET} ${YELLOW}Self-signed certificates are for development/testing only${RESET}"
+            echo -e "  ${DIM}• For production, use certificates from a trusted CA${RESET}"
+        else
+            TLS_AUTO_GEN="false"
+            echo ""
+            echo -e "  ${DIM}Enter paths to your TLS certificate and key files${RESET}"
+            echo ""
+
+            TLS_CERT_FILE=$(prompt "Certificate file path" "/etc/flydb/certs/server.crt")
+            TLS_KEY_FILE=$(prompt "Private key file path" "/etc/flydb/certs/server.key")
+
+            echo ""
+            print_success "Custom certificate paths configured"
+        fi
+    else
+        TLS_ENABLED="false"
+        print_warning "TLS disabled - connections will be unencrypted"
+    fi
+
+    echo ""
+    print_success "TLS configuration complete"
+}
+
+wizard_step_performance() {
+    # Step number depends on role: standalone=7, cluster=8
+    local step_num="7"
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        step_num="8"
     fi
 
     wizard_step_header "$step_num" "Performance Options (01.26.13+)"
@@ -1654,6 +1717,7 @@ run_interactive_wizard() {
     # Common configuration
     wizard_step_storage
     wizard_step_security
+    wizard_step_tls
     wizard_step_performance
     wizard_step_logging
     wizard_step_service
@@ -1789,6 +1853,22 @@ print_installation_summary() {
         fi
     else
         print_kv "Encryption" "${YELLOW}Disabled${RESET}"
+    fi
+
+    if [[ "$TLS_ENABLED" == "true" ]]; then
+        if [[ "$TLS_AUTO_GEN" == "true" ]]; then
+            print_kv "TLS" "${GREEN}Enabled${RESET} (auto-generated certs)"
+        else
+            print_kv "TLS" "${GREEN}Enabled${RESET} (custom certs)"
+            if [[ -n "$TLS_CERT_FILE" ]]; then
+                print_kv "Certificate" "$TLS_CERT_FILE"
+            fi
+            if [[ -n "$TLS_KEY_FILE" ]]; then
+                print_kv "Private Key" "$TLS_KEY_FILE"
+            fi
+        fi
+    else
+        print_kv "TLS" "${YELLOW}Disabled${RESET}"
     fi
     echo ""
 
@@ -2227,6 +2307,25 @@ encryption_enabled = ${ENCRYPTION_ENABLED}
 # Note: Encryption passphrase should be set via environment variable
 # for security reasons, not in this file:
 #   export FLYDB_ENCRYPTION_PASSPHRASE=\"your-secure-passphrase\"
+
+# =============================================================================
+# TLS Configuration
+# =============================================================================
+
+# Enable TLS for client-server connections (ENABLED BY DEFAULT for security)
+# TLS encrypts client-server connections using TLS 1.2+
+tls_enabled = ${TLS_ENABLED}
+
+# TLS certificate file path (auto-determined if not set)
+${TLS_CERT_FILE:+tls_cert_file = \"${TLS_CERT_FILE}\"}
+${TLS_CERT_FILE:-# tls_cert_file = \"/etc/flydb/certs/server.crt\"  # Auto-determined if not set}
+
+# TLS private key file path (auto-determined if not set)
+${TLS_KEY_FILE:+tls_key_file = \"${TLS_KEY_FILE}\"}
+${TLS_KEY_FILE:-# tls_key_file = \"/etc/flydb/certs/server.key\"   # Auto-determined if not set}
+
+# Auto-generate self-signed certificates if not found (for development/testing)
+tls_auto_gen = ${TLS_AUTO_GEN}
 
 # =============================================================================
 # Logging Configuration

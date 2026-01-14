@@ -95,6 +95,12 @@ type Config struct {
 	ConfigFile           string // Path to the configuration file (if loaded or saved)
 	SaveConfig           bool   // Whether to save the configuration to a file
 
+	// TLS configuration
+	TLSEnabled  bool   // Enable TLS for client connections
+	TLSCertFile string // Path to TLS certificate file
+	TLSKeyFile  string // Path to TLS private key file
+	TLSAutoGen  bool   // Auto-generate self-signed certificates
+
 	// Cluster configuration
 	ClusterPeers      []string // List of peer addresses for cluster mode
 	HeartbeatInterval int      // Heartbeat interval in milliseconds
@@ -145,6 +151,12 @@ func DefaultConfig() Config {
 		ConfigFile:        "",
 		SaveConfig:        false,
 
+		// TLS defaults
+		TLSEnabled:  true,  // TLS enabled by default for security
+		TLSCertFile: "",    // Auto-determined based on user privileges
+		TLSKeyFile:  "",    // Auto-determined based on user privileges
+		TLSAutoGen:  true,  // Auto-generate self-signed certificates
+
 		// Cluster defaults
 		ClusterPeers:      []string{},
 		HeartbeatInterval: 500,  // 500ms
@@ -193,6 +205,12 @@ func FromConfig(cfg *config.Config) Config {
 		IsFirstSetup:         false,
 		ConfigFile:           cfg.ConfigFile,
 		SaveConfig:           false,
+
+		// TLS configuration
+		TLSEnabled:  cfg.TLSEnabled,
+		TLSCertFile: cfg.TLSCertFile,
+		TLSKeyFile:  cfg.TLSKeyFile,
+		TLSAutoGen:  cfg.TLSAutoGen,
 
 		// Cluster configuration
 		ClusterPeers:      cfg.ClusterPeers,
@@ -249,6 +267,12 @@ func (c *Config) ToConfig() *config.Config {
 		LogJSON:              c.LogJSON,
 		AdminPassword:        c.AdminPassword,
 		ConfigFile:           c.ConfigFile,
+
+		// TLS configuration
+		TLSEnabled:  c.TLSEnabled,
+		TLSCertFile: c.TLSCertFile,
+		TLSKeyFile:  c.TLSKeyFile,
+		TLSAutoGen:  c.TLSAutoGen,
 
 		// Cluster configuration
 		ClusterPeers:      c.ClusterPeers,
@@ -400,6 +424,20 @@ func formatEncryptionWithPassphrase(enabled bool, passphrase string) string {
 		return cli.Success("enabled") + " " + cli.Success("(passphrase set)")
 	}
 	return cli.Success("enabled") + " " + cli.Warning("(passphrase required)")
+}
+
+// formatTLS formats the TLS setting with certificate status.
+func formatTLS(enabled bool, autoGen bool, certFile string) string {
+	if !enabled {
+		return cli.Dimmed("disabled")
+	}
+	if autoGen {
+		return cli.Success("enabled") + " " + cli.Dimmed("(auto-generated certs)")
+	}
+	if certFile != "" {
+		return cli.Success("enabled") + " " + cli.Dimmed("(custom certs)")
+	}
+	return cli.Success("enabled") + " " + cli.Dimmed("(auto-generated certs)")
 }
 
 // PromptConfigChoice asks the user what they want to do with the existing configuration.
@@ -907,6 +945,62 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 		}
 	}
 
+	// Configure TLS
+	stepNum++
+	printStepHeader(stepNum, "TLS Configuration")
+	fmt.Println()
+	fmt.Printf("    %s Encrypts client-server connections using TLS 1.2+\n", cli.Dimmed("•"))
+	fmt.Printf("    %s %s\n", cli.Dimmed("•"), cli.Warning("TLS is enabled by default for security"))
+	fmt.Printf("    %s Protects data in transit between clients and server\n", cli.Dimmed("•"))
+	fmt.Println()
+	defaultTLS := "y" // TLS enabled by default
+	if !cfg.TLSEnabled {
+		defaultTLS = "n"
+	}
+	tlsChoice := promptWithDefault(reader, "  Enable TLS? (y/n)", defaultTLS)
+	cfg.TLSEnabled = strings.ToLower(tlsChoice) == "y" || strings.ToLower(tlsChoice) == "yes"
+	fmt.Println()
+
+	// If TLS is enabled, configure certificate options
+	if cfg.TLSEnabled {
+		fmt.Printf("    %s\n", cli.Highlight("Certificate Options"))
+		fmt.Println()
+		fmt.Printf("    %s  Auto-generate  %s\n", cli.Success("[1]"), cli.Dimmed("(recommended for dev/test) - Self-signed certificates"))
+		fmt.Printf("    %s  Custom files   %s\n", cli.Highlight("[2]"), cli.Dimmed("(production) - Provide your own certificate files"))
+		fmt.Println()
+
+		defaultCertChoice := "1"
+		if !cfg.TLSAutoGen {
+			defaultCertChoice = "2"
+		}
+		certChoice := promptWithDefault(reader, "  Select certificate option", defaultCertChoice)
+		cfg.TLSAutoGen = certChoice == "1"
+		fmt.Println()
+
+		if !cfg.TLSAutoGen {
+			// Prompt for custom certificate paths
+			fmt.Printf("    %s Enter paths to your TLS certificate and key files\n", cli.Dimmed("•"))
+			fmt.Println()
+
+			certPath := promptWithDefault(reader, "  Certificate file path", "/etc/flydb/certs/server.crt")
+			cfg.TLSCertFile = certPath
+			fmt.Println()
+
+			keyPath := promptWithDefault(reader, "  Private key file path", "/etc/flydb/certs/server.key")
+			cfg.TLSKeyFile = keyPath
+			fmt.Println()
+
+			fmt.Printf("    %s Custom certificate paths configured\n", cli.Success("✓"))
+			fmt.Println()
+		} else {
+			fmt.Printf("    %s Certificates will be auto-generated on first startup\n", cli.Success("✓"))
+			fmt.Println()
+			fmt.Printf("    %s %s\n", cli.Dimmed("•"), cli.Warning("Self-signed certificates are for development/testing only"))
+			fmt.Printf("    %s For production, use certificates from a trusted CA\n", cli.Dimmed("•"))
+			fmt.Println()
+		}
+	}
+
 	// Configure performance options (01.26.13+)
 	stepNum++
 	printStepHeader(stepNum, "Performance Options (01.26.13+)")
@@ -1137,6 +1231,10 @@ func printSummary(cfg *Config) {
 	// Encryption
 	encStatus := formatEncryptionWithPassphrase(cfg.EncryptionEnabled, cfg.EncryptionPassphrase)
 	fmt.Printf("    %-16s %s\n", cli.Dimmed("Encryption:"), encStatus)
+
+	// TLS
+	tlsStatus := formatTLS(cfg.TLSEnabled, cfg.TLSAutoGen, cfg.TLSCertFile)
+	fmt.Printf("    %-16s %s\n", cli.Dimmed("TLS:"), tlsStatus)
 
 	// Show generated passphrase if applicable
 	if cfg.GeneratedPassphrase != "" {
