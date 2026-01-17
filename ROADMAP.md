@@ -456,6 +456,7 @@ storage:
 
 | Version | Release Date | Highlights |
 |---------|--------------|------------|
+| 01.26.17 | January 17, 2026 | Compression algorithms (LZ4, Snappy, Zstd), Audit Trail, Locality-aware routing, Partition migration |
 | 01.26.16 | January 17, 2026 | Cluster encryption validation, first-run UX improvements, admin password immutability |
 | 01.26.15 | January 14, 2026 | TLS transport security enabled by default with auto-generated certificates |
 | 01.26.14 | January 13, 2026 | Cluster mode fixes, HA client connections, remote flydb-dump support |

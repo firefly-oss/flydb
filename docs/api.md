@@ -1824,7 +1824,7 @@ With options:
 curl -sSL https://get.flydb.dev | bash -s -- --prefix ~/.local --yes
 
 # Install specific version
-curl -sSL https://get.flydb.dev | bash -s -- --version 01.26.0 --yes
+curl -sSL https://get.flydb.dev | bash -s -- --version 01.26.17 --yes
 
 # Install without system service
 curl -sSL https://get.flydb.dev | bash -s -- --no-service --yes

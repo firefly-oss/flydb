@@ -121,17 +121,17 @@ type Config struct {
 	SyncTimeout       int    // Timeout for sync replication in ms
 	MaxReplicationLag int    // Max acceptable replication lag in ms
 
-	// Raft consensus configuration (01.26.13+)
+	// Raft consensus configuration (01.26.17+)
 	EnableRaft            bool // Enable Raft consensus (replaces Bully)
 	RaftElectionTimeout   int  // Raft election timeout in ms
 	RaftHeartbeatInterval int  // Raft heartbeat interval in ms
 
-	// Compression configuration (01.26.13+)
+	// Compression configuration (01.26.17+)
 	EnableCompression    bool   // Enable compression for WAL and replication
 	CompressionAlgorithm string // gzip, lz4, snappy, or zstd
 	CompressionMinSize   int    // Minimum size to compress (bytes)
 
-	// Performance configuration (01.26.13+)
+	// Performance configuration (01.26.17+)
 	EnableZeroCopy      bool // Enable zero-copy buffer pooling
 	BufferPoolSizeBytes int  // Buffer pool size in bytes (0 = auto)
 
@@ -192,17 +192,17 @@ func DefaultConfig() Config {
 		SyncTimeout:       5000,  // 5s
 		MaxReplicationLag: 10000, // 10s
 
-		// Raft consensus defaults (01.26.13+)
+		// Raft consensus defaults (01.26.17+)
 		EnableRaft:            true, // Enable Raft by default
 		RaftElectionTimeout:   1000, // 1s
 		RaftHeartbeatInterval: 150,  // 150ms
 
-		// Compression defaults (01.26.13+)
+		// Compression defaults (01.26.17+)
 		EnableCompression:    false,  // Disabled by default
 		CompressionAlgorithm: "gzip", // Default to gzip
 		CompressionMinSize:   256,    // 256 bytes minimum
 
-		// Performance defaults (01.26.13+)
+		// Performance defaults (01.26.17+)
 		EnableZeroCopy:      true, // Enabled by default
 		BufferPoolSizeBytes: 0,    // Auto-size
 
@@ -262,17 +262,17 @@ func FromConfig(cfg *config.Config) Config {
 		SyncTimeout:       cfg.SyncTimeout,
 		MaxReplicationLag: cfg.MaxReplicationLag,
 
-		// Raft consensus configuration (01.26.13+)
+		// Raft consensus configuration (01.26.17+)
 		EnableRaft:            cfg.EnableRaft,
 		RaftElectionTimeout:   cfg.RaftElectionTimeout,
 		RaftHeartbeatInterval: cfg.RaftHeartbeatInterval,
 
-		// Compression configuration (01.26.13+)
+		// Compression configuration (01.26.17+)
 		EnableCompression:    cfg.EnableCompression,
 		CompressionAlgorithm: cfg.CompressionAlgorithm,
 		CompressionMinSize:   cfg.CompressionMinSize,
 
-		// Performance configuration (01.26.13+)
+		// Performance configuration (01.26.17+)
 		EnableZeroCopy:      cfg.EnableZeroCopy,
 		BufferPoolSizeBytes: cfg.BufferPoolSizeBytes,
 
@@ -339,17 +339,17 @@ func (c *Config) ToConfig() *config.Config {
 		SyncTimeout:       c.SyncTimeout,
 		MaxReplicationLag: c.MaxReplicationLag,
 
-		// Raft consensus configuration (01.26.13+)
+		// Raft consensus configuration (01.26.17+)
 		EnableRaft:            c.EnableRaft,
 		RaftElectionTimeout:   c.RaftElectionTimeout,
 		RaftHeartbeatInterval: c.RaftHeartbeatInterval,
 
-		// Compression configuration (01.26.13+)
+		// Compression configuration (01.26.17+)
 		EnableCompression:    c.EnableCompression,
 		CompressionAlgorithm: c.CompressionAlgorithm,
 		CompressionMinSize:   c.CompressionMinSize,
 
-		// Performance configuration (01.26.13+)
+		// Performance configuration (01.26.17+)
 		EnableZeroCopy:      c.EnableZeroCopy,
 		BufferPoolSizeBytes: c.BufferPoolSizeBytes,
 
@@ -1075,11 +1075,11 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 		}
 	}
 
-	// Configure performance options (01.26.13+)
+	// Configure performance options (01.26.17+)
 	stepNum++
-	printStepHeader(stepNum, "Performance Options (01.26.13+)")
+	printStepHeader(stepNum, "Performance Options (01.26.17+)")
 	fmt.Println()
-	fmt.Printf("    %s These features are new in FlyDB 01.26.13\n", cli.Dimmed("•"))
+	fmt.Printf("    %s These features are new in FlyDB 01.26.17\n", cli.Dimmed("•"))
 	fmt.Println()
 
 	// Raft consensus (for cluster mode)
@@ -1375,9 +1375,9 @@ func printSummary(cfg *Config) {
 		fmt.Println("  " + cli.Warning("═══════════════════════════════════════════════════════"))
 	}
 
-	// Performance options (01.26.13+)
+	// Performance options (01.26.17+)
 	fmt.Println()
-	fmt.Println("  " + cli.Highlight("Performance (01.26.13+)"))
+	fmt.Println("  " + cli.Highlight("Performance (01.26.17+)"))
 	fmt.Println("  " + cli.Separator(56))
 	fmt.Println()
 

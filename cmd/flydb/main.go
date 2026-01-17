@@ -121,7 +121,7 @@ func printUsage() {
 	fmt.Println("  -help                    Show this help message")
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("PERFORMANCE OPTIONS (01.26.13+):"))
+	fmt.Println(cli.Highlight("PERFORMANCE OPTIONS (01.26.17+):"))
 	fmt.Println("  -enable-raft             Enable Raft consensus for leader election (default: true)")
 	fmt.Println("  -raft-election-timeout   Raft election timeout in ms (default: 1000)")
 	fmt.Println("  -raft-heartbeat-interval Raft heartbeat interval in ms (default: 150)")
@@ -211,12 +211,12 @@ func main() {
 	showVersion := flag.Bool("version", false, "Show version information")
 	showHelp := flag.Bool("help", false, "Show help message")
 
-	// Raft consensus flags (01.26.13+)
+	// Raft consensus flags (01.26.17+)
 	enableRaft := flag.Bool("enable-raft", cfg.EnableRaft, "Enable Raft consensus for leader election (replaces Bully)")
 	raftElectionTimeout := flag.Int("raft-election-timeout", cfg.RaftElectionTimeout, "Raft election timeout in milliseconds")
 	raftHeartbeatInterval := flag.Int("raft-heartbeat-interval", cfg.RaftHeartbeatInterval, "Raft heartbeat interval in milliseconds")
 
-	// Compression flags (01.26.13+)
+	// Compression flags (01.26.17+)
 	enableCompression := flag.Bool("enable-compression", cfg.EnableCompression, "Enable compression for WAL and replication")
 	compressionAlgorithm := flag.String("compression-algorithm", cfg.CompressionAlgorithm, "Compression algorithm: gzip, lz4, snappy, or zstd")
 	compressionMinSize := flag.Int("compression-min-size", cfg.CompressionMinSize, "Minimum payload size in bytes to compress")
@@ -230,7 +230,7 @@ func main() {
 	auditEnabled := flag.Bool("audit-enabled", cfg.AuditEnabled, "Enable audit logging")
 	auditRetentionDays := flag.Int("audit-retention-days", cfg.AuditRetentionDays, "Days to retain audit logs (0 = forever)")
 
-	// Performance flags (01.26.13+)
+	// Performance flags (01.26.17+)
 	enableZeroCopy := flag.Bool("enable-zero-copy", cfg.EnableZeroCopy, "Enable zero-copy buffer pooling")
 	bufferPoolSizeBytes := flag.Int("buffer-pool-size-bytes", cfg.BufferPoolSizeBytes, "Buffer pool size in bytes (0 = auto)")
 
@@ -316,14 +316,14 @@ func main() {
 				cfg.LogLevel = *logLevel
 			case "log-json":
 				cfg.LogJSON = *logJSON
-			// Raft consensus flags (01.26.13+)
+			// Raft consensus flags (01.26.17+)
 			case "enable-raft":
 				cfg.EnableRaft = *enableRaft
 			case "raft-election-timeout":
 				cfg.RaftElectionTimeout = *raftElectionTimeout
 			case "raft-heartbeat-interval":
 				cfg.RaftHeartbeatInterval = *raftHeartbeatInterval
-			// Compression flags (01.26.13+)
+			// Compression flags (01.26.17+)
 			case "enable-compression":
 				cfg.EnableCompression = *enableCompression
 			case "compression-algorithm":
@@ -342,7 +342,7 @@ func main() {
 				cfg.AuditEnabled = *auditEnabled
 			case "audit-retention-days":
 				cfg.AuditRetentionDays = *auditRetentionDays
-			// Performance flags (01.26.13+)
+			// Performance flags (01.26.17+)
 			case "enable-zero-copy":
 				cfg.EnableZeroCopy = *enableZeroCopy
 			case "buffer-pool-size-bytes":

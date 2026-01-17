@@ -105,7 +105,7 @@ TLS_AUTO_GEN="true"
 LOG_LEVEL="info"
 LOG_JSON="false"
 
-# Raft consensus configuration (01.26.13+)
+# Raft consensus configuration (01.26.17+)
 ENABLE_RAFT="true"
 RAFT_ELECTION_TIMEOUT="1000"
 RAFT_HEARTBEAT_INTERVAL="150"
@@ -115,7 +115,7 @@ DATACENTER=""
 RACK=""
 ZONE=""
 
-# Compression configuration (01.26.13+)
+# Compression configuration (01.26.17+)
 ENABLE_COMPRESSION="false"
 COMPRESSION_ALGORITHM="lz4"
 COMPRESSION_MIN_SIZE="256"
@@ -124,7 +124,7 @@ COMPRESSION_MIN_SIZE="256"
 AUDIT_ENABLED="true"
 AUDIT_RETENTION_DAYS="90"
 
-# Performance configuration (01.26.13+)
+# Performance configuration (01.26.17+)
 ENABLE_ZERO_COPY="true"
 BUFFER_POOL_SIZE_BYTES="0"
 
@@ -413,18 +413,18 @@ print_help() {
     echo -e "    ${BOLD}--buffer-pool-size <pages>${RESET} Buffer pool size in pages (0=auto)"
     echo -e "    ${BOLD}--checkpoint-secs <secs>${RESET}  Checkpoint interval in seconds (default: 60)"
     echo ""
-    echo -e "${BOLD}CONSENSUS OPTIONS (01.26.13+):${RESET}"
+    echo -e "${BOLD}CONSENSUS OPTIONS (01.26.17+):${RESET}"
     echo -e "    ${BOLD}--enable-raft${RESET}             Use Raft consensus for leader election (default: enabled)"
     echo -e "    ${BOLD}--disable-raft${RESET}            Use legacy Bully algorithm for leader election"
     echo -e "    ${BOLD}--raft-election-timeout <ms>${RESET} Raft election timeout (default: 1000)"
     echo -e "    ${BOLD}--raft-heartbeat-interval <ms>${RESET} Raft heartbeat interval (default: 150)"
     echo ""
-    echo -e "${BOLD}COMPRESSION OPTIONS (01.26.13+):${RESET}"
+    echo -e "${BOLD}COMPRESSION OPTIONS (01.26.17+):${RESET}"
     echo -e "    ${BOLD}--enable-compression${RESET}      Enable compression for WAL and replication"
     echo -e "    ${BOLD}--compression-algorithm <alg>${RESET} Algorithm: gzip, lz4, snappy, zstd (default: gzip)"
     echo -e "    ${BOLD}--compression-min-size <bytes>${RESET} Minimum size to compress (default: 256)"
     echo ""
-    echo -e "${BOLD}PERFORMANCE OPTIONS (01.26.13+):${RESET}"
+    echo -e "${BOLD}PERFORMANCE OPTIONS (01.26.17+):${RESET}"
     echo -e "    ${BOLD}--enable-zero-copy${RESET}        Enable zero-copy buffer pooling (default: enabled)"
     echo -e "    ${BOLD}--disable-zero-copy${RESET}       Disable zero-copy buffer pooling"
     echo -e "    ${BOLD}--buffer-pool-bytes <bytes>${RESET} Buffer pool size in bytes (0=auto)"
@@ -1869,11 +1869,11 @@ wizard_step_performance() {
         step_num="9"
     fi
 
-    wizard_step_header "$step_num" "Performance Options (01.26.13+)"
+    wizard_step_header "$step_num" "Performance Options (01.26.17+)"
 
     echo "  Configure performance optimizations:"
     echo ""
-    echo -e "  ${DIM}These features are new in FlyDB 01.26.13 and can improve${RESET}"
+    echo -e "  ${DIM}These features are new in FlyDB 01.26.17 and can improve${RESET}"
     echo -e "  ${DIM}throughput and reduce memory usage.${RESET}"
     echo ""
 
@@ -2848,8 +2848,8 @@ print_installation_summary() {
     fi
     echo ""
 
-    # Performance Configuration (01.26.13+)
-    echo -e "  ${BOLD}Performance Options (01.26.13+)${RESET}"
+    # Performance Configuration (01.26.17+)
+    echo -e "  ${BOLD}Performance Options (01.26.17+)${RESET}"
     separator 60
     if [[ "$SERVER_ROLE" == "cluster" ]]; then
         if [[ "$ENABLE_RAFT" == "true" ]]; then
@@ -4301,7 +4301,7 @@ parse_args() {
                 fi
                 shift
                 ;;
-            # Raft consensus options (01.26.13+)
+            # Raft consensus options (01.26.17+)
             --enable-raft)
                 ENABLE_RAFT="true"
                 shift
@@ -4348,7 +4348,7 @@ parse_args() {
                 fi
                 shift
                 ;;
-            # Compression options (01.26.13+)
+            # Compression options (01.26.17+)
             --enable-compression)
                 ENABLE_COMPRESSION="true"
                 shift
@@ -4406,7 +4406,7 @@ parse_args() {
                 fi
                 shift
                 ;;
-            # Performance options (01.26.13+)
+            # Performance options (01.26.17+)
             --enable-zero-copy)
                 ENABLE_ZERO_COPY="true"
                 shift

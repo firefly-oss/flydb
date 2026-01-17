@@ -1237,7 +1237,7 @@ spec:
 {
   "status": "healthy",
   "timestamp": "2026-01-17T10:52:16Z",
-  "version": "01.26.14",
+  "version": "01.26.17",
   "checks": [
     {
       "name": "storage",
