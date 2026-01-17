@@ -212,6 +212,8 @@ func (p *Parser) Parse() (Statement, error) {
 			return p.parseDeallocate()
 		case "INSPECT":
 			return p.parseInspect()
+		case "EXPORT":
+			return p.parseExport()
 		case "ALTER":
 			return p.parseAlter()
 		case "TRUNCATE":
@@ -2341,6 +2343,51 @@ func (p *Parser) parseInspect() (*InspectStmt, error) {
 	case "USERS", "TABLES", "INDEXES", "SERVER", "STATUS", "DATABASES", "ROLES", "PRIVILEGES":
 		// These targets don't take an object name
 		return &InspectStmt{Target: target}, nil
+	case "AUDIT":
+		// INSPECT AUDIT [WHERE ...] [LIMIT n] or INSPECT AUDIT STATS
+		// Check if next token is STATS
+		if p.peek.Type == TokenIdent || p.peek.Type == TokenKeyword {
+			if strings.ToUpper(p.peek.Value) == "STATS" {
+				p.nextToken() // consume STATS
+				return &InspectStmt{Target: "AUDIT_STATS"}, nil
+			}
+		}
+
+		// Parse optional WHERE clause
+		var where *Condition
+		if p.peek.Type == TokenKeyword && strings.ToUpper(p.peek.Value) == "WHERE" {
+			p.nextToken() // consume WHERE
+			p.nextToken() // move to column name
+			if p.cur.Type != TokenIdent {
+				return nil, errors.New("expected column name after WHERE")
+			}
+			col := p.cur.Value
+			if !p.expectPeek(TokenEqual) {
+				return nil, errors.New("expected = after column name")
+			}
+			p.nextToken() // move to value
+			val := p.cur.Value
+			// Remove quotes if present
+			val = strings.Trim(val, "'\"")
+			where = &Condition{Column: col, Value: val}
+		}
+
+		// Parse optional LIMIT
+		limit := 0
+		if p.peek.Type == TokenKeyword && strings.ToUpper(p.peek.Value) == "LIMIT" {
+			p.nextToken() // consume LIMIT
+			p.nextToken() // move to number
+			if p.cur.Type != TokenNumber {
+				return nil, errors.New("expected number after LIMIT")
+			}
+			var err error
+			limit, err = strconv.Atoi(p.cur.Value)
+			if err != nil {
+				return nil, fmt.Errorf("invalid LIMIT value: %s", p.cur.Value)
+			}
+		}
+
+		return &InspectStmt{Target: "AUDIT", Where: where, Limit: limit}, nil
 	case "TABLE":
 		// This target requires an object name
 		p.nextToken()
@@ -3530,5 +3577,96 @@ func (p *Parser) parseUse() (*UseDatabaseStmt, error) {
 
 	return &UseDatabaseStmt{
 		DatabaseName: databaseName,
+	}, nil
+}
+
+// parseExport parses an EXPORT statement.
+// Currently only supports EXPORT AUDIT.
+// Syntax: EXPORT AUDIT TO '<filename>' FORMAT <format> [WHERE ...] [LIMIT n]
+//
+// Examples:
+//
+//	EXPORT AUDIT TO 'audit.json' FORMAT json
+//	EXPORT AUDIT TO 'audit.csv' FORMAT csv WHERE username = 'admin'
+//	EXPORT AUDIT TO 'audit.sql' FORMAT sql LIMIT 1000
+//
+// Returns an ExportAuditStmt AST node.
+func (p *Parser) parseExport() (Statement, error) {
+	// Skip EXPORT keyword
+	p.nextToken()
+
+	// Check if this is EXPORT AUDIT
+	if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
+		return nil, errors.New("expected AUDIT after EXPORT")
+	}
+	if strings.ToUpper(p.cur.Value) != "AUDIT" {
+		return nil, fmt.Errorf("unknown EXPORT target: %s (only AUDIT is supported)", p.cur.Value)
+	}
+
+	// Expect TO keyword
+	if !p.expectPeek(TokenKeyword) || strings.ToUpper(p.cur.Value) != "TO" {
+		return nil, errors.New("expected TO after EXPORT AUDIT")
+	}
+
+	// Parse filename (should be a string)
+	p.nextToken()
+	filename := p.cur.Value
+	// Remove quotes if present
+	filename = strings.Trim(filename, "'\"")
+
+	// Expect FORMAT keyword
+	if !p.expectPeek(TokenKeyword) || strings.ToUpper(p.cur.Value) != "FORMAT" {
+		return nil, errors.New("expected FORMAT after filename")
+	}
+
+	// Parse format (json, csv, or sql)
+	p.nextToken()
+	if p.cur.Type != TokenIdent {
+		return nil, errors.New("expected format (json, csv, or sql) after FORMAT")
+	}
+	format := strings.ToLower(p.cur.Value)
+	if format != "json" && format != "csv" && format != "sql" {
+		return nil, fmt.Errorf("invalid format: %s (expected json, csv, or sql)", format)
+	}
+
+	// Parse optional WHERE clause
+	var where *Condition
+	if p.peek.Type == TokenKeyword && strings.ToUpper(p.peek.Value) == "WHERE" {
+		p.nextToken() // consume WHERE
+		p.nextToken() // move to column name
+		if p.cur.Type != TokenIdent {
+			return nil, errors.New("expected column name after WHERE")
+		}
+		col := p.cur.Value
+		if !p.expectPeek(TokenEqual) {
+			return nil, errors.New("expected = after column name")
+		}
+		p.nextToken() // move to value
+		val := p.cur.Value
+		// Remove quotes if present
+		val = strings.Trim(val, "'\"")
+		where = &Condition{Column: col, Value: val}
+	}
+
+	// Parse optional LIMIT
+	limit := 0
+	if p.peek.Type == TokenKeyword && strings.ToUpper(p.peek.Value) == "LIMIT" {
+		p.nextToken() // consume LIMIT
+		p.nextToken() // move to number
+		if p.cur.Type != TokenNumber {
+			return nil, errors.New("expected number after LIMIT")
+		}
+		var err error
+		limit, err = strconv.Atoi(p.cur.Value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LIMIT value: %s", p.cur.Value)
+		}
+	}
+
+	return &ExportAuditStmt{
+		Filename: filename,
+		Format:   format,
+		Where:    where,
+		Limit:    limit,
 	}, nil
 }

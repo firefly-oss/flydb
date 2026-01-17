@@ -129,6 +129,28 @@ import (
 	"time"
 )
 
+// AuditManager defines the interface for audit logging.
+// This allows the executor to log audit events without depending on the audit package.
+type AuditManager interface {
+	LogEvent(event AuditEvent)
+}
+
+// AuditEvent represents an audit log entry.
+type AuditEvent struct {
+	EventType    string
+	Username     string
+	Database     string
+	ObjectType   string
+	ObjectName   string
+	Operation    string
+	ClientAddr   string
+	SessionID    string
+	Status       string
+	ErrorMessage string
+	DurationMs   int64
+	Metadata     map[string]string
+}
+
 // Executor executes SQL statements against the storage engine.
 // It coordinates between the Catalog (schema), AuthManager (permissions),
 // and Storage Engine (data) to process SQL operations.
@@ -178,6 +200,18 @@ type Executor struct {
 
 	// preparedStmts manages prepared statements for this executor.
 	preparedStmts *PreparedStatementManager
+
+	// auditMgr manages audit logging (optional).
+	auditMgr AuditManager
+
+	// sessionID is the current session identifier for audit logging.
+	sessionID string
+
+	// clientAddr is the client IP address for audit logging.
+	clientAddr string
+
+	// currentDatabase is the current database context for audit logging.
+	currentDatabase string
 
 	// triggerMgr manages database triggers.
 	triggerMgr *TriggerManager
@@ -270,6 +304,39 @@ func (e *Executor) InvalidateCache(tableName string) {
 	if e.queryCache != nil {
 		e.queryCache.Invalidate(tableName)
 	}
+}
+
+// SetAuditManager sets the audit manager for logging.
+func (e *Executor) SetAuditManager(auditMgr AuditManager) {
+	e.auditMgr = auditMgr
+}
+
+// SetSessionContext sets the session context for audit logging.
+func (e *Executor) SetSessionContext(sessionID, clientAddr, database string) {
+	e.sessionID = sessionID
+	e.clientAddr = clientAddr
+	e.currentDatabase = database
+}
+
+// logAuditEvent logs an audit event if audit manager is configured.
+func (e *Executor) logAuditEvent(eventType, objectType, objectName, operation, status, errorMsg string, durationMs int64) {
+	if e.auditMgr == nil {
+		return
+	}
+
+	e.auditMgr.LogEvent(AuditEvent{
+		EventType:    eventType,
+		Username:     e.currentUser,
+		Database:     e.currentDatabase,
+		ObjectType:   objectType,
+		ObjectName:   objectName,
+		Operation:    operation,
+		ClientAddr:   e.clientAddr,
+		SessionID:    e.sessionID,
+		Status:       status,
+		ErrorMessage: errorMsg,
+		DurationMs:   durationMs,
+	})
 }
 
 // InvalidateAllCache clears the entire query cache.
@@ -581,6 +648,14 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 		// This case returns an error because USE should be intercepted by the server
 		// before reaching the executor.
 		return "", errors.New("USE statement must be handled by the server")
+
+	case *ExportAuditStmt:
+		// EXPORT AUDIT requires admin privileges.
+		// Only admins can export audit logs for security and compliance.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied: EXPORT AUDIT requires admin privileges")
+		}
+		return e.executeExportAudit(s)
 	}
 
 	return "", errors.New("unknown statement")
@@ -786,12 +861,17 @@ func (e *Executor) executeAlterUser(stmt *AlterUserStmt) (string, error) {
 //
 // Returns "CREATE TABLE OK" on success, or an error.
 func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
+	start := time.Now()
+	operation := fmt.Sprintf("CREATE TABLE %s", stmt.TableName)
+
 	// Check if table already exists
 	if _, exists := e.catalog.GetTable(stmt.TableName); exists {
 		if stmt.IfNotExists {
 			// IF NOT EXISTS specified, silently succeed
+			e.logAuditEvent("CREATE_TABLE", "table", stmt.TableName, operation, "SUCCESS", "", time.Since(start).Milliseconds())
 			return "CREATE TABLE OK", nil
 		}
+		e.logAuditEvent("CREATE_TABLE", "table", stmt.TableName, operation, "FAILED", "table exists", time.Since(start).Milliseconds())
 		return "", fmt.Errorf("table exists")
 	}
 
@@ -851,6 +931,7 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 
 	err := e.catalog.CreateTableWithConstraints(stmt.TableName, stmt.Columns, stmt.Constraints)
 	if err != nil {
+		e.logAuditEvent("CREATE_TABLE", "table", stmt.TableName, operation, "FAILED", err.Error(), time.Since(start).Milliseconds())
 		return "", err
 	}
 
@@ -867,6 +948,7 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 		e.OnSchemaChange("CREATE_TABLE", stmt.TableName, string(details))
 	}
 
+	e.logAuditEvent("CREATE_TABLE", "table", stmt.TableName, operation, "SUCCESS", "", time.Since(start).Milliseconds())
 	return "CREATE TABLE OK", nil
 }
 
@@ -4369,6 +4451,10 @@ func (e *Executor) executeInspect(stmt *InspectStmt) (string, error) {
 		return e.inspectUserPrivileges(stmt.ObjectName)
 	case "PRIVILEGES":
 		return e.inspectPrivileges()
+	case "AUDIT":
+		return e.inspectAudit(stmt)
+	case "AUDIT_STATS":
+		return e.inspectAuditStats()
 	default:
 		return "", fmt.Errorf("unknown inspect target: %s", stmt.Target)
 	}
@@ -5994,4 +6080,157 @@ func isTextType(colType string) bool {
 		strings.HasPrefix(upper, "VARCHAR") ||
 		strings.HasPrefix(upper, "CHAR") ||
 		upper == "STRING"
+}
+
+// inspectAudit returns audit log entries based on the query options.
+// This command requires admin privileges and is checked at the Execute level.
+func (e *Executor) inspectAudit(stmt *InspectStmt) (string, error) {
+	if e.auditMgr == nil {
+		return "", errors.New("audit trail is not enabled")
+	}
+
+	// Build query options from the statement
+	opts := QueryOptions{
+		Limit: stmt.Limit,
+	}
+
+	// Apply WHERE filter if present
+	if stmt.Where != nil {
+		switch stmt.Where.Column {
+		case "username":
+			opts.Username = stmt.Where.Value
+		case "event_type":
+			opts.EventType = stmt.Where.Value
+		case "database":
+			opts.Database = stmt.Where.Value
+		case "status":
+			opts.Status = stmt.Where.Value
+		default:
+			return "", fmt.Errorf("unsupported WHERE column for INSPECT AUDIT: %s (supported: username, event_type, database, status)", stmt.Where.Column)
+		}
+	}
+
+	// Query audit logs
+	events, err := e.auditMgr.QueryLogs(opts)
+	if err != nil {
+		return "", fmt.Errorf("failed to query audit logs: %w", err)
+	}
+
+	// Format results as CSV
+	header := "id, timestamp, event_type, username, database, object_type, object_name, operation, client_addr, session_id, status, error_message, duration_ms"
+	if len(events) == 0 {
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
+	}
+
+	var results []string
+	for _, event := range events {
+		operation := event.Operation
+		if len(operation) > 50 {
+			operation = operation[:47] + "..."
+		}
+		errorMsg := event.ErrorMessage
+		if len(errorMsg) > 30 {
+			errorMsg = errorMsg[:27] + "..."
+		}
+
+		results = append(results, fmt.Sprintf("%d, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %d",
+			event.ID,
+			event.Timestamp.Format("2006-01-02 15:04:05"),
+			event.EventType,
+			event.Username,
+			event.Database,
+			event.ObjectType,
+			event.ObjectName,
+			operation,
+			event.ClientAddr,
+			event.SessionID,
+			event.Status,
+			errorMsg,
+			event.DurationMs,
+		))
+	}
+
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
+}
+
+// inspectAuditStats returns statistics about audit log entries.
+// This command requires admin privileges and is checked at the Execute level.
+func (e *Executor) inspectAuditStats() (string, error) {
+	if e.auditMgr == nil {
+		return "", errors.New("audit trail is not enabled")
+	}
+
+	helper := NewSQLHelper(e.auditMgr)
+	stats, err := helper.GetAuditStats()
+	if err != nil {
+		return "", fmt.Errorf("failed to get audit statistics: %w", err)
+	}
+
+	// Format statistics as key-value pairs
+	var results []string
+	results = append(results, fmt.Sprintf("Total Events: %d", stats.TotalEvents))
+	results = append(results, fmt.Sprintf("Failed Events: %d", stats.FailedEvents))
+	results = append(results, fmt.Sprintf("Success Rate: %.2f%%", stats.SuccessRate))
+	results = append(results, "")
+	results = append(results, "Events by Type:")
+	for eventType, count := range stats.EventsByType {
+		results = append(results, fmt.Sprintf("  %s: %d", eventType, count))
+	}
+	results = append(results, "")
+	results = append(results, "Events by User:")
+	for username, count := range stats.EventsByUser {
+		results = append(results, fmt.Sprintf("  %s: %d", username, count))
+	}
+
+	return strings.Join(results, "\n"), nil
+}
+
+// executeExportAudit exports audit logs to a file in the specified format.
+// This command requires admin privileges and is checked at the Execute level.
+func (e *Executor) executeExportAudit(stmt *ExportAuditStmt) (string, error) {
+	if e.auditMgr == nil {
+		return "", errors.New("audit trail is not enabled")
+	}
+
+	// Build query options from the statement
+	opts := QueryOptions{
+		Limit: stmt.Limit,
+	}
+
+	// Apply WHERE filter if present
+	if stmt.Where != nil {
+		switch stmt.Where.Column {
+		case "username":
+			opts.Username = stmt.Where.Value
+		case "event_type":
+			opts.EventType = stmt.Where.Value
+		case "database":
+			opts.Database = stmt.Where.Value
+		case "status":
+			opts.Status = stmt.Where.Value
+		default:
+			return "", fmt.Errorf("unsupported WHERE column for EXPORT AUDIT: %s (supported: username, event_type, database, status)", stmt.Where.Column)
+		}
+	}
+
+	// Determine export format
+	var format ExportFormat
+	switch stmt.Format {
+	case "json":
+		format = ExportFormatJSON
+	case "csv":
+		format = ExportFormatCSV
+	case "sql":
+		format = ExportFormatSQL
+	default:
+		return "", fmt.Errorf("unsupported export format: %s (supported: json, csv, sql)", stmt.Format)
+	}
+
+	// Export audit logs
+	err := e.auditMgr.ExportLogs(stmt.Filename, format, opts)
+	if err != nil {
+		return "", fmt.Errorf("failed to export audit logs: %w", err)
+	}
+
+	return fmt.Sprintf("EXPORT AUDIT OK: %s", stmt.Filename), nil
 }

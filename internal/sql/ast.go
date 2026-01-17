@@ -1016,13 +1016,39 @@ func (s DeallocateStmt) statementNode() {}
 //	INSPECT TABLES
 //	INSPECT TABLE employees
 //	INSPECT DATABASE flydb
+//	INSPECT AUDIT [WHERE ...] [LIMIT n]
+//	INSPECT AUDIT STATS
 type InspectStmt struct {
-	Target     string // The target to inspect: USERS, DATABASES, DATABASE, TABLES, TABLE, INDEXES
-	ObjectName string // Optional: specific object name for TABLE or DATABASE targets
+	Target     string      // The target to inspect: USERS, DATABASES, DATABASE, TABLES, TABLE, INDEXES, AUDIT, AUDIT_STATS
+	ObjectName string      // Optional: specific object name for TABLE or DATABASE targets
+	Where      *Condition  // Optional: WHERE clause for AUDIT queries
+	Limit      int         // Optional: LIMIT for AUDIT queries
 }
 
 // statementNode implements the Statement interface.
 func (s InspectStmt) statementNode() {}
+
+// ExportAuditStmt represents an EXPORT AUDIT statement.
+// This statement exports audit logs to a file in various formats.
+//
+// SQL Syntax:
+//
+//	EXPORT AUDIT TO '<filename>' FORMAT <format> [WHERE ...] [LIMIT n]
+//
+// Examples:
+//
+//	EXPORT AUDIT TO 'audit.json' FORMAT json
+//	EXPORT AUDIT TO 'audit.csv' FORMAT csv WHERE username = 'admin'
+//	EXPORT AUDIT TO 'audit.sql' FORMAT sql LIMIT 1000
+type ExportAuditStmt struct {
+	Filename string      // The output filename
+	Format   string      // Export format: json, csv, or sql
+	Where    *Condition  // Optional: WHERE clause for filtering
+	Limit    int         // Optional: LIMIT for number of records
+}
+
+// statementNode implements the Statement interface.
+func (s ExportAuditStmt) statementNode() {}
 
 // AggregateExpr represents an aggregate function call in a SELECT statement.
 // Aggregate functions compute a single result from a set of input values.
