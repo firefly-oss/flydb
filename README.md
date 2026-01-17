@@ -569,7 +569,15 @@ flydb -role cluster -port 8889 -repl-port 9999 -data-dir /var/lib/flydb
 | `FLYDB_DATA_DIR` | Data directory for database storage |
 | `FLYDB_PORT` | Server port (binary protocol) |
 | `FLYDB_ENCRYPTION_PASSPHRASE` | Encryption passphrase (required if encryption enabled) |
-| `FLYDB_ADMIN_PASSWORD` | Admin password for first-time setup |
+| `FLYDB_ADMIN_PASSWORD` | Admin password for **first-time setup only** (immutable after creation) |
+
+**⚠️ IMPORTANT: Admin Password Security**
+
+The admin password is **immutable after first creation** for security reasons:
+- `FLYDB_ADMIN_PASSWORD` is only used during first-time setup when no admin user exists
+- Once the admin user is created, the environment variable is ignored
+- To change the admin password, use SQL: `ALTER USER admin IDENTIFIED BY 'newpass'`
+- If you lose the admin password, you must manually reset it (see Recovery section below)
 
 ### 2. Connect with the CLI
 
@@ -987,6 +995,38 @@ Grant access to specific rows using predicate filters:
 -- User can only see their own orders
 GRANT SELECT ON orders WHERE user_id = 'alice' TO alice;
 ```
+
+### Admin Password Recovery
+
+If you lose the admin password, you can reset it by directly modifying the database:
+
+**Option 1: Using SQL (if you have another admin user):**
+```sql
+ALTER USER admin IDENTIFIED BY 'new-secure-password';
+```
+
+**Option 2: Manual Reset (requires direct database access):**
+
+1. Stop the FlyDB server
+2. Use a database tool to access the system database
+3. Delete the admin user record: `_sys_users:admin`
+4. Restart FlyDB - it will detect no admin exists and create a new one
+5. Save the new auto-generated password
+
+**Option 3: Disable Authentication Temporarily (emergency only):**
+
+This is not recommended for production, but can be used in emergencies:
+
+1. Stop the FlyDB server
+2. Start with a fresh data directory temporarily
+3. Create a new admin user with known password
+4. Copy the user record to your original database
+5. Restart with original data directory
+
+**Prevention:**
+- Always save the admin password in a secure password manager
+- Consider creating a backup admin user with a different password
+- Document your password recovery process
 
 ### TLS Troubleshooting
 

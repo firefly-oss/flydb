@@ -481,6 +481,15 @@ func (m *AuthManager) AdminExists() bool {
 // InitializeAdmin creates the admin user with the given password.
 // This should only be called during first-time setup when no admin exists.
 //
+// IMPORTANT: Admin password is immutable after first creation for security.
+// Once the admin user exists, this function will return an error.
+// To change the admin password, use ChangePassword() or the SQL command:
+//   ALTER USER admin IDENTIFIED BY 'newpass'
+//
+// The FLYDB_ADMIN_PASSWORD environment variable is only used during first-time
+// setup. If the admin user already exists, the environment variable is ignored
+// and a warning is logged.
+//
 // Returns an error if the admin user already exists or if password hashing fails.
 //
 // Example:

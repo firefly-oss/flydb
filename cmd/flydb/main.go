@@ -509,7 +509,12 @@ func main() {
 		// Continue anyway - this is not critical
 	}
 
+	// Track if we generated admin password for first-run display
+	var generatedAdminPassword string
+	var isFirstTimeAdmin bool
+
 	if !authMgr.AdminExists() {
+		isFirstTimeAdmin = true
 		log.Info("First-time setup detected: admin user does not exist")
 
 		// Check for admin password from configuration (loaded from env var)
@@ -533,51 +538,36 @@ func main() {
 			fmt.Println()
 
 			// Generate a random password
-			generatedPassword, err := authMgr.InitializeAdminWithGeneratedPassword()
+			var err error
+			generatedAdminPassword, err = authMgr.InitializeAdminWithGeneratedPassword()
 			if err != nil {
 				log.Error("Failed to initialize admin user", "error", err)
 				os.Exit(1)
 			}
 
-			fmt.Println()
-			cli.PrintSuccess("Admin user created successfully!")
-			fmt.Println()
-			fmt.Println("  " + cli.Highlight("Admin Credentials"))
-			fmt.Println("  " + cli.Separator(40))
-			fmt.Println()
-			fmt.Printf("    %s %s\n", cli.Dimmed("Username:"), cli.Info("admin"))
-			fmt.Printf("    %s %s\n", cli.Dimmed("Password:"), cli.Info(generatedPassword))
-			fmt.Println()
-			cli.PrintWarning("IMPORTANT: Save this password securely!")
-			cli.PrintWarning("This password will NOT be shown again.")
-			cli.PrintWarning("You can change it later using: ALTER USER admin IDENTIFIED BY 'newpass'")
-			fmt.Println()
-
+			// Don't print credentials here - will be printed later in first-run section
 			log.Info("Admin user initialized with generated password")
 		} else {
 			// Non-interactive mode without env var: generate and display password
-			generatedPassword, err := authMgr.InitializeAdminWithGeneratedPassword()
+			var err error
+			generatedAdminPassword, err = authMgr.InitializeAdminWithGeneratedPassword()
 			if err != nil {
 				log.Error("Failed to initialize admin user", "error", err)
 				os.Exit(1)
 			}
 
-			fmt.Println()
-			fmt.Println("  FIRST-TIME SETUP: Admin credentials generated")
-			fmt.Println("  " + strings.Repeat("─", 45))
-			fmt.Println()
-			fmt.Printf("    Username: admin\n")
-			fmt.Printf("    Password: %s\n", generatedPassword)
-			fmt.Println()
-			fmt.Println("  IMPORTANT: Save this password securely!")
-			fmt.Println("  This password will NOT be shown again.")
-			fmt.Println("  Set FLYDB_ADMIN_PASSWORD env var to specify a custom password.")
-			fmt.Println()
-
+			// Don't print credentials here - will be printed later in first-run section
 			log.Info("Admin user initialized with generated password")
 		}
 	} else {
 		log.Debug("Admin user already exists")
+
+		// Warn if FLYDB_ADMIN_PASSWORD is set but admin already exists
+		if cfg.AdminPassword != "" {
+			log.Warn("FLYDB_ADMIN_PASSWORD environment variable is set, but admin user already exists")
+			log.Warn("Admin password is immutable after first creation - ignoring environment variable")
+			log.Warn("To change the password, use: ALTER USER admin IDENTIFIED BY 'newpass'")
+		}
 	}
 
 	// Print startup message after wizard (if applicable)
@@ -893,12 +883,32 @@ func main() {
 		os.Exit(0)
 	}()
 
+	// ========================================================================
+	// FIRST-RUN INFORMATION SECTION
+	// Print all important first-run messages BEFORE the log separator
+	// ========================================================================
+
+	// Print admin credentials if this was first-time setup
+	if isFirstTimeAdmin && generatedAdminPassword != "" {
+		fmt.Println()
+		fmt.Println("  " + cli.Highlight("FIRST-TIME SETUP: Admin Credentials Generated"))
+		fmt.Println("  " + strings.Repeat("─", 60))
+		fmt.Println()
+		fmt.Printf("    %s %s\n", cli.Dimmed("Username:"), cli.Success("admin"))
+		fmt.Printf("    %s %s\n", cli.Dimmed("Password:"), cli.Info(generatedAdminPassword))
+		fmt.Println()
+		cli.PrintWarning("⚠  IMPORTANT: Save this password securely!")
+		fmt.Println("     " + cli.Dimmed("This password will NOT be shown again."))
+		fmt.Println("     " + cli.Dimmed("You can change it later using: ALTER USER admin IDENTIFIED BY 'newpass'"))
+		fmt.Println()
+	}
+
 	// Print startup success message
 	fmt.Println()
 	cli.PrintSuccess("FlyDB server is ready!")
 	fmt.Println()
 
-	// Show connection protocol
+	// Show connection information
 	protocol := "tcp"
 	if cfg.TLSEnabled {
 		protocol = "tls"
@@ -918,6 +928,11 @@ func main() {
 	fmt.Println()
 	fmt.Println(cli.Dimmed("Press Ctrl+C to stop the server"))
 	fmt.Println()
+
+	// ========================================================================
+	// LOG SEPARATOR - Everything after this is server logs
+	// ========================================================================
+	banner.PrintLogSeparator()
 
 	// Start the server's main accept loop.
 	// This call blocks and handles client connections until the server is stopped.

@@ -180,11 +180,13 @@ func printLogSeparator(w io.Writer) {
 // PrintServerWithConfig prints the server banner with comprehensive configuration display.
 // This provides a clear overview of all settings including cluster, replication, and security.
 // Inspired by FlyMQ's polished startup experience.
+// NOTE: This does NOT print the log separator - call PrintLogSeparator() separately after first-run messages.
 func PrintServerWithConfig(cfg *config.Config) {
 	PrintServerWithConfigTo(os.Stdout, cfg)
 }
 
 // PrintServerWithConfigTo writes the server banner with configuration to the specified writer.
+// NOTE: This does NOT print the log separator - call PrintLogSeparator() separately after first-run messages.
 func PrintServerWithConfigTo(w io.Writer, cfg *config.Config) {
 	// Print ASCII banner
 	fmt.Fprintln(w)
@@ -202,9 +204,6 @@ func PrintServerWithConfigTo(w io.Writer, cfg *config.Config) {
 	// Footer
 	fmt.Fprintln(w, AnsiDim+"  "+Copyright+AnsiReset)
 	fmt.Fprintln(w)
-
-	// Log separator
-	printLogSeparator(w)
 }
 
 // Helper functions for configuration display
