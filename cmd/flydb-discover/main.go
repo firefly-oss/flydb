@@ -144,3 +144,134 @@ func printBanner() {
 	fmt.Printf("  %sNetwork Node Discovery Tool%s\n\n", dim, reset)
 }
 
+
+
+func printVersion() {
+	fmt.Println()
+	fmt.Printf("  %s%sFlyDB Discover%s %sv%s%s\n", cyan, bold, reset, dim, version, reset)
+	fmt.Printf("  %sNetwork Node Discovery Tool%s\n\n", dim, reset)
+	fmt.Printf("  %s%s%s\n\n", dim, copyright, reset)
+}
+
+func printUsage() {
+	// Print banner
+	printBanner()
+
+	// Description
+	fmt.Printf("%s  Discovers FlyDB nodes on the local network using mDNS (Bonjour/Avahi).%s\n", dim, reset)
+	fmt.Printf("%s  Useful for finding existing cluster nodes to join.%s\n\n", dim, reset)
+
+	// Usage
+	fmt.Printf("%sUsage:%s flydb-discover [options]\n\n", bold, reset)
+
+	// Options
+	fmt.Printf("%s%sOPTIONS%s\n\n", bold, cyan, reset)
+	fmt.Printf("    %s--timeout%s <seconds>   Discovery timeout (default: 5)\n", green, reset)
+	fmt.Printf("    %s--json%s               Output results as JSON\n", green, reset)
+	fmt.Printf("    %s--quiet%s, %s-q%s          Only output addresses (for scripting)\n", green, reset, green, reset)
+	fmt.Printf("    %s--version%s, %s-v%s        Show version information\n", green, reset, green, reset)
+	fmt.Printf("    %s--help%s, %s-h%s           Show this help message\n\n", green, reset, green, reset)
+
+	// Examples
+	fmt.Printf("%s%sEXAMPLES%s\n\n", bold, cyan, reset)
+	fmt.Printf("%s    # Discover nodes with default timeout%s\n", dim, reset)
+	fmt.Println("    flydb-discover")
+	fmt.Println()
+	fmt.Printf("%s    # Increase timeout for slower networks%s\n", dim, reset)
+	fmt.Println("    flydb-discover --timeout 10")
+	fmt.Println()
+	fmt.Printf("%s    # Get JSON output for automation%s\n", dim, reset)
+	fmt.Println("    flydb-discover --json")
+	fmt.Println()
+	fmt.Printf("%s    # Get just addresses for scripting%s\n", dim, reset)
+	fmt.Println("    flydb-discover --quiet")
+	fmt.Println()
+	fmt.Printf("%s    # Use in install script to find cluster%s\n", dim, reset)
+	fmt.Println("    PEERS=$(flydb-discover --quiet)")
+	fmt.Println()
+
+	// Network requirements
+	fmt.Printf("%s%sNETWORK REQUIREMENTS%s\n\n", bold, cyan, reset)
+	fmt.Printf("    %s•%s mDNS uses UDP port 5353 (multicast)\n", yellow, reset)
+	fmt.Printf("    %s•%s Nodes must be on the same network segment\n", yellow, reset)
+	fmt.Printf("    %s•%s Firewalls must allow mDNS traffic\n\n", yellow, reset)
+}
+
+func outputJSON(nodes []*cluster.DiscoveredNode) {
+	type nodeOutput struct {
+		NodeID      string `json:"node_id"`
+		ClusterID   string `json:"cluster_id,omitempty"`
+		ClusterAddr string `json:"cluster_addr"`
+		RaftAddr    string `json:"raft_addr,omitempty"`
+		HTTPAddr    string `json:"http_addr,omitempty"`
+		Version     string `json:"version,omitempty"`
+	}
+
+	output := make([]nodeOutput, len(nodes))
+	for i, n := range nodes {
+		output[i] = nodeOutput{
+			NodeID:      n.NodeID,
+			ClusterID:   n.ClusterID,
+			ClusterAddr: n.ClusterAddr,
+			RaftAddr:    n.RaftAddr,
+			HTTPAddr:    n.HTTPAddr,
+			Version:     n.Version,
+		}
+	}
+
+	data, _ := json.MarshalIndent(output, "", "  ")
+	fmt.Println(string(data))
+}
+
+func outputQuiet(nodes []*cluster.DiscoveredNode) {
+	addrs := make([]string, len(nodes))
+	for i, n := range nodes {
+		addrs[i] = n.ClusterAddr
+	}
+	fmt.Println(strings.Join(addrs, ","))
+}
+
+func outputHuman(nodes []*cluster.DiscoveredNode) {
+	fmt.Printf("%s%s✓%s Found %d FlyDB node(s)\n\n", green, bold, reset, len(nodes))
+
+	for i, n := range nodes {
+		// Node header with index and ID
+		fmt.Printf("  %s[%d]%s %s%s%s\n",
+			dim, i+1, reset,
+			bold+cyan, n.NodeID, reset)
+
+		// Cluster address (always present)
+		fmt.Printf("      %sCluster Address:%s %s%s%s\n",
+			dim, reset,
+			green, n.ClusterAddr, reset)
+
+		// Raft address (optional)
+		if n.RaftAddr != "" {
+			fmt.Printf("      %sRaft Address:%s    %s\n",
+				dim, reset, n.RaftAddr)
+		}
+
+		// HTTP address (optional)
+		if n.HTTPAddr != "" {
+			fmt.Printf("      %sHTTP Address:%s    %s\n",
+				dim, reset, n.HTTPAddr)
+		}
+
+		// Cluster ID (optional)
+		if n.ClusterID != "" {
+			fmt.Printf("      %sCluster ID:%s      %s\n",
+				dim, reset, n.ClusterID)
+		}
+
+		// Version (optional)
+		if n.Version != "" {
+			fmt.Printf("      %sVersion:%s         %s\n",
+				dim, reset, n.Version)
+		}
+
+		fmt.Println()
+	}
+
+	// Helpful tip
+	fmt.Printf("%s  Tip: Use --json for machine-readable output%s\n\n", dim, reset)
+}
