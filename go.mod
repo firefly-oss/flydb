@@ -4,8 +4,11 @@ go 1.24.0
 
 require (
 	github.com/chzyer/readline v1.5.1 // indirect
+	github.com/golang/snappy v1.0.0 // indirect
 	github.com/hashicorp/mdns v1.0.6 // indirect
+	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/miekg/dns v1.1.55 // indirect
+	github.com/pierrec/lz4/v4 v4.1.25 // indirect
 	golang.org/x/crypto v0.46.0 // indirect
 	golang.org/x/mod v0.30.0 // indirect
 	golang.org/x/net v0.47.0 // indirect

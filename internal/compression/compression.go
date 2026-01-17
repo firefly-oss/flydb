@@ -51,6 +51,10 @@ import (
 	"fmt"
 	"io"
 	"sync"
+
+	"github.com/golang/snappy"
+	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
 )
 
 // Algorithm represents a compression algorithm
@@ -112,10 +116,10 @@ const (
 type Config struct {
 	Algorithm        Algorithm `json:"algorithm"`
 	Level            Level     `json:"level"`
-	MinSize          int       `json:"min_size"`           // Minimum size to compress
-	BatchSize        int       `json:"batch_size"`         // Number of entries per batch
-	BatchTimeout     int       `json:"batch_timeout_ms"`   // Max wait time for batch (ms)
-	DictionaryEnable bool      `json:"dictionary_enable"`  // Use dictionary compression
+	MinSize          int       `json:"min_size"`          // Minimum size to compress
+	BatchSize        int       `json:"batch_size"`        // Number of entries per batch
+	BatchTimeout     int       `json:"batch_timeout_ms"`  // Max wait time for batch (ms)
+	DictionaryEnable bool      `json:"dictionary_enable"` // Use dictionary compression
 }
 
 // DefaultConfig returns sensible defaults
@@ -142,11 +146,17 @@ var (
 type Compressor struct {
 	config     Config
 	gzipPool   sync.Pool
+	lz4Pool    sync.Pool
+	zstdEnc    *zstd.Encoder
+	zstdDec    *zstd.Decoder
 	bufferPool sync.Pool
 }
 
 // NewCompressor creates a new compressor
 func NewCompressor(config Config) *Compressor {
+	zstdEnc, _ := zstd.NewWriter(nil)
+	zstdDec, _ := zstd.NewReader(nil)
+
 	return &Compressor{
 		config: config,
 		gzipPool: sync.Pool{
@@ -154,6 +164,13 @@ func NewCompressor(config Config) *Compressor {
 				return gzip.NewWriter(nil)
 			},
 		},
+		lz4Pool: sync.Pool{
+			New: func() interface{} {
+				return lz4.NewWriter(nil)
+			},
+		},
+		zstdEnc: zstdEnc,
+		zstdDec: zstdDec,
 		bufferPool: sync.Pool{
 			New: func() interface{} {
 				return new(bytes.Buffer)
@@ -235,40 +252,54 @@ func (c *Compressor) decompressGzip(data []byte) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
-// compressLZ4 compresses using LZ4 (placeholder - uses gzip for now)
+// compressLZ4 compresses using LZ4
 func (c *Compressor) compressLZ4(data []byte) ([]byte, error) {
-	// TODO: Implement LZ4 compression when lz4 package is added
-	return c.compressGzip(data)
+	buf := c.bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer c.bufferPool.Put(buf)
+
+	zw := c.lz4Pool.Get().(*lz4.Writer)
+	zw.Reset(buf)
+
+	if _, err := zw.Write(data); err != nil {
+		c.lz4Pool.Put(zw)
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		c.lz4Pool.Put(zw)
+		return nil, err
+	}
+
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	c.lz4Pool.Put(zw)
+	return result, nil
 }
 
 // decompressLZ4 decompresses LZ4 data
 func (c *Compressor) decompressLZ4(data []byte) ([]byte, error) {
-	// TODO: Implement LZ4 decompression when lz4 package is added
-	return c.decompressGzip(data)
+	zr := lz4.NewReader(bytes.NewReader(data))
+	return io.ReadAll(zr)
 }
 
-// compressSnappy compresses using Snappy (placeholder - uses gzip for now)
+// compressSnappy compresses using Snappy
 func (c *Compressor) compressSnappy(data []byte) ([]byte, error) {
-	// TODO: Implement Snappy compression when snappy package is added
-	return c.compressGzip(data)
+	return snappy.Encode(nil, data), nil
 }
 
 // decompressSnappy decompresses Snappy data
 func (c *Compressor) decompressSnappy(data []byte) ([]byte, error) {
-	// TODO: Implement Snappy decompression when snappy package is added
-	return c.decompressGzip(data)
+	return snappy.Decode(nil, data)
 }
 
-// compressZstd compresses using Zstd (placeholder - uses gzip for now)
+// compressZstd compresses using Zstd
 func (c *Compressor) compressZstd(data []byte) ([]byte, error) {
-	// TODO: Implement Zstd compression when zstd package is added
-	return c.compressGzip(data)
+	return c.zstdEnc.EncodeAll(data, nil), nil
 }
 
 // decompressZstd decompresses Zstd data
 func (c *Compressor) decompressZstd(data []byte) ([]byte, error) {
-	// TODO: Implement Zstd decompression when zstd package is added
-	return c.decompressGzip(data)
+	return c.zstdDec.DecodeAll(data, nil)
 }
 
 // BatchCompressor handles batch compression for better ratios
@@ -375,4 +406,3 @@ func (bc *BatchCompressor) TotalBytes() int {
 	defer bc.mu.Unlock()
 	return bc.totalSize
 }
-
