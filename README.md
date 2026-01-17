@@ -485,6 +485,7 @@ The installation creates:
 | `fsql` | Symlink to `flydb-shell` for convenience |
 | `flydb-dump` | Database export/import utility |
 | `fdump` | Symlink to `flydb-dump` for convenience |
+| `flydb-discover` | Network node discovery tool for cluster setup |
 
 Default locations:
 - **Binaries**: `/usr/local/bin` (system) or `~/.local/bin` (user)
@@ -1333,7 +1334,7 @@ fdump --host node1,node2,node3 -U admin -P --import backup.sql
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/architecture.md) | System design, component diagrams, data flow |
-| [Horizontal Scaling](docs/horizontal_scaling.md) | **NEW!** Complete guide to data sharding and cluster scaling |
+| [Cluster Setup](docs/CLUSTER_SETUP.md) | **NEW!** Complete guide to cluster setup, service discovery, and deployment |
 | [Implementation](docs/implementation.md) | WAL, B-Tree, SQL processing, transactions |
 | [Design Decisions](docs/design-decisions.md) | Rationale and trade-offs |
 | [API Reference](docs/api.md) | SQL syntax, protocol commands, configuration |
