@@ -1894,6 +1894,179 @@ wizard_step_init_database() {
 }
 
 # =============================================================================
+# Configuration Preview and Review
+# =============================================================================
+
+show_default_configuration() {
+    echo ""
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${CYAN}${BOLD}  Default Configuration${RESET}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+
+    echo -e "  ${BOLD}FlyDB will be installed with the following default settings:${RESET}"
+    echo ""
+
+    # Server Configuration
+    echo -e "  ${BOLD}Server Configuration${RESET}"
+    separator 60
+    print_kv "Role" "${GREEN}standalone${RESET} (single server, no replication)"
+    print_kv "Server Port" "8889 (binary protocol for client connections)"
+    print_kv "Replication Port" "9999 (for cluster mode)"
+    print_kv "Cluster Port" "9998 (for cluster communication)"
+    echo ""
+
+    # Storage Configuration
+    echo -e "  ${BOLD}Storage Configuration${RESET}"
+    separator 60
+    if [[ $EUID -eq 0 ]] || [[ "${PREFIX:-/usr/local}" == "/usr/local" ]]; then
+        print_kv "Data Directory" "/var/lib/flydb"
+    else
+        print_kv "Data Directory" "~/.local/share/flydb"
+    fi
+    print_kv "Buffer Pool Size" "Auto (based on available memory)"
+    print_kv "Checkpoint Interval" "60 seconds"
+    echo ""
+
+    # Security Configuration
+    echo -e "  ${BOLD}Security Configuration${RESET}"
+    separator 60
+    print_kv "Encryption" "${GREEN}Enabled${RESET} (AES-256-GCM)"
+    print_kv "Passphrase" "${YELLOW}Required${RESET} (set via FLYDB_ENCRYPTION_PASSPHRASE)"
+    print_kv "TLS" "${GREEN}Enabled${RESET} (TLS 1.2+)"
+    print_kv "TLS Certificates" "Auto-generated (self-signed for development)"
+    echo ""
+
+    # Performance Configuration
+    echo -e "  ${BOLD}Performance Configuration${RESET}"
+    separator 60
+    print_kv "Raft Consensus" "${GREEN}Enabled${RESET} (for cluster mode)"
+    print_kv "Compression" "${DIM}Disabled${RESET} (can be enabled later)"
+    print_kv "Zero-Copy Buffers" "${GREEN}Enabled${RESET} (reduces memory allocations)"
+    echo ""
+
+    # Logging Configuration
+    echo -e "  ${BOLD}Logging Configuration${RESET}"
+    separator 60
+    print_kv "Log Level" "${CYAN}info${RESET}"
+    print_kv "Log Format" "Text (human-readable)"
+    echo ""
+
+    # Service Configuration
+    echo -e "  ${BOLD}Service Configuration${RESET}"
+    separator 60
+    if [[ "$INIT_SYSTEM" != "none" ]]; then
+        print_kv "System Service" "${GREEN}Yes${RESET} (auto-start on boot)"
+        print_kv "Init System" "$INIT_SYSTEM"
+    else
+        print_kv "System Service" "${DIM}No${RESET} (no init system detected)"
+    fi
+    echo ""
+
+    echo -e "  ${DIM}These are production-ready defaults recommended for most deployments.${RESET}"
+    echo -e "  ${DIM}You can customize any of these settings during installation.${RESET}"
+    echo ""
+}
+
+wizard_step_configuration_choice() {
+    wizard_step_header "2" "Configuration"
+
+    echo "  How would you like to configure FlyDB?"
+    echo ""
+    echo -e "  ${GREEN}[1]${RESET} ${BOLD}Use Default Configuration${RESET}  ${DIM}(recommended for quick start)${RESET}"
+    echo -e "      ${DIM}• Production-ready defaults${RESET}"
+    echo -e "      ${DIM}• Standalone mode with encryption and TLS enabled${RESET}"
+    echo -e "      ${DIM}• Can be customized later by editing config file${RESET}"
+    echo ""
+    echo -e "  ${BLUE}[2]${RESET} ${BOLD}Customize Configuration${RESET}  ${DIM}(advanced)${RESET}"
+    echo -e "      ${DIM}• Step-by-step wizard for all settings${RESET}"
+    echo -e "      ${DIM}• Configure server role, ports, security, etc.${RESET}"
+    echo -e "      ${DIM}• Recommended for production cluster deployments${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}[3]${RESET} ${BOLD}View Default Configuration${RESET}  ${DIM}(see what will be configured)${RESET}"
+    echo ""
+
+    local choice
+    choice=$(prompt "Select option" "1")
+    choice="${choice//[[:space:]]/}"
+
+    case "$choice" in
+        1)
+            print_success "Using default configuration"
+            return 0  # Use defaults
+            ;;
+        2)
+            print_success "Starting configuration wizard"
+            return 1  # Run full wizard
+            ;;
+        3)
+            show_default_configuration
+            # Ask again after showing defaults
+            wizard_step_configuration_choice
+            return $?
+            ;;
+        *)
+            print_warning "Invalid selection, using default configuration"
+            return 0  # Use defaults
+            ;;
+    esac
+}
+
+preview_final_configuration() {
+    echo ""
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${CYAN}${BOLD}  Configuration Preview${RESET}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+
+    echo -e "  ${BOLD}The following configuration will be written to:${RESET}"
+
+    local config_dir
+    if [[ $EUID -eq 0 ]] || [[ "$PREFIX" == "/usr/local" ]]; then
+        config_dir="/etc/flydb"
+    else
+        config_dir="$HOME/.config/flydb"
+    fi
+
+    echo -e "  ${CYAN}$config_dir/flydb.conf${RESET}"
+    echo ""
+    separator 60
+    echo ""
+
+    # Show a preview of the config file (first 30 lines)
+    echo -e "${DIM}# FlyDB Configuration File"
+    echo "# Generated by install.sh"
+    echo ""
+    echo "# Server Configuration"
+    echo "role = \"${SERVER_ROLE}\""
+    echo ""
+    echo "# Network Configuration"
+    echo "port = ${PORT}"
+    echo "replication_port = ${REPL_PORT}"
+    echo "cluster_port = ${CLUSTER_PORT}"
+    echo ""
+    echo "# Storage Configuration"
+    echo "data_dir = \"${DATA_DIR}\""
+    echo "buffer_pool_size = ${BUFFER_POOL_SIZE}"
+    echo "checkpoint_secs = ${CHECKPOINT_SECS}"
+    echo ""
+    echo "# Security Configuration"
+    echo "encryption_enabled = ${ENCRYPTION_ENABLED}"
+    echo "tls_enabled = ${TLS_ENABLED}"
+    echo "tls_auto_gen = ${TLS_AUTO_GEN}"
+    echo ""
+    echo "# Logging Configuration"
+    echo "log_level = \"${LOG_LEVEL}\""
+    echo "log_json = ${LOG_JSON}"
+    echo ""
+    echo -e "... (full configuration will be written)${RESET}"
+    echo ""
+    separator 60
+    echo ""
+}
+
+
+# =============================================================================
 # Main Interactive Wizard
 # =============================================================================
 
@@ -1925,20 +2098,38 @@ run_interactive_wizard() {
         echo ""
     fi
 
-    # Run wizard steps
+    # Step 1: Installation directory
     wizard_step_installation_dir
-    wizard_step_server_role
-    wizard_step_network_ports
 
-    # Role-specific configuration
-    wizard_step_cluster_config
+    # Step 2: Configuration choice (use defaults or customize)
+    local use_defaults=false
+    if wizard_step_configuration_choice; then
+        use_defaults=true
+        # Set default data directory based on installation prefix
+        if [[ -z "$DATA_DIR" ]]; then
+            if [[ $EUID -eq 0 ]] || [[ "$PREFIX" == "/usr/local" ]]; then
+                DATA_DIR="/var/lib/flydb"
+            else
+                DATA_DIR="$HOME/.local/share/flydb"
+            fi
+        fi
+    else
+        # Run full wizard
+        wizard_step_server_role
+        wizard_step_network_ports
 
-    # Common configuration
-    wizard_step_storage
-    wizard_step_security
-    wizard_step_tls
-    wizard_step_performance
-    wizard_step_logging
+        # Role-specific configuration
+        wizard_step_cluster_config
+
+        # Common configuration
+        wizard_step_storage
+        wizard_step_security
+        wizard_step_tls
+        wizard_step_performance
+        wizard_step_logging
+    fi
+
+    # Service and database initialization (always ask)
     wizard_step_service
     wizard_step_init_database
 
@@ -1946,6 +2137,10 @@ run_interactive_wizard() {
     echo ""
     if prompt_yes_no "Create configuration file with these settings?" "y"; then
         CREATE_CONFIG=true
+        # Show preview of configuration
+        if [[ "$use_defaults" == false ]]; then
+            preview_final_configuration
+        fi
     else
         CREATE_CONFIG=false
     fi
@@ -2988,152 +3183,201 @@ rollback() {
 
 print_post_install() {
     echo ""
-    echo -e "${GREEN}${BOLD}${ICON_SUCCESS} Installation Complete!${RESET}"
-    separator 60
+    double_separator 70
+    echo -e "${GREEN}${BOLD}  ✓ FlyDB Installation Complete!${RESET}"
+    double_separator 70
     echo ""
 
     local bin_dir="${PREFIX}/bin"
     local in_path=false
+    local config_dir
+
+    # Determine config directory
+    if [[ $EUID -eq 0 ]] || [[ "$PREFIX" == "/usr/local" ]]; then
+        config_dir="/etc/flydb"
+    else
+        config_dir="$HOME/.config/flydb"
+    fi
 
     # Check if bin_dir is in PATH
     if echo "$PATH" | tr ':' '\n' | grep -q "^${bin_dir}$"; then
         in_path=true
     fi
 
-    echo -e "${BOLD}Next Steps:${RESET}"
+    # Installation Summary
+    echo -e "${BOLD}Installation Summary:${RESET}"
+    separator 70
+    print_kv "Version" "${FLYDB_VERSION}"
+    print_kv "Installation Path" "${bin_dir}"
+    if [[ "$CREATE_CONFIG" == true ]]; then
+        print_kv "Configuration File" "${config_dir}/flydb.conf"
+    fi
+    print_kv "Data Directory" "${DATA_DIR}"
+    print_kv "Server Role" "${SERVER_ROLE}"
     echo ""
 
-    local step_num=1
-
-    # Step: Add to PATH (only if not already in PATH)
-    if [[ "$in_path" != true ]]; then
-        echo -e "  ${YELLOW}${step_num}. Add FlyDB to your PATH:${RESET}"
-        echo ""
-        echo -e "     ${DIM}# Add to ~/.bashrc or ~/.zshrc:${RESET}"
-        echo -e "     ${CYAN}export PATH=\"${bin_dir}:\$PATH\"${RESET}"
-        echo ""
-        ((step_num++))
-    fi
-
-    # Step: Start FlyDB
-    echo -e "  ${YELLOW}${step_num}. Start FlyDB:${RESET}"
+    # Quick Start Section
+    echo -e "${BOLD}Quick Start:${RESET}"
+    separator 70
     echo ""
-    echo -e "     ${DIM}# Interactive wizard (first-time setup):${RESET}"
-    if [[ "$in_path" == true ]]; then
-        echo -e "     ${CYAN}flydb${RESET}"
-    else
-        echo -e "     ${CYAN}${bin_dir}/flydb${RESET}"
-    fi
-    echo ""
-    echo -e "     ${DIM}# Or with command-line options:${RESET}"
-    if [[ "$in_path" == true ]]; then
-        echo -e "     ${CYAN}flydb -port 8889 -role standalone${RESET}"
-    else
-        echo -e "     ${CYAN}${bin_dir}/flydb -port 8889 -role standalone${RESET}"
-    fi
-    ((step_num++))
 
-    # Step: Manage service (only if service was installed)
-    if [[ "$INSTALL_SERVICE" == true ]]; then
+    # Show how to start the daemon
+    if [[ "$SERVER_ROLE" == "standalone" ]]; then
+        echo -e "  ${BOLD}Start FlyDB daemon (standalone mode):${RESET}"
         echo ""
-        echo -e "  ${YELLOW}${step_num}. Manage the service:${RESET}"
-        echo ""
-
-        if [[ "$INIT_SYSTEM" == "systemd" ]]; then
-            echo -e "     ${CYAN}sudo systemctl start flydb${RESET}    # Start the service"
-            echo -e "     ${CYAN}sudo systemctl enable flydb${RESET}   # Enable at boot"
-            echo -e "     ${CYAN}sudo systemctl status flydb${RESET}   # Check status"
-        elif [[ "$INIT_SYSTEM" == "launchd" ]]; then
-            if [[ $EUID -eq 0 ]]; then
-                echo -e "     ${CYAN}sudo launchctl load /Library/LaunchDaemons/io.flydb.flydb.plist${RESET}"
+        if [[ "$CREATE_CONFIG" == true ]]; then
+            echo -e "    ${CYAN}# Using configuration file:${RESET}"
+            if [[ "$in_path" == true ]]; then
+                echo -e "    ${GREEN}flydb --config ${config_dir}/flydb.conf${RESET}"
             else
-                echo -e "     ${CYAN}launchctl load ~/Library/LaunchAgents/io.flydb.flydb.plist${RESET}"
+                echo -e "    ${GREEN}${bin_dir}/flydb --config ${config_dir}/flydb.conf${RESET}"
+            fi
+        else
+            echo -e "    ${CYAN}# With command-line options:${RESET}"
+            if [[ "$in_path" == true ]]; then
+                echo -e "    ${GREEN}flydb --port 8889 --role standalone --data-dir ${DATA_DIR}${RESET}"
+            else
+                echo -e "    ${GREEN}${bin_dir}/flydb --port 8889 --role standalone --data-dir ${DATA_DIR}${RESET}"
             fi
         fi
-        ((step_num++))
+    else
+        # Cluster mode
+        echo -e "  ${BOLD}Start FlyDB daemon (cluster mode):${RESET}"
+        echo ""
+        if [[ "$CLUSTER_BOOTSTRAP" == "true" ]] || [[ -z "$CLUSTER_PEERS" ]]; then
+            echo -e "    ${CYAN}# Bootstrap first node (becomes leader):${RESET}"
+            if [[ "$in_path" == true ]]; then
+                echo -e "    ${GREEN}flydb --config ${config_dir}/flydb.conf${RESET}"
+            else
+                echo -e "    ${GREEN}${bin_dir}/flydb --config ${config_dir}/flydb.conf${RESET}"
+            fi
+        else
+            echo -e "    ${CYAN}# Join existing cluster:${RESET}"
+            if [[ "$in_path" == true ]]; then
+                echo -e "    ${GREEN}flydb --config ${config_dir}/flydb.conf${RESET}"
+            else
+                echo -e "    ${GREEN}${bin_dir}/flydb --config ${config_dir}/flydb.conf${RESET}"
+            fi
+        fi
+    fi
+    echo ""
+
+    # Service Management (if installed)
+    if [[ "$INSTALL_SERVICE" == true ]]; then
+        echo -e "  ${BOLD}Or use systemd service:${RESET}"
+        echo ""
+        if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+            echo -e "    ${CYAN}sudo systemctl start flydb${RESET}     # Start the service"
+            echo -e "    ${CYAN}sudo systemctl enable flydb${RESET}    # Enable at boot"
+            echo -e "    ${CYAN}sudo systemctl status flydb${RESET}    # Check status"
+            echo -e "    ${CYAN}sudo journalctl -u flydb -f${RESET}    # View logs"
+        elif [[ "$INIT_SYSTEM" == "launchd" ]]; then
+            if [[ $EUID -eq 0 ]]; then
+                echo -e "    ${CYAN}sudo launchctl load /Library/LaunchDaemons/io.flydb.flydb.plist${RESET}"
+                echo -e "    ${CYAN}sudo launchctl start io.flydb.flydb${RESET}"
+                echo -e "    ${CYAN}tail -f /var/log/flydb.log${RESET}    # View logs"
+            else
+                echo -e "    ${CYAN}launchctl load ~/Library/LaunchAgents/io.flydb.flydb.plist${RESET}"
+                echo -e "    ${CYAN}launchctl start io.flydb.flydb${RESET}"
+                echo -e "    ${CYAN}tail -f ~/Library/Logs/flydb.log${RESET}    # View logs"
+            fi
+        fi
+        echo ""
     fi
 
-    # Step: Connect with CLI
-    echo ""
-    echo -e "  ${YELLOW}${step_num}. Connect with the CLI client:${RESET}"
+    # Connect with SQL shell
+    echo -e "  ${BOLD}Connect with SQL shell:${RESET}"
     echo ""
     if [[ "$in_path" == true ]]; then
-        echo -e "     ${CYAN}fsql${RESET}"
+        echo -e "    ${GREEN}fsql${RESET}"
     else
-        echo -e "     ${CYAN}${bin_dir}/fsql${RESET}"
+        echo -e "    ${GREEN}${bin_dir}/fsql${RESET}"
     fi
-    ((step_num++))
+    echo ""
 
-    # Step: Cluster-specific instructions
+    # Cluster-specific instructions
     if [[ "$SERVER_ROLE" == "cluster" ]]; then
-        echo ""
-        echo -e "  ${YELLOW}${step_num}. Cluster Setup:${RESET}"
+        echo -e "  ${BOLD}Cluster Setup:${RESET}"
+        separator 70
         echo ""
 
         if [[ "$CLUSTER_BOOTSTRAP" == "true" ]] || [[ -z "$CLUSTER_PEERS" ]]; then
             # Bootstrap mode - this is the first node
             local this_host
             this_host=$(hostname 2>/dev/null || echo "localhost")
-            echo -e "     ${GREEN}This node is bootstrapped as the cluster leader.${RESET}"
+            echo -e "    ${GREEN}✓${RESET} This node is bootstrapped as the cluster leader"
             echo ""
-            echo -e "     ${DIM}To add more nodes to this cluster, run on other machines:${RESET}"
+            echo -e "    ${BOLD}To add more nodes to this cluster:${RESET}"
             echo ""
             if [[ "$in_path" == true ]]; then
-                echo -e "     ${CYAN}flydb -role cluster -cluster-peers ${this_host}:${CLUSTER_PORT}${RESET}"
+                echo -e "    ${CYAN}flydb --role cluster --cluster-peers ${this_host}:${CLUSTER_PORT}${RESET}"
             else
-                echo -e "     ${CYAN}${bin_dir}/flydb -role cluster -cluster-peers ${this_host}:${CLUSTER_PORT}${RESET}"
+                echo -e "    ${CYAN}${bin_dir}/flydb --role cluster --cluster-peers ${this_host}:${CLUSTER_PORT}${RESET}"
             fi
             echo ""
-            echo -e "     ${DIM}Or install with:${RESET}"
-            echo -e "     ${CYAN}curl -sSL https://get.flydb.dev | bash -s -- --role cluster \\${RESET}"
-            echo -e "     ${CYAN}     --cluster-peers ${this_host}:${CLUSTER_PORT} --yes${RESET}"
+            echo -e "    ${BOLD}Monitor cluster status:${RESET}"
+            echo ""
+            if [[ "$in_path" == true ]]; then
+                echo -e "    ${CYAN}fsql -c \"SHOW CLUSTER STATUS\"${RESET}"
+            else
+                echo -e "    ${CYAN}${bin_dir}/fsql -c \"SHOW CLUSTER STATUS\"${RESET}"
+            fi
         else
             # Join mode - connecting to existing cluster
-            echo -e "     ${BLUE}This node will join the cluster via: ${CLUSTER_PEERS}${RESET}"
+            echo -e "    ${BLUE}ℹ${RESET} This node will join cluster via: ${CLUSTER_PEERS}"
             echo ""
-            echo -e "     ${DIM}The node will automatically:${RESET}"
-            echo -e "     ${DIM}• Discover other cluster members${RESET}"
-            echo -e "     ${DIM}• Sync data from the cluster${RESET}"
-            echo -e "     ${DIM}• Participate in leader elections${RESET}"
-        fi
-        ((step_num++))
-
-        echo ""
-        echo -e "  ${YELLOW}${step_num}. Monitor cluster status:${RESET}"
-        echo ""
-        if [[ "$in_path" == true ]]; then
-            echo -e "     ${CYAN}fsql -c \"SHOW CLUSTER STATUS\"${RESET}"
-        else
-            echo -e "     ${CYAN}${bin_dir}/fsql -c \"SHOW CLUSTER STATUS\"${RESET}"
-        fi
-        ((step_num++))
-    else
-        # Non-cluster mode - show cluster setup as optional
-        echo ""
-        echo -e "  ${YELLOW}${step_num}. Set up a cluster (optional):${RESET}"
-        echo ""
-        echo -e "     ${DIM}# Bootstrap first cluster node:${RESET}"
-        if [[ "$in_path" == true ]]; then
-            echo -e "     ${CYAN}flydb -role cluster${RESET}  ${DIM}# Becomes leader${RESET}"
-        else
-            echo -e "     ${CYAN}${bin_dir}/flydb -role cluster${RESET}  ${DIM}# Becomes leader${RESET}"
+            echo -e "    ${DIM}The node will automatically:${RESET}"
+            echo -e "    ${DIM}• Discover other cluster members${RESET}"
+            echo -e "    ${DIM}• Sync data from the cluster${RESET}"
+            echo -e "    ${DIM}• Participate in leader elections${RESET}"
         fi
         echo ""
-        echo -e "     ${DIM}# Join existing cluster:${RESET}"
-        if [[ "$in_path" == true ]]; then
-            echo -e "     ${CYAN}flydb -role cluster -cluster-peers node1:9998${RESET}"
-        else
-            echo -e "     ${CYAN}${bin_dir}/flydb -role cluster -cluster-peers node1:9998${RESET}"
-        fi
-        ((step_num++))
     fi
 
+    # Configuration Section
+    echo -e "  ${BOLD}Configuration:${RESET}"
+    separator 70
     echo ""
-    separator 60
+    if [[ "$CREATE_CONFIG" == true ]]; then
+        echo -e "    ${CYAN}# Edit configuration:${RESET}"
+        echo -e "    ${GREEN}${EDITOR:-vi} ${config_dir}/flydb.conf${RESET}"
+        echo ""
+    fi
+    if [[ "$ENCRYPTION_ENABLED" == "true" ]]; then
+        echo -e "    ${CYAN}# Set encryption passphrase (required):${RESET}"
+        echo -e "    ${GREEN}export FLYDB_ENCRYPTION_PASSPHRASE=\"your-secure-passphrase\"${RESET}"
+        echo ""
+    fi
+    echo -e "    ${CYAN}# View all options:${RESET}"
+    if [[ "$in_path" == true ]]; then
+        echo -e "    ${GREEN}flydb --help${RESET}"
+    else
+        echo -e "    ${GREEN}${bin_dir}/flydb --help${RESET}"
+    fi
     echo ""
-    echo -e "  ${DIM}Documentation:${RESET}  https://flydb.dev/docs"
-    echo -e "  ${DIM}GitHub:${RESET}         https://github.com/${GITHUB_REPO}"
-    echo -e "  ${DIM}Issues:${RESET}         https://github.com/${GITHUB_REPO}/issues"
+    # Documentation and Support
+    echo -e "  ${BOLD}Documentation & Support:${RESET}"
+    separator 70
+    echo ""
+    print_kv "Getting Started" "https://flydb.dev/docs/getting-started" 25
+    print_kv "Configuration Guide" "https://flydb.dev/docs/configuration" 25
+    print_kv "SQL Reference" "https://flydb.dev/docs/sql" 25
+    print_kv "GitHub Repository" "https://github.com/${GITHUB_REPO}" 25
+    print_kv "Report Issues" "https://github.com/${GITHUB_REPO}/issues" 25
+    echo ""
+
+    # Add to PATH reminder
+    if [[ "$in_path" != true ]]; then
+        echo -e "  ${YELLOW}⚠${RESET}  ${YELLOW}Add FlyDB to your PATH for easier access:${RESET}"
+        echo ""
+        echo -e "    ${DIM}# Add to ~/.bashrc or ~/.zshrc:${RESET}"
+        echo -e "    ${CYAN}export PATH=\"${bin_dir}:\$PATH\"${RESET}"
+        echo ""
+    fi
+
+    double_separator 70
+    echo -e "${GREEN}${BOLD}  Happy querying with FlyDB! 🚀${RESET}"
+    double_separator 70
     echo ""
 }
 
