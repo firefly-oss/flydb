@@ -114,6 +114,18 @@ const (
 	EnvHealthAddr     = "FLYDB_HEALTH_ADDR"
 	EnvAdminEnabled   = "FLYDB_ADMIN_ENABLED"
 	EnvAdminAddr      = "FLYDB_ADMIN_ADDR"
+
+	// Audit trail environment variables
+	EnvAuditEnabled       = "FLYDB_AUDIT_ENABLED"
+	EnvAuditLogDDL        = "FLYDB_AUDIT_LOG_DDL"
+	EnvAuditLogDML        = "FLYDB_AUDIT_LOG_DML"
+	EnvAuditLogSelect     = "FLYDB_AUDIT_LOG_SELECT"
+	EnvAuditLogAuth       = "FLYDB_AUDIT_LOG_AUTH"
+	EnvAuditLogAdmin      = "FLYDB_AUDIT_LOG_ADMIN"
+	EnvAuditLogCluster    = "FLYDB_AUDIT_LOG_CLUSTER"
+	EnvAuditRetentionDays = "FLYDB_AUDIT_RETENTION_DAYS"
+	EnvAuditBufferSize    = "FLYDB_AUDIT_BUFFER_SIZE"
+	EnvAuditFlushInterval = "FLYDB_AUDIT_FLUSH_INTERVAL_SEC"
 )
 
 // GetDefaultDataDir returns the default directory for database storage.
@@ -240,6 +252,18 @@ type Config struct {
 	LogLevel string `toml:"log_level" json:"log_level"`
 	LogJSON  bool   `toml:"log_json" json:"log_json"`
 
+	// Audit trail configuration
+	AuditEnabled        bool `toml:"audit_enabled" json:"audit_enabled"`               // Enable audit logging
+	AuditLogDDL         bool `toml:"audit_log_ddl" json:"audit_log_ddl"`               // Log DDL operations
+	AuditLogDML         bool `toml:"audit_log_dml" json:"audit_log_dml"`               // Log DML operations
+	AuditLogSelect      bool `toml:"audit_log_select" json:"audit_log_select"`         // Log SELECT queries (can be verbose)
+	AuditLogAuth        bool `toml:"audit_log_auth" json:"audit_log_auth"`             // Log authentication events
+	AuditLogAdmin       bool `toml:"audit_log_admin" json:"audit_log_admin"`           // Log administrative operations
+	AuditLogCluster     bool `toml:"audit_log_cluster" json:"audit_log_cluster"`       // Log cluster events
+	AuditRetentionDays  int  `toml:"audit_retention_days" json:"audit_retention_days"` // Days to retain audit logs (0 = forever)
+	AuditBufferSize     int  `toml:"audit_buffer_size" json:"audit_buffer_size"`       // Event buffer size
+	AuditFlushInterval  int  `toml:"audit_flush_interval_sec" json:"audit_flush_interval_sec"` // Flush interval in seconds
+
 	// Observability configuration
 	Observability ObservabilityConfig `toml:"observability" json:"observability"`
 
@@ -321,6 +345,18 @@ func DefaultConfig() *Config {
 		// Logging
 		LogLevel: "info",
 		LogJSON:  false,
+
+		// Audit trail - enabled by default for security and compliance
+		AuditEnabled:       true,  // Enable audit logging
+		AuditLogDDL:        true,  // Log DDL operations
+		AuditLogDML:        true,  // Log DML operations
+		AuditLogSelect:     false, // Don't log SELECT by default (can be verbose)
+		AuditLogAuth:       true,  // Log authentication events
+		AuditLogAdmin:      true,  // Log administrative operations
+		AuditLogCluster:    true,  // Log cluster events
+		AuditRetentionDays: 90,    // Keep logs for 90 days
+		AuditBufferSize:    1000,  // Buffer up to 1000 events
+		AuditFlushInterval: 5,     // Flush every 5 seconds
 
 		// Observability
 		Observability: ObservabilityConfig{
@@ -628,6 +664,44 @@ func (m *Manager) LoadFromEnv() {
 	}
 	if v := os.Getenv(EnvAdminAddr); v != "" {
 		cfg.Observability.Admin.Addr = v
+	}
+
+	// Audit trail configuration
+	if v := os.Getenv(EnvAuditEnabled); v != "" {
+		cfg.AuditEnabled = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvAuditLogDDL); v != "" {
+		cfg.AuditLogDDL = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvAuditLogDML); v != "" {
+		cfg.AuditLogDML = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvAuditLogSelect); v != "" {
+		cfg.AuditLogSelect = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvAuditLogAuth); v != "" {
+		cfg.AuditLogAuth = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvAuditLogAdmin); v != "" {
+		cfg.AuditLogAdmin = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvAuditLogCluster); v != "" {
+		cfg.AuditLogCluster = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvAuditRetentionDays); v != "" {
+		if days, err := strconv.Atoi(v); err == nil {
+			cfg.AuditRetentionDays = days
+		}
+	}
+	if v := os.Getenv(EnvAuditBufferSize); v != "" {
+		if size, err := strconv.Atoi(v); err == nil {
+			cfg.AuditBufferSize = size
+		}
+	}
+	if v := os.Getenv(EnvAuditFlushInterval); v != "" {
+		if interval, err := strconv.Atoi(v); err == nil {
+			cfg.AuditFlushInterval = interval
+		}
 	}
 
 	m.Set(cfg)
