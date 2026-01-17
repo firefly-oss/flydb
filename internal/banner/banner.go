@@ -257,6 +257,12 @@ func printCompactConfig(w io.Writer, cfg *config.Config) {
 
 	fmt.Fprintln(w)
 
+	// === OBSERVABILITY ===
+	printSectionHeader(w, "Observability", lineWidth)
+	printObservabilityInfo(w, cfg)
+
+	fmt.Fprintln(w)
+
 	// === PERFORMANCE ===
 	printSectionHeader(w, "Performance", lineWidth)
 	printPerformanceInfo(w, cfg)
@@ -400,6 +406,38 @@ func printFeaturesInfo(w io.Writer, cfg *config.Config) {
 	}
 	if len(disabled) > 0 {
 		fmt.Fprintf(w, "  %sDisabled:%s %s\n", AnsiDim, AnsiReset, AnsiDim+strings.Join(disabled, ", ")+AnsiReset)
+	}
+}
+
+func printObservabilityInfo(w io.Writer, cfg *config.Config) {
+	// Build observability status items
+	var endpoints []string
+
+	// Metrics endpoint
+	if cfg.Observability.Metrics.Enabled {
+		endpoints = append(endpoints, fmt.Sprintf("%sMetrics:%s %shttp://localhost%s%s",
+			AnsiDim, AnsiReset, AnsiGreen, cfg.Observability.Metrics.Addr, AnsiReset))
+	}
+
+	// Health endpoint
+	if cfg.Observability.Health.Enabled {
+		endpoints = append(endpoints, fmt.Sprintf("%sHealth:%s %shttp://localhost%s%s",
+			AnsiDim, AnsiReset, AnsiGreen, cfg.Observability.Health.Addr, AnsiReset))
+	}
+
+	// Admin endpoint
+	if cfg.Observability.Admin.Enabled {
+		endpoints = append(endpoints, fmt.Sprintf("%sAdmin:%s %shttp://localhost%s%s",
+			AnsiDim, AnsiReset, AnsiGreen, cfg.Observability.Admin.Addr, AnsiReset))
+	}
+
+	// Print endpoints or "disabled" message
+	if len(endpoints) > 0 {
+		for _, endpoint := range endpoints {
+			fmt.Fprintf(w, "  %s\n", endpoint)
+		}
+	} else {
+		fmt.Fprintf(w, "  %sAll observability endpoints disabled%s\n", AnsiDim, AnsiReset)
 	}
 }
 
