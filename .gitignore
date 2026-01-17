@@ -1,68 +1,190 @@
-# Binaries
+# =============================================================================
+# FlyDB .gitignore
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Binaries and Executables
+# -----------------------------------------------------------------------------
 /fly-cli
 /flydb
 /flydb-shell
 /flydb-dump
+/flydb-discover
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
 
-# Database files
-*.fdb
-*.wal
-
-# DS_Store files
-.DS_Store
-
-# Test binary, built with `go test -c`
-*.test
-flydb-dump-test
-
-# Output of the go coverage tool
-*.out
-coverage.html
-
-# Go workspace file
-go.work
-go.work.sum
-
-# Dependency directories
-vendor/
-
-# IDE and editor files
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Debug files
-__debug_bin*
-
-# Local environment files
-.env
-.env.local
-.env.*.local
-
-# Log files
-*.log
-logs/
-
-# Data directories (local database files)
-data/
-*.db
-*.sqlite
-*.sqlite3
-
-# Build output
+# -----------------------------------------------------------------------------
+# Build Output
+# -----------------------------------------------------------------------------
 dist/
 build/
 bin/
+out/
 
-# Temporary files
+# -----------------------------------------------------------------------------
+# Database Files
+# -----------------------------------------------------------------------------
+*.fdb
+*.wal
+*.db
+*.sqlite
+*.sqlite3
+data/
+*.db-shm
+*.db-wal
+
+# -----------------------------------------------------------------------------
+# Configuration Files (local overrides)
+# -----------------------------------------------------------------------------
+flydb.conf
+flydb.json
+!flydb.conf.example
+!flydb.json.example
+*.local.conf
+*.local.json
+
+# -----------------------------------------------------------------------------
+# Test Files
+# -----------------------------------------------------------------------------
+*.test
+flydb-dump-test
+coverage.html
+*.out
+*.prof
+
+# -----------------------------------------------------------------------------
+# Go Files
+# -----------------------------------------------------------------------------
+go.work
+go.work.sum
+vendor/
+
+# -----------------------------------------------------------------------------
+# IDE and Editor Files
+# -----------------------------------------------------------------------------
+# JetBrains IDEs (IntelliJ, GoLand, etc.)
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.*.swp
+.*.swo
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Atom
+.atom/
+
+# -----------------------------------------------------------------------------
+# OS Files
+# -----------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+.Trash-*
+
+# -----------------------------------------------------------------------------
+# Environment and Secrets
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+.envrc
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# -----------------------------------------------------------------------------
+# Log Files
+# -----------------------------------------------------------------------------
+*.log
+logs/
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# -----------------------------------------------------------------------------
+# Debug Files
+# -----------------------------------------------------------------------------
+__debug_bin*
+debug
+*.dSYM/
+*.pdb
+
+# -----------------------------------------------------------------------------
+# Temporary Files
+# -----------------------------------------------------------------------------
 tmp/
 temp/
+*.tmp
+*.bak
+*.backup
+*.swp
+*.cache
+
+# -----------------------------------------------------------------------------
+# Documentation Build Output
+# -----------------------------------------------------------------------------
+docs/_build/
+docs/.doctrees/
+site/
+
+# -----------------------------------------------------------------------------
+# Package Manager Files
+# -----------------------------------------------------------------------------
+node_modules/
+package-lock.json
+yarn.lock
+
+# -----------------------------------------------------------------------------
+# Installer Test Files
+# -----------------------------------------------------------------------------
+INSTALLER_FIX_SUMMARY.md
+test_installer.sh
+
+# -----------------------------------------------------------------------------
+# Misc
+# -----------------------------------------------------------------------------
+*.pid
+*.seed
+*.pid.lock
+.npm
+.eslintcache
 
