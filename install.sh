@@ -722,29 +722,58 @@ clone_and_build() {
     spinner_success "Cloned repository"
 
     # Build from the cloned source
-    spinner_start "Building FlyDB binaries (this may take a few minutes)"
-
     cd "$clone_dir" || {
         spinner_error "Failed to enter source directory"
         cleanup_temp_dir
         exit 1
     }
 
-    # Build all binaries
-    if ! make build-all >/dev/null 2>&1; then
-        spinner_error "Build failed"
+    # Create bin directory
+    mkdir -p bin
+
+    # Build flydb daemon
+    spinner_start "Building flydb daemon"
+    if go build -o bin/flydb ./cmd/flydb 2>/dev/null; then
+        spinner_success "Built flydb daemon"
+    else
+        spinner_error "Failed to build flydb daemon"
         echo ""
-        print_error "Failed to build FlyDB"
-        echo ""
-        print_info "Try building manually:"
-        echo "  cd $clone_dir"
-        echo "  make build-all"
+        print_error "Build failed. Please check:"
+        echo "  • Go version: $(go version)"
+        echo "  • Source directory: $clone_dir"
         echo ""
         cleanup_temp_dir
         exit 1
     fi
 
-    spinner_success "Built FlyDB successfully"
+    # Build flydb-shell client
+    spinner_start "Building flydb-shell client"
+    if go build -o bin/flydb-shell ./cmd/flydb-shell 2>/dev/null; then
+        spinner_success "Built flydb-shell client"
+    else
+        spinner_error "Failed to build flydb-shell client"
+        cleanup_temp_dir
+        exit 1
+    fi
+
+    # Build flydb-dump utility
+    spinner_start "Building flydb-dump utility"
+    if go build -o bin/flydb-dump ./cmd/flydb-dump 2>/dev/null; then
+        spinner_success "Built flydb-dump utility"
+    else
+        spinner_error "Failed to build flydb-dump utility"
+        cleanup_temp_dir
+        exit 1
+    fi
+
+    # Build flydb-discover tool (optional)
+    spinner_start "Building flydb-discover tool"
+    if go build -o bin/flydb-discover ./cmd/flydb-discover 2>/dev/null; then
+        spinner_success "Built flydb-discover tool"
+    else
+        spinner_warning "Failed to build flydb-discover (optional)"
+    fi
+
     echo ""
 
     # Return to original directory
