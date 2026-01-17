@@ -335,8 +335,10 @@ print_help() {
     echo -e "${BOLD}USAGE:${RESET}"
     echo "    $0 [OPTIONS]"
     echo ""
-    echo "    # Remote installation (download pre-built binaries)"
-    echo "    curl -sSL https://get.flydb.dev | bash"
+    echo "    # Installation from source (required - no pre-built binaries yet)"
+    echo "    git clone https://github.com/${GITHUB_REPO}.git"
+    echo "    cd flydb"
+    echo "    ./install.sh --from-source"
     echo ""
     echo -e "${BOLD}MODES:${RESET}"
     echo "    Interactive (default):  Run without arguments for guided installation"
@@ -346,7 +348,10 @@ print_help() {
     echo "    By default, the script auto-detects whether to build from source or"
     echo "    download pre-built binaries:"
     echo "    - If run from a FlyDB source directory with Go installed: builds from source"
-    echo "    - Otherwise: downloads pre-built binaries from GitHub releases"
+    echo "    - Otherwise: attempts to download pre-built binaries from GitHub releases"
+    echo ""
+    echo "    ${YELLOW}NOTE:${RESET} Pre-built binaries are not yet available. You must build from source."
+    echo "    Clone the repository and run: ./install.sh --from-source"
     echo ""
     echo -e "${BOLD}INSTALLATION OPTIONS:${RESET}"
     echo -e "    ${BOLD}--prefix <path>${RESET}           Installation directory (default: /usr/local or ~/.local)"
@@ -605,13 +610,20 @@ detect_install_mode() {
             RESOLVED_INSTALL_MODE="source"
             print_info "Detected local source directory - will build from source"
         else
-            print_warning "Source directory detected but Go not found - will download binaries"
-            RESOLVED_INSTALL_MODE="binary"
+            print_error "Source directory detected but Go not found"
+            echo ""
+            print_info "Please install Go 1.21 or later:"
+            echo "  • macOS: brew install go"
+            echo "  • Linux: https://go.dev/doc/install"
+            echo ""
+            exit 1
         fi
     else
-        # Not in source directory - download pre-built binaries
+        # Not in source directory - try to download pre-built binaries
+        # (will fail with helpful message if binaries aren't available)
         RESOLVED_INSTALL_MODE="binary"
-        print_info "Will download pre-built binaries from GitHub"
+        print_warning "Not in FlyDB source directory - will attempt to download binaries"
+        print_info "Note: Pre-built binaries are not yet available. Clone the repo to build from source."
     fi
 }
 
@@ -669,10 +681,22 @@ download_binaries() {
         echo ""
         print_error "Could not download from: $download_url"
         echo ""
-        print_info "Possible solutions:"
-        echo "  1. Check if version v${version} exists for ${OS}/${ARCH}"
-        echo "  2. Check your internet connection"
-        echo "  3. Build from source: git clone https://github.com/${GITHUB_REPO}.git && cd flydb && ./install.sh --from-source"
+        print_warning "Pre-built binaries are not available for this version/platform."
+        echo ""
+        print_info "FlyDB must be built from source. Please use one of these options:"
+        echo ""
+        echo "  ${BOLD}Option 1: Clone and build from source${RESET}"
+        echo "    git clone https://github.com/${GITHUB_REPO}.git"
+        echo "    cd flydb"
+        echo "    ./install.sh --from-source"
+        echo ""
+        echo "  ${BOLD}Option 2: If you're already in the source directory${RESET}"
+        echo "    ./install.sh --from-source"
+        echo ""
+        echo "  ${BOLD}Requirements:${RESET}"
+        echo "    • Go 1.21 or later"
+        echo "    • Git (for cloning)"
+        echo ""
         cleanup_temp_dir
         exit 1
     fi
