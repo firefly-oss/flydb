@@ -12,7 +12,7 @@ _/ ____\  | ___.__. __| _/\_ |__
   <p><strong>The Lightweight, Embeddable SQL Database for Go Applications</strong></p>
 
   <p>
-    <a href="https://github.com/firefly-oss/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.14-blue.svg" alt="Version"></a>
+    <a href="https://github.com/firefly-oss/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.17-blue.svg" alt="Version"></a>
     <a href="https://github.com/firefly-oss/flydb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="License"></a>
     <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go" alt="Go Version"></a>
     <a href="https://github.com/firefly-oss/flydb"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg" alt="Platform"></a>
@@ -32,6 +32,7 @@ Whether you are building microservices that need local persistence, edge applica
 - **Zero Dependencies** — Pure Go implementation with no CGO. Deploy a single binary anywhere Go runs.
 - **Production Storage Engine** — 8KB slotted pages, LRU-K buffer pool, and write-ahead logging deliver the durability and performance you expect from a real database.
 - **Security by Default** — TLS 1.2+ for connections, AES-256-GCM encryption at rest, and row-level security policies protect sensitive data without additional configuration.
+- **Comprehensive Audit Trail** — Track all database operations, authentication events, and administrative actions for compliance, security, and debugging.
 - **Scale When Ready** — Start embedded, then seamlessly transition to cluster mode with automatic failover as your needs grow.
 - **Full SQL Support** — Joins, subqueries, transactions, stored procedures, triggers, and prepared statements. No compromises on query capabilities.
 - **JSONB Support** — Store and query semi-structured JSON data with PostgreSQL-compatible operators (`->`, `->>`, `@>`, `<@`, `?`) and functions.

@@ -239,6 +239,7 @@ flydb/mydb[sql]>          -- SQL mode (non-default database)
 | `internal/banner/` | Startup banner display |
 | `internal/config/` | Configuration management with YAML support |
 | `internal/wizard/` | Interactive setup wizard |
+| `internal/audit/` | Comprehensive audit trail system for compliance and security |
 | `pkg/cli/` | CLI utilities (colors, formatting, prompts) |
 
 ## Data Flow
@@ -547,6 +548,7 @@ FlyDB uses a key prefix convention to organize data in the KVStore:
 | `_sys_users:<username>` | User credentials | `_sys_users:alice` |
 | `_sys_privs:<user>:<table>` | User permissions | `_sys_privs:alice:orders` |
 | `_sys_db_privs:<user>:<db>` | Database permissions | `_sys_db_privs:alice:analytics` |
+| `_audit:<timestamp>:<id>` | Audit log entries | `_audit:1705507200000000000:1` |
 | `_sys_db_meta` | Database metadata | `_sys_db_meta` |
 | `index:<table>:<column>` | Index metadata | `index:users:email` |
 | `proc:<name>` | Stored procedure | `proc:get_user` |
@@ -629,6 +631,181 @@ Or via environment variables:
 - `FLYDB_STORAGE_ENGINE`: "memory" or "disk"
 - `FLYDB_BUFFER_POOL_SIZE`: Number of pages
 - `FLYDB_CHECKPOINT_SECS`: Checkpoint interval
+
+## Audit Trail System
+
+FlyDB provides a comprehensive audit trail system for tracking all database operations, authentication events, and administrative actions. This is essential for security, compliance, and debugging.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    SQL Executor                                 │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  executeCreate(), executeInsert(), executeUpdate(), ...  │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│                              ▼                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │           logAuditEvent()                                │   │
+│  │  • Captures operation details                            │   │
+│  │  • Records username, database, client IP                 │   │
+│  │  • Tracks duration and status                            │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Audit Manager                                │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Buffered Channel (async logging)                        │   │
+│  │  • Non-blocking event submission                         │   │
+│  │  • Batch processing for performance                      │   │
+│  │  • Configurable buffer size                              │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│                              ▼                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Event Filtering                                         │   │
+│  │  • Filter by event type (DDL, DML, DCL, etc.)            │   │
+│  │  • Configurable SELECT logging                           │   │
+│  │  • Authentication event tracking                         │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│                              ▼                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Storage (KVStore)                                       │   │
+│  │  Key: _audit:<timestamp>:<id>                            │   │
+│  │  Value: JSON-encoded audit event                         │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Event Types
+
+| Category | Event Types | Default Logging |
+|----------|-------------|-----------------|
+| **Authentication** | LOGIN, LOGOUT, AUTH_FAILED | Enabled |
+| **DDL** | CREATE_TABLE, DROP_TABLE, ALTER_TABLE, CREATE_INDEX, DROP_INDEX, CREATE_VIEW, DROP_VIEW, TRUNCATE_TABLE | Enabled |
+| **DML** | INSERT, UPDATE, DELETE | Enabled |
+| **DML (Read)** | SELECT | Disabled (can be verbose) |
+| **DCL** | GRANT, REVOKE, CREATE_USER, ALTER_USER, DROP_USER, CREATE_ROLE, DROP_ROLE | Enabled |
+| **Transactions** | BEGIN, COMMIT, ROLLBACK | Enabled |
+| **Administrative** | BACKUP, RESTORE, CHECKPOINT, VACUUM | Enabled |
+| **Cluster** | NODE_JOIN, NODE_LEAVE, LEADER_ELECTION, FAILOVER | Enabled |
+| **Database** | CREATE_DATABASE, DROP_DATABASE, USE_DATABASE | Enabled |
+
+### Audit Log Schema
+
+Each audit log entry contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | INT64 | Unique event identifier |
+| `timestamp` | TIMESTAMP | When the event occurred |
+| `event_type` | TEXT | Type of event (see Event Types) |
+| `username` | TEXT | User who performed the action |
+| `database` | TEXT | Database context |
+| `object_type` | TEXT | Type of object (table, index, user, etc.) |
+| `object_name` | TEXT | Name of the object |
+| `operation` | TEXT | Full SQL statement or operation |
+| `client_addr` | TEXT | Client IP address |
+| `session_id` | TEXT | Session identifier |
+| `status` | TEXT | SUCCESS or FAILED |
+| `error_message` | TEXT | Error details if failed |
+| `duration_ms` | INT64 | Operation duration in milliseconds |
+| `metadata` | JSONB | Additional context (e.g., node_id in cluster mode) |
+
+### Configuration
+
+Audit logging is configured via:
+
+```yaml
+audit_enabled: true              # Enable/disable audit logging
+audit_log_ddl: true              # Log DDL operations
+audit_log_dml: true              # Log DML operations
+audit_log_select: false          # Log SELECT queries (can be verbose)
+audit_log_auth: true             # Log authentication events
+audit_log_admin: true            # Log administrative operations
+audit_log_cluster: true          # Log cluster events
+audit_retention_days: 90         # Days to retain logs (0 = forever)
+audit_buffer_size: 1000          # Event buffer size
+audit_flush_interval_sec: 5      # Flush interval in seconds
+```
+
+### Cluster Mode
+
+In cluster mode, audit logs are distributed:
+
+- Each node maintains its own audit log
+- Audit events include `node_id` in metadata
+- Queries can aggregate logs from all nodes
+- Export functionality works across the cluster
+
+```
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│   Node 1    │  │   Node 2    │  │   Node 3    │
+│  Audit Mgr  │  │  Audit Mgr  │  │  Audit Mgr  │
+│  Local Logs │  │  Local Logs │  │  Local Logs │
+└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
+       │                │                │
+       └────────────────┼────────────────┘
+                        │
+                        ▼
+              ┌─────────────────┐
+              │ Cluster Audit   │
+              │ Aggregator      │
+              │ • Query all     │
+              │ • Export all    │
+              │ • Statistics    │
+              └─────────────────┘
+```
+
+### CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `\audit` | Show recent audit logs |
+| `\audit-user <username>` | Show logs for specific user |
+| `\audit-export <file> [format]` | Export logs (json, csv, sql) |
+| `\audit-stats` | Show audit statistics |
+| `INSPECT AUDIT [WHERE ...] [LIMIT n]` | Query audit logs with filters |
+| `INSPECT AUDIT STATS` | Get detailed statistics |
+| `EXPORT AUDIT TO '<file>' FORMAT <format>` | Export audit logs |
+
+### SDK Integration
+
+The SDK provides a type-safe audit client:
+
+```go
+// Create audit client
+auditClient := sdk.NewAuditClient(session)
+
+// Query recent logs
+logs, err := auditClient.GetRecentLogs(100)
+
+// Query by user
+logs, err := auditClient.GetLogsByUser("admin", 50)
+
+// Query by time range
+logs, err := auditClient.GetLogsInTimeRange(startTime, endTime, 100)
+
+// Export logs
+err := auditClient.ExportLogs("audit.json", sdk.AuditFormatJSON, queryOpts)
+
+// Get statistics
+stats, err := auditClient.GetStatistics()
+```
+
+### Performance
+
+The audit system is designed for minimal performance impact:
+
+- **Asynchronous logging**: Events are buffered and processed in background
+- **Batch writes**: Multiple events are written together
+- **Non-blocking**: Failed audit writes don't block operations
+- **Configurable filtering**: Reduce volume by disabling verbose events
+- **Automatic cleanup**: Old logs are purged based on retention policy
 
 ## Thread Safety Model
 

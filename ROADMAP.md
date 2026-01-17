@@ -2,7 +2,7 @@
 
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
-**Version:** 01.26.16
+**Version:** 01.26.17
 **Last Updated:** January 17, 2026
 
 ---
@@ -53,6 +53,11 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Data Directory Config | `FLYDB_DATA_DIR` env var, default `/var/lib/flydb` | 01.26.4 |
 | Role-Based Access Control | CREATE/DROP ROLE, GRANT/REVOKE ROLE, built-in roles | 01.26.5 |
 | RBAC Inspection | INSPECT ROLES, ROLE, USER, USER ROLES, USER PRIVILEGES | 01.26.5 |
+| Audit Trail | Comprehensive audit logging for all database operations | 01.26.17 |
+| Audit Log Querying | INSPECT AUDIT with filtering, time ranges, user/event filters | 01.26.17 |
+| Audit Log Export | Export to JSON, CSV, SQL formats | 01.26.17 |
+| Audit Statistics | Detailed statistics on audit events, users, and operations | 01.26.17 |
+| Cluster Audit Aggregation | Distributed audit log querying across cluster nodes | 01.26.17 |
 
 ### INSERT Enhancements
 

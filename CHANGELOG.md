@@ -7,6 +7,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [01.26.17] - 2026-01-17
+
+### Audit Trail Feature
+
+This release introduces a comprehensive audit trail system for FlyDB, providing complete visibility into all database operations, authentication events, and administrative actions for security, compliance, and debugging purposes.
+
+### Added
+
+#### Comprehensive Audit Trail System
+
+**MAJOR FEATURE**: Complete audit logging and trail management for all database operations.
+
+- **Audit Event Tracking**: Automatic logging of all database operations
+  - Authentication events: LOGIN, LOGOUT, AUTH_FAILED
+  - DDL operations: CREATE_TABLE, DROP_TABLE, ALTER_TABLE, CREATE_INDEX, DROP_INDEX
+  - DML operations: INSERT, UPDATE, DELETE, SELECT (configurable)
+  - DCL operations: GRANT, REVOKE, CREATE_USER, ALTER_USER, DROP_USER
+  - Administrative operations: BACKUP, RESTORE, CHECKPOINT, VACUUM
+  - Cluster events: NODE_JOIN, NODE_LEAVE, LEADER_ELECTION, FAILOVER
+
+- **Audit Log Storage**: Dedicated system storage with comprehensive metadata
+  - Event ID, timestamp, event type, username, database context
+  - Object type and name, full operation details
+  - Client IP address, session ID, operation status
+  - Error messages for failed operations, duration in milliseconds
+  - Extensible metadata field for additional context
+
+- **CLI Commands**: New shell commands for audit trail management
+  - `\audit` - Show recent audit logs (shortcut for INSPECT AUDIT)
+  - `\audit-user <username>` - Show audit logs for specific user
+  - `\audit-export <filename> [format]` - Export audit logs (JSON, CSV, SQL)
+  - `\audit-stats` - Show audit statistics
+  - `INSPECT AUDIT [WHERE ...] [LIMIT n]` - Query audit logs with filters
+  - `INSPECT AUDIT STATS` - Get detailed audit statistics
+  - `EXPORT AUDIT TO '<file>' FORMAT <format>` - Export audit logs
+
+- **SDK Integration**: Full audit trail support in SDK
+  - `AuditClient` for querying and managing audit logs
+  - Type-safe audit event types and status enums
+  - Query methods: GetRecentLogs, GetLogsByUser, GetLogsByEventType, GetFailedLogs
+  - Time-range queries: GetLogsInTimeRange
+  - Export functionality with multiple formats (JSON, CSV, SQL)
+  - Statistics retrieval: GetStatistics
+
+- **Cluster Support**: Audit trail works seamlessly in both modes
+  - Standalone mode: Local audit log storage and querying
+  - Cluster mode: Distributed audit log aggregation across all nodes
+  - Per-node audit logs with cluster-wide query capability
+  - Automatic node identification in audit metadata
+
+- **Configuration Options**: Flexible audit logging control
+  - `audit_enabled` - Enable/disable audit logging (default: true)
+  - `audit_log_ddl` - Log DDL operations (default: true)
+  - `audit_log_dml` - Log DML operations (default: true)
+  - `audit_log_select` - Log SELECT queries (default: false, can be verbose)
+  - `audit_log_auth` - Log authentication events (default: true)
+  - `audit_log_admin` - Log administrative operations (default: true)
+  - `audit_log_cluster` - Log cluster events (default: true)
+  - `audit_retention_days` - Days to retain audit logs (default: 90, 0 = forever)
+
+- **Performance Optimizations**: Minimal impact on database operations
+  - Asynchronous logging with buffered channel
+  - Batch inserts for high-throughput scenarios
+  - Configurable event filtering
+  - Automatic log rotation and cleanup
+  - Non-blocking audit event submission
+
+- **Export Formats**: Multiple export formats for compliance and analysis
+  - JSON: Structured format for programmatic processing
+  - CSV: Spreadsheet-compatible format for analysis
+  - SQL: INSERT statements for importing into other databases
+
+**Implementation Details**:
+- Added `internal/audit/audit.go` - Core audit manager and event types
+- Added `internal/audit/export.go` - Export functionality (JSON, CSV, SQL)
+- Added `internal/audit/sql.go` - SQL query generation and helpers
+- Added `internal/audit/adapter.go` - SQL executor integration adapter
+- Added `internal/audit/cluster.go` - Cluster-wide audit log aggregation
+- Added `internal/sdk/audit.go` - SDK audit client and types
+- Updated `internal/sql/executor.go` - Integrated audit logging hooks
+- Updated `cmd/flydb-shell/main.go` - Added audit CLI commands and help
+
+**Usage Examples**:
+
+Query recent audit logs:
+```sql
+INSPECT AUDIT LIMIT 50
+```
+
+Query logs for specific user:
+```sql
+INSPECT AUDIT WHERE username = 'admin' LIMIT 100
+```
+
+Export audit logs:
+```sql
+EXPORT AUDIT TO 'audit_2026-01.json' FORMAT json
+```
+
+Get audit statistics:
+```sql
+INSPECT AUDIT STATS
+```
+
+---
+
 ## [01.26.16] - 2026-01-17
 
 ### Security & User Experience Improvements
