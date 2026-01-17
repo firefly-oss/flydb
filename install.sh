@@ -23,8 +23,8 @@ set -euo pipefail
 # Configuration and Defaults
 # =============================================================================
 
-readonly SCRIPT_VERSION="01.26.13"
-readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.13}"
+readonly SCRIPT_VERSION="01.26.16"
+readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.16}"
 readonly GITHUB_REPO="firefly-oss/flydb"
 readonly DOWNLOAD_BASE_URL="https://github.com/${GITHUB_REPO}/releases/download"
 
