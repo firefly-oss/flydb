@@ -689,18 +689,57 @@ func main() {
 			}
 		})
 
+		// Start service discovery if enabled
+		var discoveryService *cluster.DiscoveryService
+		if cfg.DiscoveryEnabled {
+			discoveryConfig := cluster.DiscoveryConfig{
+				NodeID:      clusterConfig.NodeID,
+				ClusterID:   cfg.DiscoveryClusterID,
+				ClusterAddr: fmt.Sprintf("%s:%d", getHostname(), cfg.ClusterPort),
+				RaftAddr:    fmt.Sprintf("%s:%d", getHostname(), cfg.ReplPort),
+				HTTPAddr:    fmt.Sprintf("%s:%d", getHostname(), cfg.Port),
+				Version:     "1.0.0", // TODO: Get from build info
+				Enabled:     true,
+			}
+			discoveryService = cluster.NewDiscoveryService(discoveryConfig)
+			if err := discoveryService.Start(); err != nil {
+				log.Warn("Failed to start discovery service", "error", err)
+			} else {
+				log.Info("Service discovery started", "node_id", discoveryConfig.NodeID)
+
+				// If no seeds configured, try to discover peers
+				if len(cfg.ClusterPeers) == 0 {
+					log.Info("No seeds configured, attempting peer discovery...")
+					time.Sleep(2 * time.Second) // Give time for mDNS to propagate
+					nodes, err := discoveryService.DiscoverNodes(5 * time.Second)
+					if err != nil {
+						log.Warn("Peer discovery failed", "error", err)
+					} else if len(nodes) > 0 {
+						log.Info("Discovered peers via mDNS", "count", len(nodes))
+						// Add discovered nodes as seeds
+						for _, node := range nodes {
+							log.Info("Discovered peer", "node_id", node.NodeID, "addr", node.ClusterAddr)
+						}
+					}
+				}
+			}
+		}
+
 		// Start the unified cluster manager
 		if err := clusterMgr.Start(); err != nil {
 			log.Error("Failed to start unified cluster manager", "error", err)
 			os.Exit(1)
 		}
 
-		// Handle graceful shutdown of cluster manager
+		// Handle graceful shutdown of cluster manager and discovery
 		go func() {
 			sigCh := make(chan os.Signal, 1)
 			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 			<-sigCh
 			log.Info("Shutting down unified cluster manager...")
+			if discoveryService != nil {
+				discoveryService.Stop()
+			}
 			clusterMgr.Stop()
 		}()
 
