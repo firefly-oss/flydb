@@ -95,6 +95,7 @@ package sql
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -1115,16 +1116,18 @@ func (p *Parser) parseColumnList() ([]string, error) {
 
 // parseInsert parses an INSERT statement.
 // Syntax:
-//   INSERT INTO <table> VALUES (<val1>, <val2>, ...)
-//   INSERT INTO <table> (<col1>, <col2>) VALUES (<val1>, <val2>)
-//   INSERT INTO <table> VALUES (<val1>, <val2>), (<val3>, <val4>)
-//   INSERT INTO <table> (<col1>, <col2>) VALUES (<val1>, <val2>) ON CONFLICT DO NOTHING
-//   INSERT INTO <table> (<col1>, <col2>) VALUES (<val1>, <val2>) ON CONFLICT DO UPDATE SET <col>=<val>
+//
+//	INSERT INTO <table> VALUES (<val1>, <val2>, ...)
+//	INSERT INTO <table> (<col1>, <col2>) VALUES (<val1>, <val2>)
+//	INSERT INTO <table> VALUES (<val1>, <val2>), (<val3>, <val4>)
+//	INSERT INTO <table> (<col1>, <col2>) VALUES (<val1>, <val2>) ON CONFLICT DO NOTHING
+//	INSERT INTO <table> (<col1>, <col2>) VALUES (<val1>, <val2>) ON CONFLICT DO UPDATE SET <col>=<val>
 //
 // Examples:
-//   INSERT INTO users VALUES (1, 'Alice', 'alice@example.com')
-//   INSERT INTO users (id, name) VALUES (1, 'Alice')
-//   INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')
+//
+//	INSERT INTO users VALUES (1, 'Alice', 'alice@example.com')
+//	INSERT INTO users (id, name) VALUES (1, 'Alice')
+//	INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')
 //
 // Returns an InsertStmt AST node.
 func (p *Parser) parseInsert() (*InsertStmt, error) {
@@ -1981,8 +1984,9 @@ func (p *Parser) parseReleaseSavepoint() (*ReleaseSavepointStmt, error) {
 // Syntax: CREATE INDEX [IF NOT EXISTS] <name> ON <table> (<column>)
 //
 // Examples:
-//   CREATE INDEX idx_users_email ON users (email)
-//   CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)
+//
+//	CREATE INDEX idx_users_email ON users (email)
+//	CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)
 //
 // Returns a CreateIndexStmt AST node.
 func (p *Parser) parseCreateIndex() (*CreateIndexStmt, error) {
@@ -2154,7 +2158,6 @@ func (p *Parser) parseDeallocate() (*DeallocateStmt, error) {
 		Name: name,
 	}, nil
 }
-
 
 // isAggregateFunction checks if a keyword is an aggregate function.
 func isAggregateFunction(keyword string) bool {
@@ -3252,9 +3255,10 @@ func (p *Parser) parseAlterTable() (*AlterTableStmt, error) {
 // Syntax: CREATE [OR REPLACE] VIEW [IF NOT EXISTS] <view_name> AS SELECT ...
 //
 // Examples:
-//   CREATE VIEW active_users AS SELECT * FROM users WHERE status = 'active'
-//   CREATE VIEW IF NOT EXISTS active_users AS SELECT * FROM users WHERE status = 'active'
-//   CREATE OR REPLACE VIEW active_users AS SELECT * FROM users WHERE status = 'active'
+//
+//	CREATE VIEW active_users AS SELECT * FROM users WHERE status = 'active'
+//	CREATE VIEW IF NOT EXISTS active_users AS SELECT * FROM users WHERE status = 'active'
+//	CREATE OR REPLACE VIEW active_users AS SELECT * FROM users WHERE status = 'active'
 //
 // Returns a CreateViewStmt AST node.
 func (p *Parser) parseCreateView() (*CreateViewStmt, error) {
@@ -3329,9 +3333,10 @@ func (p *Parser) parseCreateView() (*CreateViewStmt, error) {
 // Syntax: CREATE [OR REPLACE] TRIGGER [IF NOT EXISTS] <trigger_name> BEFORE|AFTER INSERT|UPDATE|DELETE ON <table_name> FOR EACH ROW EXECUTE <action_sql>
 //
 // Examples:
-//   CREATE TRIGGER log_insert AFTER INSERT ON users FOR EACH ROW EXECUTE INSERT INTO audit_log VALUES ('insert', 'users')
-//   CREATE TRIGGER IF NOT EXISTS log_insert AFTER INSERT ON users FOR EACH ROW EXECUTE INSERT INTO audit_log VALUES ('insert', 'users')
-//   CREATE OR REPLACE TRIGGER log_insert AFTER INSERT ON users FOR EACH ROW EXECUTE INSERT INTO audit_log VALUES ('insert', 'users')
+//
+//	CREATE TRIGGER log_insert AFTER INSERT ON users FOR EACH ROW EXECUTE INSERT INTO audit_log VALUES ('insert', 'users')
+//	CREATE TRIGGER IF NOT EXISTS log_insert AFTER INSERT ON users FOR EACH ROW EXECUTE INSERT INTO audit_log VALUES ('insert', 'users')
+//	CREATE OR REPLACE TRIGGER log_insert AFTER INSERT ON users FOR EACH ROW EXECUTE INSERT INTO audit_log VALUES ('insert', 'users')
 //
 // Returns a CreateTriggerStmt AST node.
 func (p *Parser) parseCreateTrigger() (*CreateTriggerStmt, error) {
@@ -3456,7 +3461,6 @@ func (p *Parser) parseCreateTrigger() (*CreateTriggerStmt, error) {
 		ActionSQL:   actionSQL,
 	}, nil
 }
-
 
 // =============================================================================
 // Database Management Parsing

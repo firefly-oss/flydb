@@ -55,33 +55,33 @@ Audit logging can be configured via:
 Usage:
 ======
 
-  // Initialize audit manager
-  auditMgr := audit.NewAuditManager(store, config)
+	// Initialize audit manager
+	auditMgr := audit.NewAuditManager(store, config)
 
-  // Log an event
-  auditMgr.LogEvent(audit.Event{
-      EventType:  audit.EventTypeCreateTable,
-      Username:   "admin",
-      Database:   "mydb",
-      ObjectType: "table",
-      ObjectName: "users",
-      Operation:  "CREATE TABLE users (id INT, name TEXT)",
-      ClientAddr: "192.168.1.100",
-      SessionID:  "sess-123",
-      Status:     audit.StatusSuccess,
-  })
+	// Log an event
+	auditMgr.LogEvent(audit.Event{
+	    EventType:  audit.EventTypeCreateTable,
+	    Username:   "admin",
+	    Database:   "mydb",
+	    ObjectType: "table",
+	    ObjectName: "users",
+	    Operation:  "CREATE TABLE users (id INT, name TEXT)",
+	    ClientAddr: "192.168.1.100",
+	    SessionID:  "sess-123",
+	    Status:     audit.StatusSuccess,
+	})
 
-  // Query audit logs
-  logs, err := auditMgr.QueryLogs(audit.QueryOptions{
-      StartTime: time.Now().Add(-24 * time.Hour),
-      EndTime:   time.Now(),
-      Username:  "admin",
-      EventType: audit.EventTypeCreateTable,
-      Limit:     100,
-  })
+	// Query audit logs
+	logs, err := auditMgr.QueryLogs(audit.QueryOptions{
+	    StartTime: time.Now().Add(-24 * time.Hour),
+	    EndTime:   time.Now(),
+	    Username:  "admin",
+	    EventType: audit.EventTypeCreateTable,
+	    Limit:     100,
+	})
 
-  // Export audit logs
-  err := auditMgr.ExportLogs("audit_export.json", audit.FormatJSON, queryOpts)
+	// Export audit logs
+	err := auditMgr.ExportLogs("audit_export.json", audit.FormatJSON, queryOpts)
 
 Thread Safety:
 ==============
@@ -127,13 +127,13 @@ const (
 	EventTypeAuthFailed EventType = "AUTH_FAILED"
 
 	// DDL events
-	EventTypeCreateTable EventType = "CREATE_TABLE"
-	EventTypeDropTable   EventType = "DROP_TABLE"
-	EventTypeAlterTable  EventType = "ALTER_TABLE"
-	EventTypeCreateIndex EventType = "CREATE_INDEX"
-	EventTypeDropIndex   EventType = "DROP_INDEX"
-	EventTypeCreateView  EventType = "CREATE_VIEW"
-	EventTypeDropView    EventType = "DROP_VIEW"
+	EventTypeCreateTable   EventType = "CREATE_TABLE"
+	EventTypeDropTable     EventType = "DROP_TABLE"
+	EventTypeAlterTable    EventType = "ALTER_TABLE"
+	EventTypeCreateIndex   EventType = "CREATE_INDEX"
+	EventTypeDropIndex     EventType = "DROP_INDEX"
+	EventTypeCreateView    EventType = "CREATE_VIEW"
+	EventTypeDropView      EventType = "DROP_VIEW"
 	EventTypeTruncateTable EventType = "TRUNCATE_TABLE"
 
 	// DML events
@@ -204,16 +204,16 @@ type Event struct {
 
 // Config holds audit configuration.
 type Config struct {
-	Enabled          bool  `json:"enabled"`
-	LogDDL           bool  `json:"log_ddl"`
-	LogDML           bool  `json:"log_dml"`
-	LogSelect        bool  `json:"log_select"`
-	LogAuth          bool  `json:"log_auth"`
-	LogAdmin         bool  `json:"log_admin"`
-	LogCluster       bool  `json:"log_cluster"`
-	RetentionDays    int   `json:"retention_days"`
-	BufferSize       int   `json:"buffer_size"`
-	FlushIntervalSec int   `json:"flush_interval_sec"`
+	Enabled          bool `json:"enabled"`
+	LogDDL           bool `json:"log_ddl"`
+	LogDML           bool `json:"log_dml"`
+	LogSelect        bool `json:"log_select"`
+	LogAuth          bool `json:"log_auth"`
+	LogAdmin         bool `json:"log_admin"`
+	LogCluster       bool `json:"log_cluster"`
+	RetentionDays    int  `json:"retention_days"`
+	BufferSize       int  `json:"buffer_size"`
+	FlushIntervalSec int  `json:"flush_interval_sec"`
 }
 
 // DefaultConfig returns default audit configuration.
@@ -402,42 +402,46 @@ func (m *Manager) QueryLogs(opts QueryOptions) ([]Event, error) {
 
 	// Scan audit log entries
 	prefix := "_audit:"
-	err := m.store.Scan(prefix, func(key string, value []byte) bool {
+	results, err := m.store.Scan(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan audit logs: %w", err)
+	}
+
+	for key, value := range results {
 		var event Event
 		if err := json.Unmarshal(value, &event); err != nil {
 			m.logger.Warn("Failed to unmarshal audit event", "key", key, "error", err)
-			return true // Continue scanning
+			continue
 		}
 
 		// Apply filters
 		if !opts.StartTime.IsZero() && event.Timestamp.Before(opts.StartTime) {
-			return true
+			continue
 		}
 		if !opts.EndTime.IsZero() && event.Timestamp.After(opts.EndTime) {
-			return true
+			continue
 		}
 		if opts.Username != "" && event.Username != opts.Username {
-			return true
+			continue
 		}
 		if opts.Database != "" && event.Database != opts.Database {
-			return true
+			continue
 		}
 		if opts.EventType != "" && event.EventType != opts.EventType {
-			return true
+			continue
 		}
 		if opts.Status != "" && event.Status != opts.Status {
-			return true
+			continue
 		}
 		if opts.ObjectType != "" && event.ObjectType != opts.ObjectType {
-			return true
+			continue
 		}
 		if opts.ObjectName != "" && event.ObjectName != opts.ObjectName {
-			return true
+			continue
 		}
 
 		events = append(events, event)
-		return true
-	})
+	}
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan audit logs: %w", err)
@@ -473,6 +477,11 @@ func (m *Manager) ExportLogs(filename string, format ExportFormat, opts QueryOpt
 		return err
 	}
 
+	return m.ExportEvents(filename, format, events)
+}
+
+// ExportEvents exports a specific set of events to a file.
+func (m *Manager) ExportEvents(filename string, format ExportFormat, events []Event) error {
 	switch format {
 	case FormatJSON:
 		return m.exportJSON(filename, events)
@@ -527,10 +536,15 @@ func (m *Manager) CleanupOldLogs() error {
 
 	count := 0
 	prefix := "_audit:"
-	err := m.store.Scan(prefix, func(key string, value []byte) bool {
+	results, err := m.store.Scan(prefix)
+	if err != nil {
+		return fmt.Errorf("failed to scan audit logs: %w", err)
+	}
+
+	for key, value := range results {
 		var event Event
 		if err := json.Unmarshal(value, &event); err != nil {
-			return true
+			continue
 		}
 
 		if event.Timestamp.Before(cutoff) {
@@ -540,8 +554,7 @@ func (m *Manager) CleanupOldLogs() error {
 				count++
 			}
 		}
-		return true
-	})
+	}
 
 	if err != nil {
 		return fmt.Errorf("failed to cleanup audit logs: %w", err)
@@ -550,4 +563,3 @@ func (m *Manager) CleanupOldLogs() error {
 	m.logger.Info("Audit log cleanup complete", "deleted_count", count)
 	return nil
 }
-

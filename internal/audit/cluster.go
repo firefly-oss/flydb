@@ -170,10 +170,8 @@ func (cam *ClusterAuditManager) ExportLogsAcrossCluster(filename string, format 
 		return err
 	}
 
-	// Export using local manager's export functionality
-	// Create a temporary manager with the aggregated logs
-	// For now, we'll use the local manager's export methods
-	return cam.localManager.ExportLogs(filename, format, opts)
+	// Export using local manager's export functionality with aggregated logs
+	return cam.localManager.ExportEvents(filename, format, allLogs)
 }
 
 // GetClusterStatistics retrieves audit statistics from all cluster nodes.
@@ -212,4 +210,3 @@ func (cam *ClusterAuditManager) GetLocalManager() *Manager {
 func (cam *ClusterAuditManager) Stop() {
 	cam.localManager.Stop()
 }
-

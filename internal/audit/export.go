@@ -117,7 +117,8 @@ func (m *Manager) exportSQL(filename string, events []Event) error {
 	fmt.Fprintln(file, "  error_message TEXT,")
 	fmt.Fprintln(file, "  duration_ms BIGINT,")
 	fmt.Fprintln(file, "  metadata JSONB")
-	fmt.Fprintln(file, ");\n")
+	fmt.Fprintln(file, ");")
+	fmt.Fprintln(file)
 
 	// Write INSERT statements
 	for _, event := range events {
@@ -155,4 +156,3 @@ func (m *Manager) exportSQL(filename string, events []Event) error {
 	m.logger.Info("Exported audit logs to SQL", "filename", filename, "count", len(events))
 	return nil
 }
-

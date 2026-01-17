@@ -132,11 +132,38 @@ import (
 // AuditManager defines the interface for audit logging.
 // This allows the executor to log audit events without depending on the audit package.
 type AuditManager interface {
-	LogEvent(event AuditEvent)
+	LogEvent(event interface{})
+	QueryLogs(opts interface{}) ([]interface{}, error)
+	ExportLogs(filename string, format string, opts interface{}) error
+	GetStats() (map[string]interface{}, error)
+}
+
+// DBManager defines the interface for database management operations.
+type DBManager interface {
+	CreateDatabaseWithOptions(name string, opts storage.CreateDatabaseOptions) error
+	DropDatabase(name string) error
+	ListDatabases() []string
+	GetDatabaseMetadata(name string) (*storage.DatabaseMetadata, error)
+}
+
+// AuditQueryOptions specifies options for querying audit logs.
+type AuditQueryOptions struct {
+	StartTime  time.Time
+	EndTime    time.Time
+	Username   string
+	Database   string
+	EventType  string
+	Status     string
+	ObjectType string
+	ObjectName string
+	Limit      int
+	Offset     int
 }
 
 // AuditEvent represents an audit log entry.
 type AuditEvent struct {
+	ID           int64
+	Timestamp    time.Time
 	EventType    string
 	Username     string
 	Database     string
@@ -225,6 +252,9 @@ type Executor struct {
 	// queryCache caches SELECT query results for improved read performance.
 	// Cache is automatically invalidated on INSERT, UPDATE, DELETE operations.
 	queryCache *cache.QueryCache
+
+	// dbMgr manages database-level operations (CREATE/DROP DATABASE).
+	dbMgr DBManager
 }
 
 // aggState holds the accumulator state for aggregate function computation.
@@ -309,6 +339,11 @@ func (e *Executor) InvalidateCache(tableName string) {
 // SetAuditManager sets the audit manager for logging.
 func (e *Executor) SetAuditManager(auditMgr AuditManager) {
 	e.auditMgr = auditMgr
+}
+
+// SetDatabaseManager sets the database manager for this executor.
+func (e *Executor) SetDatabaseManager(dbMgr DBManager) {
+	e.dbMgr = dbMgr
 }
 
 // SetSessionContext sets the session context for audit logging.
@@ -3943,7 +3978,6 @@ func (e *Executor) GetPreparedStatementManager() *PreparedStatementManager {
 	return e.preparedStmts
 }
 
-
 // computeAggregates computes aggregate function results for a SELECT statement.
 // It processes all matching rows and computes COUNT, SUM, AVG, MIN, MAX.
 //
@@ -6036,41 +6070,83 @@ func parseDateTime(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unable to parse date/time: %s", s)
 }
 
-
 // =============================================================================
 // Database Management Execution
 // =============================================================================
 
 // executeCreateDatabase creates a new database.
-// Note: This is a stub that returns an error because database operations
-// must be handled at the server level where the DatabaseManager is available.
 func (e *Executor) executeCreateDatabase(stmt *CreateDatabaseStmt) (string, error) {
-	// Database operations are handled at the server level
-	return "", errors.New("CREATE DATABASE must be handled by the server")
+	if e.dbMgr == nil {
+		return "", errors.New("database manager not initialized")
+	}
+
+	opts := storage.DefaultCreateDatabaseOptions()
+	if stmt.Owner != "" {
+		opts.Owner = stmt.Owner
+	}
+
+	err := e.dbMgr.CreateDatabaseWithOptions(stmt.DatabaseName, opts)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("Database %s created", stmt.DatabaseName), nil
 }
 
 // executeDropDatabase drops a database.
-// Note: This is a stub that returns an error because database operations
-// must be handled at the server level where the DatabaseManager is available.
 func (e *Executor) executeDropDatabase(stmt *DropDatabaseStmt) (string, error) {
-	// Database operations are handled at the server level
-	return "", errors.New("DROP DATABASE must be handled by the server")
+	if e.dbMgr == nil {
+		return "", errors.New("database manager not initialized")
+	}
+
+	err := e.dbMgr.DropDatabase(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("Database %s dropped", stmt.DatabaseName), nil
 }
 
 // inspectDatabases returns information about all databases.
-// Note: This is a stub that returns an error because database operations
-// must be handled at the server level where the DatabaseManager is available.
 func (e *Executor) inspectDatabases() (string, error) {
-	// Database operations are handled at the server level
-	return "", errors.New("INSPECT DATABASES must be handled by the server")
+	if e.dbMgr == nil {
+		return "", errors.New("database manager not initialized")
+	}
+
+	databases := e.dbMgr.ListDatabases()
+	if len(databases) == 0 {
+		return "No databases found", nil
+	}
+
+	var results []string
+	results = append(results, "Database Name")
+	results = append(results, "-------------")
+	for _, db := range databases {
+		results = append(results, db)
+	}
+
+	return strings.Join(results, "\n"), nil
 }
 
 // inspectDatabase returns information about a specific database.
-// Note: This is a stub that returns an error because database operations
-// must be handled at the server level where the DatabaseManager is available.
 func (e *Executor) inspectDatabase(dbName string) (string, error) {
-	// Database operations are handled at the server level
-	return "", errors.New("INSPECT DATABASE must be handled by the server")
+	if e.dbMgr == nil {
+		return "", errors.New("database manager not initialized")
+	}
+
+	meta, err := e.dbMgr.GetDatabaseMetadata(dbName)
+	if err != nil {
+		return "", err
+	}
+
+	var results []string
+	results = append(results, fmt.Sprintf("Database: %s", meta.Name))
+	results = append(results, fmt.Sprintf("Owner:    %s", meta.Owner))
+	results = append(results, fmt.Sprintf("Encoding: %s", meta.Encoding))
+	results = append(results, fmt.Sprintf("Collation:%s", meta.Collation))
+	results = append(results, fmt.Sprintf("Created:  %s", meta.CreatedAt.Format(time.RFC3339)))
+
+	return strings.Join(results, "\n"), nil
 }
 
 // isTextType returns true if the column type is a text/string type.
@@ -6090,7 +6166,7 @@ func (e *Executor) inspectAudit(stmt *InspectStmt) (string, error) {
 	}
 
 	// Build query options from the statement
-	opts := QueryOptions{
+	opts := AuditQueryOptions{
 		Limit: stmt.Limit,
 	}
 
@@ -6111,9 +6187,17 @@ func (e *Executor) inspectAudit(stmt *InspectStmt) (string, error) {
 	}
 
 	// Query audit logs
-	events, err := e.auditMgr.QueryLogs(opts)
+	rawEvents, err := e.auditMgr.QueryLogs(opts)
 	if err != nil {
 		return "", fmt.Errorf("failed to query audit logs: %w", err)
+	}
+
+	// Cast to AuditEvent
+	var events []AuditEvent
+	for _, re := range rawEvents {
+		if event, ok := re.(AuditEvent); ok {
+			events = append(events, event)
+		}
 	}
 
 	// Format results as CSV
@@ -6160,26 +6244,29 @@ func (e *Executor) inspectAuditStats() (string, error) {
 		return "", errors.New("audit trail is not enabled")
 	}
 
-	helper := NewSQLHelper(e.auditMgr)
-	stats, err := helper.GetAuditStats()
+	stats, err := e.auditMgr.GetStats()
 	if err != nil {
 		return "", fmt.Errorf("failed to get audit statistics: %w", err)
 	}
 
 	// Format statistics as key-value pairs
 	var results []string
-	results = append(results, fmt.Sprintf("Total Events: %d", stats.TotalEvents))
-	results = append(results, fmt.Sprintf("Failed Events: %d", stats.FailedEvents))
-	results = append(results, fmt.Sprintf("Success Rate: %.2f%%", stats.SuccessRate))
-	results = append(results, "")
-	results = append(results, "Events by Type:")
-	for eventType, count := range stats.EventsByType {
-		results = append(results, fmt.Sprintf("  %s: %d", eventType, count))
+	results = append(results, fmt.Sprintf("Total Events: %v", stats["total_events"]))
+
+	if eventTypes, ok := stats["event_type_counts"].(map[string]int); ok {
+		results = append(results, "")
+		results = append(results, "Events by Type:")
+		for eventType, count := range eventTypes {
+			results = append(results, fmt.Sprintf("  %s: %d", eventType, count))
+		}
 	}
-	results = append(results, "")
-	results = append(results, "Events by User:")
-	for username, count := range stats.EventsByUser {
-		results = append(results, fmt.Sprintf("  %s: %d", username, count))
+
+	if userCounts, ok := stats["user_counts"].(map[string]int); ok {
+		results = append(results, "")
+		results = append(results, "Events by User:")
+		for username, count := range userCounts {
+			results = append(results, fmt.Sprintf("  %s: %d", username, count))
+		}
 	}
 
 	return strings.Join(results, "\n"), nil
@@ -6193,7 +6280,7 @@ func (e *Executor) executeExportAudit(stmt *ExportAuditStmt) (string, error) {
 	}
 
 	// Build query options from the statement
-	opts := QueryOptions{
+	opts := AuditQueryOptions{
 		Limit: stmt.Limit,
 	}
 
@@ -6213,17 +6300,9 @@ func (e *Executor) executeExportAudit(stmt *ExportAuditStmt) (string, error) {
 		}
 	}
 
-	// Determine export format
-	var format ExportFormat
-	switch stmt.Format {
-	case "json":
-		format = ExportFormatJSON
-	case "csv":
-		format = ExportFormatCSV
-	case "sql":
-		format = ExportFormatSQL
-	default:
-		return "", fmt.Errorf("unsupported export format: %s (supported: json, csv, sql)", stmt.Format)
+	format := strings.ToLower(stmt.Format)
+	if format == "" {
+		format = "json"
 	}
 
 	// Export audit logs
