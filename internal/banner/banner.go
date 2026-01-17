@@ -30,10 +30,10 @@ Go Embed Directive:
 The //go:embed directive is a Go 1.16+ feature that embeds file contents
 directly into the compiled binary. This approach has several benefits:
 
-  1. No external file dependencies at runtime
-  2. Faster startup (no file I/O needed)
-  3. Simpler deployment (single binary)
-  4. Guaranteed file availability
+ 1. No external file dependencies at runtime
+ 2. Faster startup (no file I/O needed)
+ 3. Simpler deployment (single binary)
+ 4. Guaranteed file availability
 
 ANSI Color Codes:
 =================
@@ -123,7 +123,7 @@ const (
 // These constants are used in the banner display and can be
 // referenced elsewhere in the application for version reporting.
 const (
-	Version   = "01.26.16"
+	Version   = "01.26.17"
 	Copyright = "(c)2026 Firefly Software Solutions Inc"
 	License   = "Licensed under Apache 2.0"
 )
@@ -302,7 +302,6 @@ func printRow2(w io.Writer, col1, col2 string) {
 	fmt.Fprintf(w, "  %-40s %s\n", col1, col2)
 }
 
-
 func printClusterInfo(w io.Writer, cfg *config.Config) {
 	isClusterMode := cfg.Role == "cluster"
 	hasPeers := len(cfg.ClusterPeers) > 0
@@ -469,4 +468,3 @@ func formatBytes(bytes int64) string {
 	}
 	return fmt.Sprintf("%.0f%cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
-

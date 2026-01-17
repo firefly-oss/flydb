@@ -111,6 +111,11 @@ type Config struct {
 	PartitionCount    int      // Number of data partitions (power of 2)
 	ReplicationFactor int      // Number of replicas per partition
 
+	// Locality metadata (01.26.17+)
+	Datacenter string // Datacenter name
+	Rack       string // Rack name
+	Zone       string // Zone name
+
 	// Replication configuration
 	ReplicationMode   string // async, semi_sync, or sync
 	SyncTimeout       int    // Timeout for sync replication in ms
@@ -162,10 +167,10 @@ func DefaultConfig() Config {
 		SaveConfig:        false,
 
 		// TLS defaults
-		TLSEnabled:  true,  // TLS enabled by default for security
-		TLSCertFile: "",    // Auto-determined based on user privileges
-		TLSKeyFile:  "",    // Auto-determined based on user privileges
-		TLSAutoGen:  true,  // Auto-generate self-signed certificates
+		TLSEnabled:  true, // TLS enabled by default for security
+		TLSCertFile: "",   // Auto-determined based on user privileges
+		TLSKeyFile:  "",   // Auto-determined based on user privileges
+		TLSAutoGen:  true, // Auto-generate self-signed certificates
 
 		// Cluster defaults
 		ClusterPeers:      []string{},
@@ -174,8 +179,13 @@ func DefaultConfig() Config {
 		ElectionTimeout:   1000, // 1s
 		MinQuorum:         0,    // auto-calculate
 		EnablePreVote:     true,
-		PartitionCount:    256,  // Number of data partitions
-		ReplicationFactor: 3,    // Number of replicas per partition
+		PartitionCount:    256, // Number of data partitions
+		ReplicationFactor: 3,   // Number of replicas per partition
+
+		// Locality defaults (01.26.17+)
+		Datacenter: "",
+		Rack:       "",
+		Zone:       "",
 
 		// Replication defaults
 		ReplicationMode:   "async",
@@ -241,6 +251,11 @@ func FromConfig(cfg *config.Config) Config {
 		EnablePreVote:     cfg.EnablePreVote,
 		PartitionCount:    cfg.PartitionCount,
 		ReplicationFactor: cfg.ReplicationFactor,
+
+		// Locality (01.26.17+)
+		Datacenter: cfg.Datacenter,
+		Rack:       cfg.Rack,
+		Zone:       cfg.Zone,
 
 		// Replication configuration
 		ReplicationMode:   cfg.ReplicationMode,
@@ -313,6 +328,11 @@ func (c *Config) ToConfig() *config.Config {
 		EnablePreVote:     c.EnablePreVote,
 		PartitionCount:    c.PartitionCount,
 		ReplicationFactor: c.ReplicationFactor,
+
+		// Locality (01.26.17+)
+		Datacenter: c.Datacenter,
+		Rack:       c.Rack,
+		Zone:       c.Zone,
 
 		// Replication configuration
 		ReplicationMode:   c.ReplicationMode,
@@ -913,7 +933,19 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 		if rf, err := strconv.Atoi(replFactorStr); err == nil && rf >= 1 && rf <= 5 {
 			cfg.ReplicationFactor = rf
 		}
+		fmt.Println()
+		stepNum++
 
+		// Locality Settings (01.26.17+)
+		printStepHeader(stepNum, "Locality Configuration")
+		fmt.Println()
+		fmt.Printf("    %s Optional metadata for locality-aware routing\n", cli.Dimmed("•"))
+		fmt.Printf("    %s Helps reduce cross-datacenter traffic\n", cli.Dimmed("•"))
+		fmt.Println()
+
+		cfg.Datacenter = promptWithDefault(reader, "  Datacenter name (optional)", cfg.Datacenter)
+		cfg.Rack = promptWithDefault(reader, "  Rack name (optional)", cfg.Rack)
+		cfg.Zone = promptWithDefault(reader, "  Zone name (optional)", cfg.Zone)
 		fmt.Println()
 		stepNum++
 	}
@@ -1124,6 +1156,41 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 	cfg.EnableZeroCopy = strings.ToLower(zeroCopyChoice) == "y" || strings.ToLower(zeroCopyChoice) == "yes"
 	fmt.Println()
 
+	// Configure Audit Trail (01.26.17+)
+	stepNum++
+	printStepHeader(stepNum, "Audit Trail")
+	fmt.Println()
+	fmt.Printf("    %s Track all DDL, DML, and security events\n", cli.Dimmed("•"))
+	fmt.Printf("    %s High-performance asynchronous logging\n", cli.Dimmed("•"))
+	fmt.Println()
+
+	defaultAudit := "y"
+	if !cfg.AuditEnabled {
+		defaultAudit = "n"
+	}
+	auditChoice := promptWithDefault(reader, "  Enable audit logging? (y/n)", defaultAudit)
+	cfg.AuditEnabled = strings.ToLower(auditChoice) == "y" || strings.ToLower(auditChoice) == "yes"
+
+	if cfg.AuditEnabled {
+		defaultRetention := strconv.Itoa(cfg.AuditRetentionDays)
+		if cfg.AuditRetentionDays == 0 {
+			defaultRetention = "90"
+		}
+		retentionStr := promptWithDefault(reader, "  Retention period (days, 0=forever)", defaultRetention)
+		if days, err := strconv.Atoi(retentionStr); err == nil && days >= 0 {
+			cfg.AuditRetentionDays = days
+		}
+
+		// Enable all by default in wizard
+		cfg.AuditLogDDL = true
+		cfg.AuditLogDML = true
+		cfg.AuditLogSelect = false // Select is heavy, disabled by default
+		cfg.AuditLogAuth = true
+		cfg.AuditLogAdmin = true
+		cfg.AuditLogCluster = true
+	}
+	fmt.Println()
+
 	// Configure logging
 	stepNum++
 	printStepHeader(stepNum, "Logging")
@@ -1264,11 +1331,26 @@ func printSummary(cfg *Config) {
 		fmt.Printf("    %-16s %v\n", cli.Dimmed("Pre-vote:"), cfg.EnablePreVote)
 		fmt.Printf("    %-16s %d\n", cli.Dimmed("Partitions:"), cfg.PartitionCount)
 		fmt.Printf("    %-16s %d\n", cli.Dimmed("Repl Factor:"), cfg.ReplicationFactor)
+
+		// Locality summary (01.26.17+)
+		if cfg.Datacenter != "" || cfg.Rack != "" || cfg.Zone != "" {
+			fmt.Printf("    %-16s %s/%s/%s\n", cli.Dimmed("Locality:"),
+				nonEmpty(cfg.Datacenter, "any"),
+				nonEmpty(cfg.Rack, "any"),
+				nonEmpty(cfg.Zone, "any"))
+		}
 	}
 
 	// Storage
 	fmt.Println()
 	fmt.Printf("    %-16s %s\n", cli.Dimmed("Data Directory:"), cfg.DataDir)
+
+	// Audit Trail (01.26.17+)
+	auditStatus := cli.Dimmed("disabled")
+	if cfg.AuditEnabled {
+		auditStatus = cli.Success("enabled") + cli.Dimmed(fmt.Sprintf(" (%d days retention)", cfg.AuditRetentionDays))
+	}
+	fmt.Printf("    %-16s %s\n", cli.Dimmed("Audit Trail:"), auditStatus)
 
 	// Encryption
 	encStatus := formatEncryptionWithPassphrase(cfg.EncryptionEnabled, cfg.EncryptionPassphrase)
@@ -1345,6 +1427,14 @@ func boolToYesNo(b bool) string {
 		return "Yes"
 	}
 	return "No"
+}
+
+// nonEmpty returns the value if not empty, otherwise returns the default value.
+func nonEmpty(val, defaultVal string) string {
+	if val == "" {
+		return defaultVal
+	}
+	return val
 }
 
 // ValidatePort checks if a port string is a valid port number.

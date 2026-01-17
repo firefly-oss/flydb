@@ -108,6 +108,16 @@ const (
 	EnvElectionTimeout      = "FLYDB_ELECTION_TIMEOUT_MS"
 	EnvMinQuorum            = "FLYDB_MIN_QUORUM"
 
+	// Locality environment variables
+	EnvDatacenter = "FLYDB_DATACENTER"
+	EnvRack       = "FLYDB_RACK"
+	EnvZone       = "FLYDB_ZONE"
+
+	// Compression environment variables
+	EnvEnableCompression    = "FLYDB_ENABLE_COMPRESSION"
+	EnvCompressionAlgorithm = "FLYDB_COMPRESSION_ALGORITHM"
+	EnvCompressionMinSize   = "FLYDB_COMPRESSION_MIN_SIZE"
+
 	// Observability environment variables
 	EnvMetricsEnabled = "FLYDB_METRICS_ENABLED"
 	EnvMetricsAddr    = "FLYDB_METRICS_ADDR"
@@ -203,6 +213,11 @@ type Config struct {
 	PartitionCount    int      `toml:"partition_count" json:"partition_count"`             // Number of data partitions (power of 2)
 	ReplicationFactor int      `toml:"replication_factor" json:"replication_factor"`       // Number of replicas per partition
 
+	// Locality metadata (for locality-aware routing)
+	Datacenter string `toml:"datacenter" json:"datacenter"` // Datacenter name
+	Rack       string `toml:"rack" json:"rack"`             // Rack name
+	Zone       string `toml:"zone" json:"zone"`             // Zone name
+
 	// Replication configuration
 	ReplicationMode   string `toml:"replication_mode" json:"replication_mode"`             // async, semi_sync, or sync
 	SyncTimeout       int    `toml:"sync_timeout_ms" json:"sync_timeout_ms"`               // Timeout for sync replication in ms
@@ -296,6 +311,11 @@ func DefaultConfig() *Config {
 		EnablePreVote:     true,
 		PartitionCount:    256, // Number of data partitions
 		ReplicationFactor: 3,   // Number of replicas per partition
+
+		// Locality
+		Datacenter: "",
+		Rack:       "",
+		Zone:       "",
 
 		// Replication
 		ReplicationMode:   "async",
@@ -649,6 +669,30 @@ func (m *Manager) LoadFromEnv() {
 	if v := os.Getenv(EnvMinQuorum); v != "" {
 		if q, err := strconv.Atoi(v); err == nil {
 			cfg.MinQuorum = q
+		}
+	}
+
+	// Locality configuration
+	if v := os.Getenv(EnvDatacenter); v != "" {
+		cfg.Datacenter = v
+	}
+	if v := os.Getenv(EnvRack); v != "" {
+		cfg.Rack = v
+	}
+	if v := os.Getenv(EnvZone); v != "" {
+		cfg.Zone = v
+	}
+
+	// Compression configuration
+	if v := os.Getenv(EnvEnableCompression); v != "" {
+		cfg.EnableCompression = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvCompressionAlgorithm); v != "" {
+		cfg.CompressionAlgorithm = strings.ToLower(v)
+	}
+	if v := os.Getenv(EnvCompressionMinSize); v != "" {
+		if size, err := strconv.Atoi(v); err == nil {
+			cfg.CompressionMinSize = size
 		}
 	}
 

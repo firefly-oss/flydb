@@ -32,6 +32,10 @@
   "partition_count": 256,
   "replication_factor": 3,
   
+  "datacenter": "",
+  "rack": "",
+  "zone": "",
+  
   "replication_mode": "async",
   "sync_timeout_ms": 5000,
   "max_replication_lag_ms": 10000,
@@ -54,6 +58,17 @@
   "default_encoding": "UTF8",
   "default_locale": "en_US",
   "default_collation": "default",
+
+  "audit_enabled": true,
+  "audit_log_ddl": true,
+  "audit_log_dml": true,
+  "audit_log_select": false,
+  "audit_log_auth": true,
+  "audit_log_admin": true,
+  "audit_log_cluster": true,
+  "audit_retention_days": 90,
+  "audit_buffer_size": 1000,
+  "audit_flush_interval_sec": 5,
   
   "observability": {
     "metrics": {

@@ -132,6 +132,14 @@ func printUsage() {
 	fmt.Println("  -buffer-pool-size-bytes  Buffer pool size in bytes, 0 = auto (default: 0)")
 	fmt.Println()
 
+	fmt.Println(cli.Highlight("ADVANCED FEATURES (01.26.17+):"))
+	fmt.Println("  -datacenter <name>       Datacenter name for locality-aware routing")
+	fmt.Println("  -rack <name>             Rack name for locality-aware routing")
+	fmt.Println("  -zone <name>             Zone name for locality-aware routing")
+	fmt.Println("  -audit-enabled           Enable comprehensive audit logging (default: true)")
+	fmt.Println("  -audit-retention-days <n> Days to retain audit logs (default: 90)")
+	fmt.Println()
+
 	fmt.Println(cli.Highlight("ENVIRONMENT VARIABLES:"))
 	fmt.Println("  FLYDB_DATA_DIR           Data directory for database storage")
 	fmt.Println("  FLYDB_PORT               Server port for client connections")
@@ -212,6 +220,15 @@ func main() {
 	enableCompression := flag.Bool("enable-compression", cfg.EnableCompression, "Enable compression for WAL and replication")
 	compressionAlgorithm := flag.String("compression-algorithm", cfg.CompressionAlgorithm, "Compression algorithm: gzip, lz4, snappy, or zstd")
 	compressionMinSize := flag.Int("compression-min-size", cfg.CompressionMinSize, "Minimum payload size in bytes to compress")
+
+	// Locality flags (01.26.17+)
+	datacenter := flag.String("datacenter", cfg.Datacenter, "Datacenter name for locality-aware routing")
+	rack := flag.String("rack", cfg.Rack, "Rack name for locality-aware routing")
+	zone := flag.String("zone", cfg.Zone, "Zone name for locality-aware routing")
+
+	// Audit trail flags (01.26.17+)
+	auditEnabled := flag.Bool("audit-enabled", cfg.AuditEnabled, "Enable audit logging")
+	auditRetentionDays := flag.Int("audit-retention-days", cfg.AuditRetentionDays, "Days to retain audit logs (0 = forever)")
 
 	// Performance flags (01.26.13+)
 	enableZeroCopy := flag.Bool("enable-zero-copy", cfg.EnableZeroCopy, "Enable zero-copy buffer pooling")
@@ -313,6 +330,18 @@ func main() {
 				cfg.CompressionAlgorithm = *compressionAlgorithm
 			case "compression-min-size":
 				cfg.CompressionMinSize = *compressionMinSize
+			// Locality flags (01.26.17+)
+			case "datacenter":
+				cfg.Datacenter = *datacenter
+			case "rack":
+				cfg.Rack = *rack
+			case "zone":
+				cfg.Zone = *zone
+			// Audit trail flags (01.26.17+)
+			case "audit-enabled":
+				cfg.AuditEnabled = *auditEnabled
+			case "audit-retention-days":
+				cfg.AuditRetentionDays = *auditRetentionDays
 			// Performance flags (01.26.13+)
 			case "enable-zero-copy":
 				cfg.EnableZeroCopy = *enableZeroCopy

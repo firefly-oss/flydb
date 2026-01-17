@@ -23,8 +23,8 @@ set -euo pipefail
 # Configuration and Defaults
 # =============================================================================
 
-readonly SCRIPT_VERSION="01.26.16"
-readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.16}"
+readonly SCRIPT_VERSION="01.26.17"
+readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.17}"
 readonly GITHUB_REPO="firefly-oss/flydb"
 readonly DOWNLOAD_BASE_URL="https://github.com/${GITHUB_REPO}/releases/download"
 
@@ -110,10 +110,19 @@ ENABLE_RAFT="true"
 RAFT_ELECTION_TIMEOUT="1000"
 RAFT_HEARTBEAT_INTERVAL="150"
 
+# Locality metadata (01.26.17+)
+DATACENTER=""
+RACK=""
+ZONE=""
+
 # Compression configuration (01.26.13+)
 ENABLE_COMPRESSION="false"
-COMPRESSION_ALGORITHM="gzip"
+COMPRESSION_ALGORITHM="lz4"
 COMPRESSION_MIN_SIZE="256"
+
+# Audit trail configuration (01.26.17+)
+AUDIT_ENABLED="true"
+AUDIT_RETENTION_DAYS="90"
 
 # Performance configuration (01.26.13+)
 ENABLE_ZERO_COPY="true"
@@ -384,11 +393,17 @@ print_help() {
     echo -e "    ${BOLD}--min-quorum <n>${RESET}          Minimum quorum size (0=auto, default: 0)"
     echo -e "    ${BOLD}--partition-count <n>${RESET}     Number of data partitions (default: 256)"
     echo -e "    ${BOLD}--replication-factor <n>${RESET}  Number of replicas per partition (default: 3)"
+    echo -e "    ${BOLD}--datacenter <name>${RESET}       Datacenter name for locality (01.26.17+)"
+    echo -e "    ${BOLD}--rack <name>${RESET}             Rack name for locality (01.26.17+)"
+    echo -e "    ${BOLD}--zone <name>${RESET}             Zone name for locality (01.26.17+)"
     echo ""
     echo -e "${BOLD}SECURITY OPTIONS:${RESET}"
     echo -e "    ${BOLD}--encryption${RESET}              Enable data-at-rest encryption (default: enabled)"
     echo -e "    ${BOLD}--no-encryption${RESET}           Disable data-at-rest encryption"
     echo -e "    ${BOLD}--encryption-passphrase <p>${RESET} Set encryption passphrase"
+    echo -e "    ${BOLD}--enable-audit${RESET}            Enable audit logging (01.26.17+)"
+    echo -e "    ${BOLD}--disable-audit${RESET}           Disable audit logging (01.26.17+)"
+    echo -e "    ${BOLD}--audit-retention <days>${RESET}  Audit log retention days (default: 90)"
     echo ""
     echo -e "${BOLD}LOGGING OPTIONS:${RESET}"
     echo -e "    ${BOLD}--log-level <level>${RESET}       Log level: debug, info, warn, error (default: info)"
@@ -1644,6 +1659,14 @@ wizard_step_cluster_advanced() {
     fi
 
     echo ""
+    echo -e "  ${BOLD}Locality Settings (01.26.17+)${RESET}"
+    echo -e "  ${DIM}Optional metadata for locality-aware routing${RESET}"
+    echo ""
+    DATACENTER=$(prompt "Datacenter name (optional)" "$DATACENTER")
+    RACK=$(prompt "Rack name (optional)" "$RACK")
+    ZONE=$(prompt "Zone name (optional)" "$ZONE")
+
+    echo ""
     print_success "Advanced cluster settings configured"
 }
 
@@ -1805,11 +1828,45 @@ wizard_step_tls() {
     print_success "TLS configuration complete"
 }
 
-wizard_step_performance() {
+wizard_step_audit() {
     # Step number depends on role: standalone=7, cluster=8
     local step_num="7"
     if [[ "$SERVER_ROLE" == "cluster" ]]; then
         step_num="8"
+    fi
+
+    wizard_step_header "$step_num" "Audit Trail Configuration"
+
+    echo "  Configure comprehensive audit logging:"
+    echo ""
+    echo -e "  ${DIM}• Track all DDL, DML, and security events${RESET}"
+    echo -e "  ${DIM}• High-performance asynchronous logging${RESET}"
+    echo ""
+
+    if prompt_yes_no "Enable audit logging?" "y"; then
+        AUDIT_ENABLED="true"
+        echo ""
+        echo -e "  ${DIM}Retention period: How many days to keep audit logs (0=forever)${RESET}"
+        local retention_input
+        retention_input=$(prompt "Retention period (days)" "$AUDIT_RETENTION_DAYS")
+        if [[ "$retention_input" =~ ^[0-9]+$ ]]; then
+            AUDIT_RETENTION_DAYS="$retention_input"
+        fi
+        print_success "Audit logging enabled ($AUDIT_RETENTION_DAYS days retention)"
+    else
+        AUDIT_ENABLED="false"
+        print_warning "Audit logging disabled"
+    fi
+
+    echo ""
+    print_success "Audit configuration complete"
+}
+
+wizard_step_performance() {
+    # Step number depends on role: standalone=8, cluster=9
+    local step_num="8"
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        step_num="9"
     fi
 
     wizard_step_header "$step_num" "Performance Options (01.26.13+)"
@@ -1891,10 +1948,10 @@ wizard_step_performance() {
 }
 
 wizard_step_logging() {
-    # Step number depends on role: standalone=7, cluster=8
-    local step_num="7"
+    # Step number depends on role: standalone=9, cluster=10
+    local step_num="9"
     if [[ "$SERVER_ROLE" == "cluster" ]]; then
-        step_num="8"
+        step_num="10"
     fi
 
     wizard_step_header "$step_num" "Logging Configuration"
@@ -2190,6 +2247,9 @@ show_configuration_summary() {
     if [[ "$SERVER_ROLE" == "cluster" ]]; then
         echo -e "      Replication Port:  ${CYAN}${REPL_PORT}${RESET}"
         echo -e "      Cluster Port:      ${CYAN}${CLUSTER_PORT}${RESET}"
+        if [[ -n "$DATACENTER" ]] || [[ -n "$RACK" ]] || [[ -n "$ZONE" ]]; then
+            echo -e "      Locality:          ${CYAN}${DATACENTER:-any}/${RACK:-any}/${ZONE:-any}${RESET}"
+        fi
     fi
     echo -e "      Install Directory: ${CYAN}${PREFIX}/bin${RESET}"
     echo ""
@@ -2230,6 +2290,11 @@ show_configuration_summary() {
         fi
     else
         echo -e "      TLS/SSL:           ${YELLOW}Disabled${RESET}"
+    fi
+    if [[ "$AUDIT_ENABLED" == "true" ]]; then
+        echo -e "      Audit Trail:       ${GREEN}Enabled${RESET} ${DIM}(${AUDIT_RETENTION_DAYS} days)${RESET}"
+    else
+        echo -e "      Audit Trail:       ${YELLOW}Disabled${RESET}"
     fi
     echo ""
 
@@ -2299,6 +2364,12 @@ configure_section_deployment() {
     if [[ "$SERVER_ROLE" == "cluster" ]]; then
         REPL_PORT=$(prompt_port "Replication port" "$REPL_PORT")
         CLUSTER_PORT=$(prompt_port "Cluster port" "$CLUSTER_PORT")
+
+        echo ""
+        echo -e "  ${BOLD}Locality Settings (01.26.17+)${RESET}"
+        DATACENTER=$(prompt_value "Datacenter name (optional)" "$DATACENTER")
+        RACK=$(prompt_value "Rack name (optional)" "$RACK")
+        ZONE=$(prompt_value "Zone name (optional)" "$ZONE")
 
         echo ""
         if prompt_yes_no "Modify cluster peers" "n"; then
@@ -2386,6 +2457,18 @@ configure_section_security() {
         fi
     else
         TLS_ENABLED="false"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Audit Trail (01.26.17+)${RESET}"
+    echo -e "  ${DIM}Track all DDL, DML, and security events.${RESET}"
+    echo ""
+
+    if prompt_yes_no "Enable audit logging" "$([[ "$AUDIT_ENABLED" == "true" ]] && echo "y" || echo "n")"; then
+        AUDIT_ENABLED="true"
+        AUDIT_RETENTION_DAYS=$(prompt_number "Retention period in days (0=forever)" "$AUDIT_RETENTION_DAYS" "0")
+    else
+        AUDIT_ENABLED="false"
     fi
 
     echo ""
@@ -2595,6 +2678,7 @@ run_interactive_wizard() {
         wizard_step_storage
         wizard_step_security
         wizard_step_tls
+        wizard_step_audit
         wizard_step_performance
         wizard_step_logging
 
@@ -2707,6 +2791,11 @@ print_installation_summary() {
         fi
         print_kv "Partition Count" "$PARTITION_COUNT"
         print_kv "Replication Factor" "$REPLICATION_FACTOR"
+
+        # Locality Metadata (01.26.17+)
+        if [[ -n "$DATACENTER" ]] || [[ -n "$RACK" ]] || [[ -n "$ZONE" ]]; then
+            print_kv "Locality" "${DATACENTER:-any}/${RACK:-any}/${ZONE:-any}"
+        fi
         echo ""
     fi
 
@@ -2749,6 +2838,13 @@ print_installation_summary() {
         fi
     else
         print_kv "TLS" "${YELLOW}Disabled${RESET}"
+    fi
+
+    # Audit Trail (01.26.17+)
+    if [[ "$AUDIT_ENABLED" == "true" ]]; then
+        print_kv "Audit Trail" "${GREEN}Enabled${RESET} (${AUDIT_RETENTION_DAYS} days retention)"
+    else
+        print_kv "Audit Trail" "${DIM}Disabled${RESET}"
     fi
     echo ""
 
@@ -3188,6 +3284,10 @@ create_config_file() {
   \"partition_count\": ${PARTITION_COUNT},
   \"replication_factor\": ${REPLICATION_FACTOR},
 
+  \"datacenter\": \"${DATACENTER}\",
+  \"rack\": \"${RACK}\",
+  \"zone\": \"${ZONE}\",
+
   \"replication_mode\": \"${REPLICATION_MODE}\",
   \"sync_timeout_ms\": ${SYNC_TIMEOUT},
   \"max_replication_lag_ms\": ${MAX_REPLICATION_LAG},
@@ -3210,6 +3310,15 @@ create_config_file() {
   \"default_encoding\": \"UTF8\",
   \"default_locale\": \"en_US\",
   \"default_collation\": \"default\",
+
+  \"audit_enabled\": ${AUDIT_ENABLED},
+  \"audit_retention_days\": ${AUDIT_RETENTION_DAYS},
+  \"audit_log_ddl\": true,
+  \"audit_log_dml\": true,
+  \"audit_log_select\": false,
+  \"audit_log_auth\": true,
+  \"audit_log_admin\": true,
+  \"audit_log_cluster\": true,
 
   \"observability\": {
     \"metrics\": {
@@ -4321,6 +4430,74 @@ parse_args() {
                     BUFFER_POOL_SIZE_BYTES="$val"
                 else
                     print_error "--buffer-pool-bytes requires a number"
+                    exit 1
+                fi
+                shift
+                ;;
+            # Locality options (01.26.17+)
+            --datacenter)
+                if [[ -n "${2:-}" ]]; then
+                    DATACENTER="$2"
+                    shift 2
+                else
+                    print_error "--datacenter requires an argument"
+                    exit 1
+                fi
+                ;;
+            --datacenter=*)
+                DATACENTER="${1#*=}"
+                shift
+                ;;
+            --rack)
+                if [[ -n "${2:-}" ]]; then
+                    RACK="$2"
+                    shift 2
+                else
+                    print_error "--rack requires an argument"
+                    exit 1
+                fi
+                ;;
+            --rack=*)
+                RACK="${1#*=}"
+                shift
+                ;;
+            --zone)
+                if [[ -n "${2:-}" ]]; then
+                    ZONE="$2"
+                    shift 2
+                else
+                    print_error "--zone requires an argument"
+                    exit 1
+                fi
+                ;;
+            --zone=*)
+                ZONE="${1#*=}"
+                shift
+                ;;
+            # Audit trail options (01.26.17+)
+            --enable-audit)
+                AUDIT_ENABLED="true"
+                shift
+                ;;
+            --disable-audit)
+                AUDIT_ENABLED="false"
+                shift
+                ;;
+            --audit-retention)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    AUDIT_RETENTION_DAYS="$2"
+                    shift 2
+                else
+                    print_error "--audit-retention requires a number (days)"
+                    exit 1
+                fi
+                ;;
+            --audit-retention=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    AUDIT_RETENTION_DAYS="$val"
+                else
+                    print_error "--audit-retention requires a number"
                     exit 1
                 fi
                 shift
