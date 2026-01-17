@@ -37,6 +37,7 @@ Whether you are building microservices that need local persistence, edge applica
 - **Full SQL Support** — Joins, subqueries, transactions, stored procedures, triggers, and prepared statements. No compromises on query capabilities.
 - **JSONB Support** — Store and query semi-structured JSON data with PostgreSQL-compatible operators (`->`, `->>`, `@>`, `<@`, `?`) and functions.
 - **ODBC/JDBC Ready** — Binary wire protocol with complete metadata APIs enables building standard database drivers for any language or platform.
+- **Configurable Compression** — Built-in support for LZ4, Snappy, and Zstd algorithms to reduce disk usage and network bandwidth with minimal CPU overhead.
 
 ### Quick Example
 
@@ -1200,7 +1201,13 @@ kind: Deployment
 metadata:
   name: flydb
 spec:
+  selector:
+    matchLabels:
+      app: flydb
   template:
+    metadata:
+      labels:
+        app: flydb
     spec:
       containers:
       - name: flydb

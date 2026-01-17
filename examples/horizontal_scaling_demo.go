@@ -3,100 +3,118 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 	"time"
 
-	"flydb/internal/config"
-	"flydb/internal/engine"
+	"flydb/internal/cluster"
+	"flydb/internal/storage"
 )
 
-// This example demonstrates FlyDB's horizontal scaling capabilities
-// It shows how data is automatically sharded across nodes and how
-// the cluster handles node failures and rebalancing
+// DemoNode represents a single node in the cluster demo
+type DemoNode struct {
+	ClusterMgr *cluster.UnifiedClusterManager
+	Store      *storage.UnifiedStorageEngine
+}
+
+func (n *DemoNode) Close() {
+	if n.ClusterMgr != nil {
+		n.ClusterMgr.Stop()
+	}
+	if n.Store != nil {
+		n.Store.Close()
+	}
+}
 
 func main() {
-	fmt.Println("=== FlyDB Horizontal Scaling Demo ===\n")
+	fmt.Println("=== FlyDB Horizontal Scaling Demo ===")
+	fmt.Println()
+
+	// Create a temporary directory for demo data
+	tmpDir, err := os.MkdirTemp("", "flydb-demo-*")
+	if err != nil {
+		log.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
 
 	// Step 1: Start a 3-node cluster
 	fmt.Println("Step 1: Starting 3-node cluster...")
-	nodes := startCluster(3)
+	nodes := startCluster(3, tmpDir)
 	defer stopCluster(nodes)
 
-	// Wait for cluster to stabilize
-	time.Sleep(2 * time.Second)
+	// Wait for cluster to stabilize and elect a leader
+	fmt.Println("Waiting for cluster to stabilize...")
+	time.Sleep(5 * time.Second)
 
 	// Step 2: Write data across the cluster
-	fmt.Println("\nStep 2: Writing 1000 keys across the cluster...")
-	writeData(nodes[0], 1000)
+	fmt.Println("\nStep 2: Writing 100 keys across the cluster...")
+	writeData(nodes[0], 100)
 
-	// Step 3: Show data distribution
-	fmt.Println("\nStep 3: Data distribution across nodes:")
-	showDataDistribution(nodes)
+	// Step 3: Show data distribution (conceptually)
+	fmt.Println("\nStep 3: Cluster Status")
+	status := nodes[0].ClusterMgr.GetStatus()
+	fmt.Printf("  Cluster Health: %s\n", status.Health)
+	fmt.Printf("  Total Nodes:    %d\n", status.TotalNodes)
 
-	// Step 4: Read data from different nodes
+	// Step 4: Read data
 	fmt.Println("\nStep 4: Reading data (requests auto-routed to correct nodes)...")
-	readData(nodes[1], []string{"user:1", "user:100", "user:500", "user:999"})
-
-	// Step 5: Add a new node (triggers rebalancing)
-	fmt.Println("\nStep 5: Adding 4th node (triggers automatic rebalancing)...")
-	newNode := addNode(nodes, 4)
-	nodes = append(nodes, newNode)
-
-	// Wait for rebalancing
-	time.Sleep(3 * time.Second)
-
-	// Step 6: Show new data distribution
-	fmt.Println("\nStep 6: Data distribution after rebalancing:")
-	showDataDistribution(nodes)
-
-	// Step 7: Simulate node failure
-	fmt.Println("\nStep 7: Simulating node failure...")
-	simulateNodeFailure(nodes[2])
-
-	// Wait for failover
-	time.Sleep(2 * time.Second)
-
-	// Step 8: Verify data still accessible
-	fmt.Println("\nStep 8: Verifying data still accessible after failure...")
-	readData(nodes[0], []string{"user:1", "user:100", "user:500", "user:999"})
-
-	// Step 9: Show cluster health
-	fmt.Println("\nStep 9: Cluster health status:")
-	showClusterHealth(nodes[0])
+	readData(nodes[1], []string{"user:1", "user:50", "user:99"})
 
 	fmt.Println("\n=== Demo Complete ===")
 }
 
-func startCluster(nodeCount int) []*engine.Engine {
-	nodes := make([]*engine.Engine, nodeCount)
+func startCluster(nodeCount int, baseDir string) []*DemoNode {
+	nodes := make([]*DemoNode, nodeCount)
+	seeds := []string{"127.0.0.1:7946"}
 
 	for i := 0; i < nodeCount; i++ {
-		cfg := config.DefaultConfig()
-		cfg.ClusterMode = true
-		cfg.NodeID = fmt.Sprintf("node%d", i+1)
-		cfg.NodeAddr = fmt.Sprintf("127.0.0.1:%d", 7946+i)
-		cfg.DataPort = 7950 + i
-		cfg.PartitionCount = 256
-		cfg.ReplicationFactor = 3
-		cfg.DataDir = fmt.Sprintf("./data/node%d", i+1)
+		nodeID := fmt.Sprintf("node%d", i+1)
+		clusterPort := 7946 + i
+		dataPort := 8946 + i
+		dataDir := fmt.Sprintf("%s/node%d", baseDir, i+1)
+		os.MkdirAll(dataDir, 0755)
 
-		// First node is seed, others join it
-		if i > 0 {
-			cfg.Seeds = []string{"127.0.0.1:7946"}
+		storeCfg := storage.StorageConfig{
+			DataDir: dataDir,
 		}
-
-		eng, err := engine.NewEngine(cfg)
+		store, err := storage.NewStorageEngine(storeCfg)
 		if err != nil {
-			log.Fatalf("Failed to create node %d: %v", i+1, err)
+			log.Fatalf("Failed to create storage for node %d: %v", i+1, err)
 		}
 
-		nodes[i] = eng
-		fmt.Printf("  ✓ Node %d started at %s\n", i+1, cfg.NodeAddr)
+		// Create cluster manager
+		clusterCfg := cluster.ClusterConfig{
+			NodeID:            nodeID,
+			NodeAddr:          "127.0.0.1",
+			ClusterPort:       clusterPort,
+			DataPort:          dataPort,
+			Seeds:             seeds,
+			PartitionCount:    256,
+			ReplicationFactor: 3,
+			HeartbeatInterval: 500 * time.Millisecond,
+			ElectionTimeout:   2 * time.Second,
+			SyncTimeout:       5 * time.Second,
+			DataDir:           dataDir + "/cluster",
+		}
+
+		clusterMgr := cluster.NewUnifiedClusterManager(clusterCfg)
+		clusterMgr.SetStore(store)
+		clusterMgr.SetWAL(store.WAL())
+
+		if err := clusterMgr.Start(); err != nil {
+			log.Fatalf("Failed to start cluster manager for node %d: %v", i+1, err)
+		}
+
+		nodes[i] = &DemoNode{
+			ClusterMgr: clusterMgr,
+			Store:      store,
+		}
+		fmt.Printf("  ✓ Node %d started (ID: %s, Cluster Port: %d)\n", i+1, nodeID, clusterPort)
 	}
 
 	return nodes
 }
 
-func stopCluster(nodes []*engine.Engine) {
+func stopCluster(nodes []*DemoNode) {
 	for i, node := range nodes {
 		if node != nil {
 			node.Close()
@@ -105,25 +123,25 @@ func stopCluster(nodes []*engine.Engine) {
 	}
 }
 
-func writeData(node *engine.Engine, count int) {
+func writeData(node *DemoNode, count int) {
 	for i := 0; i < count; i++ {
 		key := fmt.Sprintf("user:%d", i)
-		value := fmt.Sprintf(`{"id":%d,"name":"User %d","email":"user%d@example.com"}`, i, i, i)
+		value := fmt.Sprintf(`{"id":%d,"name":"User %d"}`, i, i)
 
-		if err := node.Set(key, []byte(value)); err != nil {
+		if err := node.ClusterMgr.Put(key, []byte(value)); err != nil {
 			log.Printf("Failed to write %s: %v", key, err)
 		}
 
-		if (i+1)%100 == 0 {
+		if (i+1)%20 == 0 {
 			fmt.Printf("  Written %d keys...\n", i+1)
 		}
 	}
 	fmt.Printf("  ✓ Wrote %d keys\n", count)
 }
 
-func readData(node *engine.Engine, keys []string) {
+func readData(node *DemoNode, keys []string) {
 	for _, key := range keys {
-		value, err := node.Get(key)
+		value, err := node.ClusterMgr.Get(key)
 		if err != nil {
 			fmt.Printf("  ✗ Failed to read %s: %v\n", key, err)
 		} else {
@@ -131,45 +149,3 @@ func readData(node *engine.Engine, keys []string) {
 		}
 	}
 }
-
-func showDataDistribution(nodes []*engine.Engine) {
-	for i, node := range nodes {
-		// Get partition count for this node
-		// This would require adding a method to the cluster manager
-		fmt.Printf("  Node %d: ~%d%% of data\n", i+1, 100/len(nodes))
-	}
-}
-
-func addNode(existingNodes []*engine.Engine, nodeNum int) *engine.Engine {
-	cfg := config.DefaultConfig()
-	cfg.ClusterMode = true
-	cfg.NodeID = fmt.Sprintf("node%d", nodeNum)
-	cfg.NodeAddr = fmt.Sprintf("127.0.0.1:%d", 7946+nodeNum-1)
-	cfg.DataPort = 7950 + nodeNum - 1
-	cfg.PartitionCount = 256
-	cfg.ReplicationFactor = 3
-	cfg.DataDir = fmt.Sprintf("./data/node%d", nodeNum)
-	cfg.Seeds = []string{"127.0.0.1:7946"}
-
-	eng, err := engine.NewEngine(cfg)
-	if err != nil {
-		log.Fatalf("Failed to create node %d: %v", nodeNum, err)
-	}
-
-	fmt.Printf("  ✓ Node %d joined cluster\n", nodeNum)
-	return eng
-}
-
-func simulateNodeFailure(node *engine.Engine) {
-	node.Close()
-	fmt.Println("  ✗ Node failed (simulated)")
-}
-
-func showClusterHealth(node *engine.Engine) {
-	// This would require adding cluster health methods
-	fmt.Println("  Cluster Status: HEALTHY")
-	fmt.Println("  Active Nodes: 3/4")
-	fmt.Println("  Partitions: 256 (all healthy)")
-	fmt.Println("  Replication Factor: 3")
-}
-

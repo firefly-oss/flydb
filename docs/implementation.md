@@ -25,6 +25,7 @@ This document provides an in-depth technical guide to FlyDB's internal architect
 19. [SQL Dump Utility](#sql-dump-utility)
 20. [JSONB Data Type](#jsonb-data-type)
 21. [Audit Trail System](#audit-trail-system)
+22. [Compression System](#compression-system)
 
 ---
 
@@ -2922,6 +2923,39 @@ INSPECT AUDIT STATS;
 -- Export with SQL
 EXPORT AUDIT TO 'audit.csv' FORMAT csv;
 ```
+
+## Compression System
+
+FlyDB implements a high-performance, pluggable compression system to minimize disk footprint and network bandwidth.
+
+### Supported Algorithms
+
+1.  **Gzip** (standard): Good balance between ratio and speed.
+2.  **LZ4**: Optimized for extremely fast compression and decompression.
+3.  **Snappy**: Google's compression algorithm, optimized for high speed and reasonable compression.
+4.  **Zstd**: Facebook's algorithm, providing the best compression ratios with configurable performance levels.
+
+### Performance Optimization
+
+To minimize Garbage Collection (GC) pressure and improve throughput, FlyDB uses `sync.Pool` for:
+-   **Writers**: Reusing compression writers across operations.
+-   **Buffers**: Pre-allocated byte buffers for intermediate data.
+-   **Encoders**: Algorithm-specific encoder objects.
+
+### Batch Compression
+
+The `BatchCompressor` significantly improves compression ratios for small records by:
+1.  Collecting multiple records into a single memory buffer.
+2.  Adding length-prefixed headers for each record.
+3.  Compressing the entire batch as a single block.
+4.  Automatically flushing when the batch reaches a certain size or timeout.
+
+### Usage in Cluster
+
+In cluster mode, compression can be enabled for:
+-   **WAL Replication**: Compressing data streamed between nodes.
+-   **Remote Queries**: Compressing results of cross-partition scans.
+-   **Data Migration**: Reducing network load during rebalancing.
 
 ### SDK Integration
 

@@ -9,15 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [01.26.17] - 2026-01-17
 
-### Audit Trail Feature
+### Audit Trail, Compression, and Cluster Management
 
-This release introduces a comprehensive audit trail system for FlyDB, providing complete visibility into all database operations, authentication events, and administrative actions for security, compliance, and debugging purposes.
+This release introduces major production-grade features including a comprehensive audit trail system, a high-performance pluggable compression system, and advanced cluster management with partition-aware routing and live migration.
 
 ### Added
 
-#### Comprehensive Audit Trail System
+#### 1. High-Performance Compression System
+- **Multi-Algorithm Support**: Added support for **LZ4**, **Snappy**, and **Zstd** compression.
+- **Performance Optimizations**: Implemented `sync.Pool` for writers, buffers, and encoders to minimize GC pressure and improve throughput.
+- **Batch Compression**: New `BatchCompressor` for significantly better compression ratios on small database records.
+- **Cluster Integration**: Compression support for replication traffic and data migration.
 
+#### 2. Advanced Cluster & Replication
+- **Partition Key Index**: Implemented a per-partition key index in `UnifiedClusterManager` for O(1) partition lookups and efficient scanning.
+- **Partition Migration**: Robust live data migration between nodes with completion signaling and automatic recovery.
+- **Locality-Aware Routing**: New routing strategies that respect datacenter, rack, and zone metadata for reduced latency in geo-distributed deployments.
+- **Unified Messaging**: Consolidated cluster management and data replication protocols for improved reliability.
+- **Cluster Health Monitoring**: Real-time health tracking and reporting for all cluster nodes.
+
+#### 3. SQL Engine Enhancements
+- **Database Management**: Integrated `DatabaseManager` into the `Executor` for full support of `CREATE DATABASE`, `DROP DATABASE`, and `INSPECT DATABASES`.
+- **Integrated Audit Trail**: (details below)
+
+#### 4. Comprehensive Audit Trail System
 **MAJOR FEATURE**: Complete audit logging and trail management for all database operations.
+- **Audit Event Tracking**: Automatic logging of all database operations (Auth, DDL, DML, DCL, Admin, Cluster).
+- **SQL-Based Inspection**: New `INSPECT AUDIT` and `INSPECT AUDIT STATS` commands.
+- **Audit Export**: New `EXPORT AUDIT` command supporting JSON, CSV, and SQL formats.
+
+#### 5. SDK Enhancements
+- **Audit Client**: Implemented `AuditClient` in the Go SDK for programmatic access to audit logs.
+- **Enhanced Sessions**: Real query execution logic replaced previous stubs in the `Session` object.
+
+### Fixed
+- Resolved circular dependencies between `sql` and `audit` packages using interface abstractions.
+- Fixed non-deterministic behavior in round-robin routing tests.
+- Corrected version information sourcing from build metadata.
+- Fixed broken import in `examples/horizontal_scaling_demo.go`.
+- Improved configuration validation for cluster mode.
+
+### Comprehensive Audit Trail Details
+(details below remain same)
 
 - **Audit Event Tracking**: Automatic logging of all database operations
   - Authentication events: LOGIN, LOGOUT, AUTH_FAILED

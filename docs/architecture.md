@@ -967,6 +967,13 @@ FlyDB implements a **true distributed database** with horizontal scaling through
 - Consistent hashing with virtual nodes (150 per physical node)
 - Even data distribution across cluster
 - Automatic partition assignment and rebalancing
+- **Per-partition key index** for optimized scanning and migration
+
+**Partition Migration:**
+- Live data migration between nodes during rebalance
+- Zero-downtime partition ownership transfer
+- Robust completion signaling between source and destination nodes
+- Automatic recovery of interrupted migrations
 
 **Partition-Aware Routing:**
 ```

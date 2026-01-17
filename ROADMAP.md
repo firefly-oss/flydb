@@ -53,6 +53,12 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Data Directory Config | `FLYDB_DATA_DIR` env var, default `/var/lib/flydb` | 01.26.4 |
 | Role-Based Access Control | CREATE/DROP ROLE, GRANT/REVOKE ROLE, built-in roles | 01.26.5 |
 | RBAC Inspection | INSPECT ROLES, ROLE, USER, USER ROLES, USER PRIVILEGES | 01.26.5 |
+| Compression System | Configurable LZ4, Snappy, Zstd algorithms | 01.26.17 |
+| Batch Compression | Multi-record compression for improved ratios | 01.26.17 |
+| Resource Pooling | sync.Pool for compression writers and buffers | 01.26.17 |
+| Cluster Key Index | O(1) partition lookups and efficient scanning | 01.26.17 |
+| Live Migration | Robust data migration between cluster nodes | 01.26.17 |
+| Locality-Aware Routing| Topology-aware request routing | 01.26.17 |
 | Audit Trail | Comprehensive audit logging for all database operations | 01.26.17 |
 | Audit Log Querying | INSPECT AUDIT with filtering, time ranges, user/event filters | 01.26.17 |
 | Audit Log Export | Export to JSON, CSV, SQL formats | 01.26.17 |
