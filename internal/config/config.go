@@ -24,27 +24,30 @@ The configuration system supports multiple sources with clear precedence:
  4. Default values (lowest priority)
 
 Configuration File Format:
-The configuration file uses TOML format for readability and ease of use.
+The configuration file uses JSON format for easy parsing and wide tool support.
 
-Example configuration file:
+Example configuration file (flydb.json):
 
-	# FlyDB Configuration
-	role = "standalone"
-	port = 8889              # Client connections (binary protocol)
-	replication_port = 9999
-	data_dir = "/var/lib/flydb"
-	buffer_pool_size = 0  # 0 = auto-size based on available memory
-	checkpoint_secs = 60  # Checkpoint interval in seconds
-	encryption_enabled = true
-	log_level = "info"
-	log_json = false
+	{
+	  "role": "standalone",
+	  "port": 8889,
+	  "replication_port": 9999,
+	  "cluster_port": 9998,
+	  "data_dir": "/var/lib/flydb",
+	  "buffer_pool_size": 0,
+	  "checkpoint_secs": 60,
+	  "encryption_enabled": true,
+	  "tls_enabled": true,
+	  "log_level": "info",
+	  "log_json": false
+	}
 
 IMPORTANT - Data-at-Rest Encryption:
 Encryption is ENABLED by default for security. When encryption is enabled, you MUST
 provide a passphrase. There are two ways to set the passphrase:
  1. Environment variable: Set FLYDB_ENCRYPTION_PASSPHRASE before starting FlyDB
  2. Interactive wizard: Run FlyDB without arguments and enter passphrase when prompted
-To disable encryption, set encryption_enabled = false in your config file.
+To disable encryption, set "encryption_enabled": false in your config file.
 
 Migration Note for Existing Users:
 If you are upgrading from a version where encryption was disabled by default,
@@ -134,14 +137,11 @@ func GetDefaultDataDir() string {
 }
 
 // Default configuration file paths (searched in order).
-// Supports both JSON (.json) and TOML (.conf) formats.
+// Only JSON format (.json) is supported.
 var DefaultConfigPaths = []string{
 	"/etc/flydb/flydb.json",
-	"/etc/flydb/flydb.conf",
 	"$HOME/.config/flydb/flydb.json",
-	"$HOME/.config/flydb/flydb.conf",
 	"./flydb.json",
-	"./flydb.conf",
 }
 
 // MetricsConfig holds Prometheus metrics configuration.
@@ -479,10 +479,8 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// LoadFromFile loads configuration from a JSON or TOML file.
-// The format is auto-detected based on file extension:
-//   - .json: JSON format
-//   - .conf, .toml: TOML format (for backward compatibility)
+// LoadFromFile loads configuration from a JSON file.
+// Only JSON format is supported.
 func (m *Manager) LoadFromFile(path string) error {
 	// Expand environment variables in path
 	path = os.ExpandEnv(path)
@@ -494,18 +492,9 @@ func (m *Manager) LoadFromFile(path string) error {
 
 	cfg := DefaultConfig()
 
-	// Auto-detect format based on file extension
-	ext := strings.ToLower(filepath.Ext(path))
-	if ext == ".json" {
-		// Parse as JSON
-		if err := json.Unmarshal(data, cfg); err != nil {
-			return fmt.Errorf("failed to parse JSON config file: %w", err)
-		}
-	} else {
-		// Parse as TOML (default for .conf, .toml, or no extension)
-		if err := parseTOML(string(data), cfg); err != nil {
-			return fmt.Errorf("failed to parse TOML config file: %w", err)
-		}
+	// Parse as JSON
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("failed to parse JSON config file: %w", err)
 	}
 
 	cfg.ConfigFile = path
@@ -713,175 +702,7 @@ func (m *Manager) Reload() error {
 	return nil
 }
 
-// parseTOML is a simple TOML parser for our configuration format.
-// It handles the subset of TOML we need without external dependencies.
-func parseTOML(data string, cfg *Config) error {
-	lines := strings.Split(data, "\n")
 
-	for lineNum, line := range lines {
-		// Remove comments
-		if idx := strings.Index(line, "#"); idx != -1 {
-			line = line[:idx]
-		}
-		line = strings.TrimSpace(line)
-
-		// Skip empty lines
-		if line == "" {
-			continue
-		}
-
-		// Parse key = value
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("line %d: invalid syntax: %s", lineNum+1, line)
-		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		// Remove quotes from string values
-		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') ||
-			(value[0] == '\'' && value[len(value)-1] == '\'')) {
-			value = value[1 : len(value)-1]
-		}
-
-		// Apply value to config
-		if err := applyConfigValue(cfg, key, value); err != nil {
-			return fmt.Errorf("line %d: %w", lineNum+1, err)
-		}
-	}
-
-	return nil
-}
-
-// applyConfigValue applies a key-value pair to the configuration.
-func applyConfigValue(cfg *Config, key, value string) error {
-	switch key {
-	case "port", "binary_port":
-		// Accept both "port" and "binary_port" for backward compatibility
-		// (binary_port was used when text protocol existed)
-		port, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid port value: %s", value)
-		}
-		cfg.Port = port
-	case "replication_port":
-		port, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid replication_port value: %s", value)
-		}
-		cfg.ReplPort = port
-	case "role":
-		cfg.Role = value
-	case "db_path":
-		cfg.DBPath = value
-	case "data_dir":
-		cfg.DataDir = value
-	case "storage_engine":
-		cfg.StorageEngine = value
-	case "buffer_pool_size":
-		size, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid buffer_pool_size value: %s", value)
-		}
-		cfg.BufferPoolSize = size
-	case "checkpoint_secs":
-		secs, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid checkpoint_secs value: %s", value)
-		}
-		cfg.CheckpointSecs = secs
-	case "log_level":
-		cfg.LogLevel = value
-	case "log_json":
-		cfg.LogJSON = strings.ToLower(value) == "true" || value == "1"
-	case "encryption_enabled":
-		cfg.EncryptionEnabled = strings.ToLower(value) == "true" || value == "1"
-
-	// TLS configuration
-	case "tls_enabled":
-		cfg.TLSEnabled = strings.ToLower(value) == "true" || value == "1"
-	case "tls_cert_file":
-		cfg.TLSCertFile = value
-	case "tls_key_file":
-		cfg.TLSKeyFile = value
-	case "tls_auto_gen":
-		cfg.TLSAutoGen = strings.ToLower(value) == "true" || value == "1"
-
-	// Cluster configuration
-	case "cluster_port":
-		port, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid cluster_port value: %s", value)
-		}
-		cfg.ClusterPort = port
-	case "cluster_peers":
-		// Parse as array: ["addr1", "addr2"] or comma-separated
-		value = strings.TrimSpace(value)
-		if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
-			// Array format
-			value = value[1 : len(value)-1]
-		}
-		peers := strings.Split(value, ",")
-		cfg.ClusterPeers = make([]string, 0, len(peers))
-		for _, peer := range peers {
-			peer = strings.TrimSpace(peer)
-			peer = strings.Trim(peer, "\"'")
-			if peer != "" {
-				cfg.ClusterPeers = append(cfg.ClusterPeers, peer)
-			}
-		}
-	case "heartbeat_interval_ms":
-		ms, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid heartbeat_interval_ms value: %s", value)
-		}
-		cfg.HeartbeatInterval = ms
-	case "heartbeat_timeout_ms":
-		ms, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid heartbeat_timeout_ms value: %s", value)
-		}
-		cfg.HeartbeatTimeout = ms
-	case "election_timeout_ms":
-		ms, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid election_timeout_ms value: %s", value)
-		}
-		cfg.ElectionTimeout = ms
-	case "min_quorum":
-		q, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid min_quorum value: %s", value)
-		}
-		cfg.MinQuorum = q
-	case "enable_pre_vote":
-		cfg.EnablePreVote = strings.ToLower(value) == "true" || value == "1"
-	case "replication_mode":
-		cfg.ReplicationMode = strings.ToLower(value)
-	case "sync_timeout_ms":
-		ms, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid sync_timeout_ms value: %s", value)
-		}
-		cfg.SyncTimeout = ms
-	case "max_replication_lag_ms":
-		ms, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid max_replication_lag_ms value: %s", value)
-		}
-		cfg.MaxReplicationLag = ms
-	case "discovery_enabled":
-		cfg.DiscoveryEnabled = strings.ToLower(value) == "true" || value == "1"
-	case "discovery_cluster_id":
-		cfg.DiscoveryClusterID = value
-
-	default:
-		// Ignore unknown keys for forward compatibility
-	}
-
-	return nil
-}
 
 // String returns a string representation of the configuration.
 func (c *Config) String() string {
@@ -910,115 +731,17 @@ func (c *Config) IsEncryptionEnabled() bool {
 	return c.EncryptionEnabled
 }
 
-// ToTOML returns the configuration as a TOML string.
-func (c *Config) ToTOML() string {
-	var sb strings.Builder
-	sb.WriteString("# FlyDB Configuration File\n")
-	sb.WriteString("# Generated by FlyDB\n\n")
-	sb.WriteString("# Server role: standalone or cluster\n")
-	sb.WriteString(fmt.Sprintf("role = \"%s\"\n\n", c.Role))
-	sb.WriteString("# Network ports\n")
-	sb.WriteString("# Port is for client connections (binary protocol)\n")
-	sb.WriteString(fmt.Sprintf("port = %d\n", c.Port))
-	sb.WriteString(fmt.Sprintf("replication_port = %d\n", c.ReplPort))
-	sb.WriteString(fmt.Sprintf("cluster_port = %d\n\n", c.ClusterPort))
-
-	// Cluster configuration
-	if c.Role == "cluster" || len(c.ClusterPeers) > 0 {
-		sb.WriteString("# Cluster configuration\n")
-		sb.WriteString("# List of peer addresses (comma-separated or array format)\n")
-		if len(c.ClusterPeers) > 0 {
-			sb.WriteString("cluster_peers = [")
-			for i, peer := range c.ClusterPeers {
-				if i > 0 {
-					sb.WriteString(", ")
-				}
-				sb.WriteString(fmt.Sprintf("\"%s\"", peer))
-			}
-			sb.WriteString("]\n")
-		} else {
-			sb.WriteString("# cluster_peers = [\"host1:9998\", \"host2:9998\"]\n")
-		}
-		sb.WriteString(fmt.Sprintf("heartbeat_interval_ms = %d\n", c.HeartbeatInterval))
-		sb.WriteString(fmt.Sprintf("heartbeat_timeout_ms = %d\n", c.HeartbeatTimeout))
-		sb.WriteString(fmt.Sprintf("election_timeout_ms = %d\n", c.ElectionTimeout))
-		sb.WriteString(fmt.Sprintf("min_quorum = %d  # 0 = auto-calculate\n", c.MinQuorum))
-		sb.WriteString(fmt.Sprintf("enable_pre_vote = %v\n\n", c.EnablePreVote))
+// ToJSON returns the configuration as a JSON string with pretty formatting.
+func (c *Config) ToJSON() string {
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		// This should never happen with our config struct
+		return "{}"
 	}
-
-	// Replication configuration
-	sb.WriteString("# Replication mode: async, semi_sync, or sync\n")
-	sb.WriteString(fmt.Sprintf("replication_mode = \"%s\"\n", c.ReplicationMode))
-	sb.WriteString(fmt.Sprintf("sync_timeout_ms = %d\n", c.SyncTimeout))
-	sb.WriteString(fmt.Sprintf("max_replication_lag_ms = %d\n\n", c.MaxReplicationLag))
-
-	// Raft consensus configuration (01.26.13+)
-	sb.WriteString("# Raft Consensus Configuration (01.26.13+)\n")
-	sb.WriteString("# Enable Raft consensus for leader election (replaces legacy Bully algorithm)\n")
-	sb.WriteString("# Raft provides stronger consistency guarantees and pre-vote protocol\n")
-	sb.WriteString(fmt.Sprintf("enable_raft = %v\n", c.EnableRaft))
-	sb.WriteString(fmt.Sprintf("raft_election_timeout_ms = %d\n", c.RaftElectionTimeout))
-	sb.WriteString(fmt.Sprintf("raft_heartbeat_interval_ms = %d\n\n", c.RaftHeartbeatInterval))
-
-	// Service Discovery configuration
-	sb.WriteString("# Service Discovery Configuration\n")
-	sb.WriteString("# Enable mDNS-based service discovery for automatic cluster formation\n")
-	sb.WriteString("# When enabled, nodes advertise themselves and can discover peers automatically\n")
-	sb.WriteString(fmt.Sprintf("discovery_enabled = %v\n", c.DiscoveryEnabled))
-	sb.WriteString("# Cluster ID for discovery (nodes with same cluster_id will discover each other)\n")
-	sb.WriteString("# Leave empty to use the default cluster ID\n")
-	sb.WriteString(fmt.Sprintf("discovery_cluster_id = \"%s\"\n\n", c.DiscoveryClusterID))
-
-	// Compression configuration (01.26.13+)
-	sb.WriteString("# Compression Configuration (01.26.13+)\n")
-	sb.WriteString("# Enable compression for WAL entries and replication traffic\n")
-	sb.WriteString("# Reduces disk I/O and network bandwidth at the cost of CPU\n")
-	sb.WriteString(fmt.Sprintf("enable_compression = %v\n", c.EnableCompression))
-	sb.WriteString("# Compression algorithm: gzip, lz4, snappy, or zstd\n")
-	sb.WriteString(fmt.Sprintf("compression_algorithm = \"%s\"\n", c.CompressionAlgorithm))
-	sb.WriteString("# Minimum payload size in bytes to compress (smaller payloads skip compression)\n")
-	sb.WriteString(fmt.Sprintf("compression_min_size = %d\n\n", c.CompressionMinSize))
-
-	// Performance configuration (01.26.13+)
-	sb.WriteString("# Performance Configuration (01.26.13+)\n")
-	sb.WriteString("# Enable zero-copy buffer pooling for reduced memory allocations\n")
-	sb.WriteString(fmt.Sprintf("enable_zero_copy = %v\n", c.EnableZeroCopy))
-	sb.WriteString("# Buffer pool size in bytes for zero-copy operations (0 = auto-size)\n")
-	sb.WriteString(fmt.Sprintf("buffer_pool_size_bytes = %d\n\n", c.BufferPoolSizeBytes))
-
-	sb.WriteString("# Storage\n")
-	sb.WriteString(fmt.Sprintf("data_dir = \"%s\"\n", c.DataDir))
-	sb.WriteString(fmt.Sprintf("db_path = \"%s\"\n\n", c.DBPath))
-
-	sb.WriteString("# Data-at-rest encryption (ENABLED BY DEFAULT for security)\n")
-	sb.WriteString("# When enabled, you MUST set FLYDB_ENCRYPTION_PASSPHRASE environment variable\n")
-	sb.WriteString("# To disable encryption, set encryption_enabled = false\n")
-	sb.WriteString("# WARNING: Keep your passphrase safe - data cannot be recovered without it!\n")
-	sb.WriteString(fmt.Sprintf("encryption_enabled = %v\n\n", c.EncryptionEnabled))
-
-	sb.WriteString("# TLS Configuration (ENABLED BY DEFAULT for security)\n")
-	sb.WriteString("# TLS encrypts client-server connections using TLS 1.2+\n")
-	sb.WriteString(fmt.Sprintf("tls_enabled = %v\n", c.TLSEnabled))
-	if c.TLSCertFile != "" {
-		sb.WriteString(fmt.Sprintf("tls_cert_file = \"%s\"\n", c.TLSCertFile))
-	} else {
-		sb.WriteString("# tls_cert_file = \"/etc/flydb/certs/server.crt\"  # Auto-determined if not set\n")
-	}
-	if c.TLSKeyFile != "" {
-		sb.WriteString(fmt.Sprintf("tls_key_file = \"%s\"\n", c.TLSKeyFile))
-	} else {
-		sb.WriteString("# tls_key_file = \"/etc/flydb/certs/server.key\"   # Auto-determined if not set\n")
-	}
-	sb.WriteString("# Auto-generate self-signed certificates if not found (for development/testing)\n")
-	sb.WriteString(fmt.Sprintf("tls_auto_gen = %v\n\n", c.TLSAutoGen))
-
-	sb.WriteString("# Logging\n")
-	sb.WriteString(fmt.Sprintf("log_level = \"%s\"\n", c.LogLevel))
-	sb.WriteString(fmt.Sprintf("log_json = %v\n", c.LogJSON))
-	return sb.String()
+	return string(data)
 }
 
-// SaveToFile saves the configuration to a file.
+// SaveToFile saves the configuration to a JSON file.
 func (c *Config) SaveToFile(path string) error {
 	// Expand environment variables
 	path = os.ExpandEnv(path)
@@ -1029,8 +752,8 @@ func (c *Config) SaveToFile(path string) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// Write file
-	if err := os.WriteFile(path, []byte(c.ToTOML()), 0644); err != nil {
+	// Write file as JSON
+	if err := os.WriteFile(path, []byte(c.ToJSON()), 0644); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 

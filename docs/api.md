@@ -1741,7 +1741,7 @@ The wizard automatically detects if `FLYDB_ENCRYPTION_PASSPHRASE` is already set
 
 To disable encryption, set `encryption_enabled = false` in your config file:
 
-```toml
+```json
 # flydb.conf
 encryption_enabled = false
 ```

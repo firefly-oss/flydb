@@ -493,7 +493,7 @@ The installation creates:
 
 Default locations:
 - **Binaries**: `/usr/local/bin` (system) or `~/.local/bin` (user)
-- **Configuration**: `/etc/flydb/flydb.conf` (system) or `~/.config/flydb/flydb.conf` (user)
+- **Configuration**: `/etc/flydb/flydb.json` (system) or `~/.config/flydb/flydb.json` (user)
 - **Data**: `/var/lib/flydb` (system) or `~/.local/share/flydb` (user)
 
 ### Uninstallation
@@ -738,17 +738,17 @@ The wizard prompts for all relevant settings based on your selected mode and dis
 
 ### Configuration File
 
-FlyDB supports both **JSON** and **TOML** configuration files for easier deployment and management. The format is auto-detected based on file extension (`.json` or `.conf`/`.toml`).
+FlyDB uses **JSON** configuration files for easy deployment and management.
 
 The configuration file is automatically loaded from these locations (in order of precedence):
 
 1. Path specified by `--config` flag
 2. Path specified by `FLYDB_CONFIG_FILE` environment variable
-3. `/etc/flydb/flydb.json` or `/etc/flydb/flydb.conf` (system-wide)
-4. `~/.config/flydb/flydb.json` or `~/.config/flydb/flydb.conf` (user-specific)
-5. `./flydb.json` or `./flydb.conf` (current directory)
+3. `/etc/flydb/flydb.json` (system-wide)
+4. `~/.config/flydb/flydb.json` (user-specific)
+5. `./flydb.json` (current directory)
 
-**Example JSON configuration** (recommended):
+**Example JSON configuration**:
 
 ```json
 {
@@ -774,43 +774,6 @@ The configuration file is automatically loaded from these locations (in order of
     }
   }
 }
-```
-
-**Example TOML configuration** (legacy, still supported):
-
-```toml
-# Server role: standalone or cluster
-role = "standalone"
-
-# Network ports
-port = 8889
-replication_port = 9999
-
-# Storage - Multi-database mode (always enabled)
-# Each database is stored in a separate directory under data_dir
-data_dir = "/var/lib/flydb"
-
-# Default settings for new databases
-default_database = "default"
-default_encoding = "UTF8"
-default_locale = "en_US"
-default_collation = "default"
-
-# TLS Configuration (ENABLED BY DEFAULT for security)
-# TLS encrypts client-server connections using TLS 1.2+
-tls_enabled = true
-# tls_cert_file = "/etc/flydb/certs/server.crt"  # Auto-determined if not set
-# tls_key_file = "/etc/flydb/certs/server.key"   # Auto-determined if not set
-tls_auto_gen = true  # Auto-generate self-signed certificates if not found
-
-# Data-at-rest encryption (ENABLED BY DEFAULT)
-# When enabled, you MUST set FLYDB_ENCRYPTION_PASSPHRASE environment variable
-# To disable encryption, set encryption_enabled = false
-encryption_enabled = true
-
-# Logging
-log_level = "info"
-log_json = false
 ```
 
 ### Configuration Precedence

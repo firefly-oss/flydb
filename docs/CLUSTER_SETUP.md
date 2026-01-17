@@ -144,19 +144,16 @@ On additional nodes:
 
 ### Configuration
 
-Edit `/etc/flydb/flydb.toml`:
+Edit `/etc/flydb/flydb.json`:
 
-```toml
-# Node identity
-node_id = "node1"
-
-# Network addresses
-bind_addr = ":6380"          # Redis protocol
-http_addr = ":8080"          # HTTP API
-cluster_addr = ":7946"       # Gossip protocol
-raft_addr = ":7947"          # Raft consensus
-
-# Cluster peers (comma-separated)
+```json
+{
+  "node_id": "node1",
+  "port": 8889,
+  "replication_port": 9999,
+  "cluster_port": 9998,
+  "role": "cluster",
+  "cluster_peers": [
 cluster_peers = "192.168.1.11:7946,192.168.1.12:7946"
 
 # Service discovery
@@ -253,7 +250,7 @@ journalctl -u flydb -f
 
 **Verify configuration:**
 ```bash
-cat /etc/flydb/flydb.toml | grep -A 5 cluster
+cat /etc/flydb/flydb.json | jq '.cluster_peers'
 ```
 
 ### Performance Issues
@@ -269,11 +266,10 @@ curl http://localhost:8080/metrics
 ```
 
 **Adjust routing strategy:**
-```toml
-# Try different strategies
-routing_strategy = "least-loaded"  # For balanced load
-routing_strategy = "locality-aware"  # For geo-distributed
-routing_strategy = "hybrid"  # Best of all
+```json
+{
+  "routing_strategy": "least-loaded"
+}
 ```
 
 ## Best Practices

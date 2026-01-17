@@ -614,7 +614,7 @@ Each 8KB page uses a slotted page layout for variable-length records:
 
 The storage engine is selected via configuration:
 
-```toml
+```json
 # Storage engine: "memory" (default) or "disk"
 storage_engine = "disk"
 
@@ -1038,7 +1038,7 @@ FlyDB supports configurable compression for WAL and replication traffic:
 | Zstd | `zstd` | Best ratio, configurable speed |
 
 Configuration:
-```toml
+```json
 enable_compression = true
 compression_algorithm = "gzip"
 compression_min_size = 256

@@ -161,17 +161,17 @@ func TestLoadFromFile(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	configContent := `# Test configuration
-role = "cluster"
-port = 9000
-replication_port = 9002
-db_path = "/tmp/test.fdb"
-log_level = "debug"
-log_json = true
-cluster_peers = ["node2:9998"]
-`
+	configContent := `{
+  "role": "cluster",
+  "port": 9000,
+  "replication_port": 9002,
+  "db_path": "/tmp/test.fdb",
+  "log_level": "debug",
+  "log_json": true,
+  "cluster_peers": ["node2:9998"]
+}`
 
-	configPath := filepath.Join(tmpDir, "flydb.conf")
+	configPath := filepath.Join(tmpDir, "flydb.json")
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}
@@ -261,12 +261,13 @@ func TestConfigPrecedence(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	// Config file sets port to 9000
-	configContent := `port = 9000
-role = "standalone"
-db_path = "test.fdb"
-log_level = "info"
-`
-	configPath := filepath.Join(tmpDir, "flydb.conf")
+	configContent := `{
+  "port": 9000,
+  "role": "standalone",
+  "db_path": "test.fdb",
+  "log_level": "info"
+}`
+	configPath := filepath.Join(tmpDir, "flydb.json")
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}
@@ -290,7 +291,7 @@ log_level = "info"
 	}
 }
 
-func TestToTOML(t *testing.T) {
+func TestToJSON(t *testing.T) {
 	cfg := &Config{
 		Port:         8889,
 		ReplPort:     9999,
@@ -301,17 +302,17 @@ func TestToTOML(t *testing.T) {
 		LogJSON:      false,
 	}
 
-	toml := cfg.ToTOML()
+	jsonStr := cfg.ToJSON()
 
 	// Check that key values are present
-	if !contains(toml, "role = \"cluster\"") {
-		t.Error("TOML output missing role")
+	if !contains(jsonStr, "\"role\": \"cluster\"") {
+		t.Error("JSON output missing role")
 	}
-	if !contains(toml, "port = 8889") {
-		t.Error("TOML output missing port")
+	if !contains(jsonStr, "\"port\": 8889") {
+		t.Error("JSON output missing port")
 	}
-	if !contains(toml, "db_path = \"/var/lib/flydb/data.fdb\"") {
-		t.Error("TOML output missing db_path")
+	if !contains(jsonStr, "\"db_path\": \"/var/lib/flydb/data.fdb\"") {
+		t.Error("JSON output missing db_path")
 	}
 }
 
@@ -327,7 +328,7 @@ func TestSaveToFile(t *testing.T) {
 	cfg.Role = "cluster"
 	cfg.ClusterPeers = []string{"node2:9998"}
 
-	configPath := filepath.Join(tmpDir, "subdir", "flydb.conf")
+	configPath := filepath.Join(tmpDir, "subdir", "flydb.json")
 	if err := cfg.SaveToFile(configPath); err != nil {
 		t.Fatalf("SaveToFile failed: %v", err)
 	}
@@ -360,12 +361,13 @@ func TestReload(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	// Initial config
-	configContent := `port = 9000
-role = "standalone"
-db_path = "test.fdb"
-log_level = "info"
-`
-	configPath := filepath.Join(tmpDir, "flydb.conf")
+	configContent := `{
+  "port": 9000,
+  "role": "standalone",
+  "db_path": "test.fdb",
+  "log_level": "info"
+}`
+	configPath := filepath.Join(tmpDir, "flydb.json")
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}
@@ -387,11 +389,12 @@ log_level = "info"
 	})
 
 	// Update config file
-	newContent := `port = 8000
-role = "standalone"
-db_path = "test.fdb"
-log_level = "debug"
-`
+	newContent := `{
+  "port": 8000,
+  "role": "standalone",
+  "db_path": "test.fdb",
+  "log_level": "debug"
+}`
 	if err := os.WriteFile(configPath, []byte(newContent), 0644); err != nil {
 		t.Fatalf("Failed to update config file: %v", err)
 	}
@@ -462,14 +465,15 @@ func TestEncryptionConfigFromFile(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	configContent := `role = "standalone"
-port = 8889
-replication_port = 9999
-db_path = "test.fdb"
-encryption_enabled = true
-log_level = "info"
-`
-	configPath := filepath.Join(tmpDir, "flydb.conf")
+	configContent := `{
+  "role": "standalone",
+  "port": 8889,
+  "replication_port": 9999,
+  "db_path": "test.fdb",
+  "encryption_enabled": true,
+  "log_level": "info"
+}`
+	configPath := filepath.Join(tmpDir, "flydb.json")
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}
@@ -513,7 +517,7 @@ func TestEncryptionConfigFromEnv(t *testing.T) {
 	}
 }
 
-func TestEncryptionConfigToTOML(t *testing.T) {
+func TestEncryptionConfigToJSON(t *testing.T) {
 	cfg := &Config{
 		Port:              8889,
 		ReplPort:          9999,
@@ -524,10 +528,10 @@ func TestEncryptionConfigToTOML(t *testing.T) {
 		LogJSON:           false,
 	}
 
-	toml := cfg.ToTOML()
+	jsonStr := cfg.ToJSON()
 
-	if !contains(toml, "encryption_enabled = true") {
-		t.Error("TOML output missing encryption_enabled")
+	if !contains(jsonStr, "\"encryption_enabled\": true") {
+		t.Error("JSON output missing encryption_enabled")
 	}
 }
 

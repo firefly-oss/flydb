@@ -1615,7 +1615,7 @@ func (rn *RaftNode) conductPreVote() bool {
 
 **Configuration:**
 
-```toml
+```json
 enable_raft = true
 raft_election_timeout_ms = 1000
 raft_heartbeat_interval_ms = 150
@@ -1945,7 +1945,7 @@ func (bc *BatchCompressor) Flush() ([]byte, error) {
 
 **Configuration:**
 
-```toml
+```json
 enable_compression = true
 compression_algorithm = "gzip"  # gzip, lz4, snappy, zstd
 compression_min_size = 256      # Don't compress small payloads
