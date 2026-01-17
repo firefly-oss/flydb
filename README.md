@@ -802,7 +802,7 @@ Configuration values are applied in the following order (highest priority first)
 | `FLYDB_TLS_KEY_FILE` | Path to TLS private key file (auto-determined if not set) |
 | `FLYDB_TLS_AUTO_GEN` | Auto-generate self-signed certificates (true/false, default: **true**) |
 | `FLYDB_ENCRYPTION_ENABLED` | Enable data-at-rest encryption (true/false, default: **true**) |
-| `FLYDB_ENCRYPTION_PASSPHRASE` | **Required** when encryption enabled - passphrase for key derivation |
+| `FLYDB_ENCRYPTION_PASSPHRASE` | **Required** when encryption enabled - passphrase for key derivation (NOT stored in config file) |
 | `FLYDB_LOG_LEVEL` | Log level (debug, info, warn, error) |
 | `FLYDB_LOG_JSON` | Enable JSON logging (true/false) |
 | `FLYDB_ADMIN_PASSWORD` | Initial admin password (first-time setup) |
@@ -962,12 +962,16 @@ export FLYDB_ADMIN_PASSWORD="your-secure-password"
 
 ### Encryption at Rest
 
-All data is encrypted using AES-256-GCM by default. Set the encryption passphrase:
+All data is encrypted using AES-256-GCM by default.
+
+**⚠️ IMPORTANT:** The encryption passphrase is **NOT stored in the configuration file** for security reasons. You must provide it via the `FLYDB_ENCRYPTION_PASSPHRASE` environment variable:
 
 ```bash
 export FLYDB_ENCRYPTION_PASSPHRASE="your-passphrase"
 ./flydb -data-dir ./data
 ```
+
+The installer will auto-generate a secure passphrase if you don't provide one. **Save this passphrase securely** - without it, you cannot access your encrypted data!
 
 To disable encryption:
 

@@ -1,13 +1,17 @@
 {
+  "_comment": "FlyDB Configuration File Example",
+  "_documentation": "https://flydb.dev/docs/configuration",
+
   "port": 8889,
   "replication_port": 9999,
   "cluster_port": 9998,
   "role": "standalone",
-  
+
   "data_dir": "/var/lib/flydb",
   "buffer_pool_size": 0,
   "checkpoint_secs": 60,
-  
+
+  "_encryption_note": "IMPORTANT: Encryption passphrase is NOT stored in this file for security. Set via FLYDB_ENCRYPTION_PASSPHRASE environment variable.",
   "encryption_enabled": true,
   
   "tls_enabled": true,

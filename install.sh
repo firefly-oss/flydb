@@ -2257,9 +2257,10 @@ show_configuration_summary() {
 
     # Show credentials reminder if encryption is enabled
     if [[ "$ENCRYPTION_ENABLED" == "true" ]] && [[ -n "$ENCRYPTION_PASSPHRASE" ]]; then
-        echo -e "  ${YELLOW}${BOLD}⚠ ENCRYPTION PASSPHRASE${RESET}"
+        echo -e "  ${YELLOW}${BOLD}⚠ ENCRYPTION PASSPHRASE (NOT STORED IN CONFIG)${RESET}"
         echo -e "      ${CYAN}${ENCRYPTION_PASSPHRASE}${RESET}"
-        echo -e "      ${DIM}(Save this securely - required for data access)${RESET}"
+        echo -e "      ${DIM}(Save this securely - NOT stored in flydb.json)${RESET}"
+        echo -e "      ${DIM}(Required via FLYDB_ENCRYPTION_PASSPHRASE env var)${RESET}"
         echo ""
     fi
 }
@@ -2319,6 +2320,9 @@ configure_section_security() {
 
     if prompt_yes_no "Enable data-at-rest encryption" "$([[ "$ENCRYPTION_ENABLED" == "true" ]] && echo "y" || echo "n")"; then
         ENCRYPTION_ENABLED="true"
+        echo ""
+        echo -e "  ${YELLOW}${BOLD}⚠ IMPORTANT:${RESET} ${YELLOW}Passphrase is NOT stored in config file${RESET}"
+        echo -e "  ${DIM}For security, you must provide it via FLYDB_ENCRYPTION_PASSPHRASE env var${RESET}"
         echo ""
         echo -e "  ${DIM}Leave empty to auto-generate a secure passphrase${RESET}"
         local custom_pass
@@ -3661,6 +3665,32 @@ print_post_install() {
         echo ""
     fi
 
+    # Encryption Passphrase Warning (if enabled and auto-generated)
+    if [[ "$ENCRYPTION_ENABLED" == "true" ]] && [[ -n "$ENCRYPTION_PASSPHRASE" ]]; then
+        echo -e "  ${RED}${BOLD}⚠  IMPORTANT: SAVE YOUR ENCRYPTION PASSPHRASE${RESET}"
+        separator 70
+        echo ""
+        echo -e "    ${YELLOW}Your auto-generated encryption passphrase:${RESET}"
+        echo ""
+        echo -e "    ${CYAN}${BOLD}${ENCRYPTION_PASSPHRASE}${RESET}"
+        echo ""
+        echo -e "    ${RED}${BOLD}⚠  This passphrase is NOT stored in the configuration file!${RESET}"
+        echo -e "    ${DIM}For security reasons, you must provide it via environment variable.${RESET}"
+        echo ""
+        echo -e "    ${BOLD}To start FlyDB with encryption:${RESET}"
+        echo ""
+        echo -e "    ${GREEN}export FLYDB_ENCRYPTION_PASSPHRASE=\"${ENCRYPTION_PASSPHRASE}\"${RESET}"
+        if [[ "$in_path" == true ]]; then
+            echo -e "    ${GREEN}flydb${RESET}"
+        else
+            echo -e "    ${GREEN}${bin_dir}/flydb${RESET}"
+        fi
+        echo ""
+        echo -e "    ${YELLOW}${BOLD}Save this passphrase in a secure location (password manager, vault, etc.)${RESET}"
+        echo -e "    ${YELLOW}${BOLD}Without it, you will NOT be able to access your encrypted data!${RESET}"
+        echo ""
+    fi
+
     # Configuration Section
     echo -e "  ${BOLD}Configuration:${RESET}"
     separator 70
@@ -3669,11 +3699,11 @@ print_post_install() {
         echo -e "    ${CYAN}# Edit configuration:${RESET}"
         echo -e "    ${GREEN}${EDITOR:-vi} ${config_dir}/flydb.json${RESET}"
         echo ""
-    fi
-    if [[ "$ENCRYPTION_ENABLED" == "true" ]]; then
-        echo -e "    ${CYAN}# Set encryption passphrase (required):${RESET}"
-        echo -e "    ${GREEN}export FLYDB_ENCRYPTION_PASSPHRASE=\"your-secure-passphrase\"${RESET}"
-        echo ""
+        if [[ "$ENCRYPTION_ENABLED" == "true" ]]; then
+            echo -e "    ${DIM}# Note: Encryption passphrase is NOT in config file${RESET}"
+            echo -e "    ${DIM}# It must be provided via FLYDB_ENCRYPTION_PASSPHRASE environment variable${RESET}"
+            echo ""
+        fi
     fi
     echo -e "    ${CYAN}# View all options:${RESET}"
     if [[ "$in_path" == true ]]; then
