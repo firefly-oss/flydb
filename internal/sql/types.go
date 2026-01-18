@@ -29,6 +29,9 @@ Supported Column Types:
   - BLOB: Binary data (base64 encoded in storage)
   - UUID: Universally unique identifier (RFC 4122 format)
   - JSONB: Binary JSON for structured data
+  - INET: IPv4/IPv6 address or CIDR
+  - SET: Unordered collection of unique elements
+  - ZSET: Sorted set with scores
 
 Type Validation:
 ================
@@ -40,9 +43,12 @@ operations to ensure data integrity.
 package sql
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -83,7 +89,16 @@ const (
 	TypeNCHAR     ColumnType = "NCHAR"
 	TypeNVARCHAR  ColumnType = "NVARCHAR"
 	TypeNTEXT     ColumnType = "NTEXT"
+	TypeINET      ColumnType = "INET"
+	TypeSET       ColumnType = "SET"
+	TypeZSET      ColumnType = "ZSET"
 )
+
+// zsetMember represents a member in a sorted set (ZSET).
+type zsetMember struct {
+	Score  float64     `json:"score"`
+	Member interface{} `json:"member"`
+}
 
 // uuidRegex matches valid UUID format (RFC 4122).
 var uuidRegex = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -133,6 +148,10 @@ var ValidColumnTypes = map[string]ColumnType{
 	"NCHAR":     TypeNCHAR,
 	"NVARCHAR":  TypeNVARCHAR,
 	"NTEXT":     TypeNTEXT,
+	"INET":      TypeINET,
+	"SET":       TypeSET,
+	"ZSET":      TypeZSET,
+	"SORTEDSET": TypeZSET, // Alias for ZSET
 }
 
 // IsValidType checks if a type name is a valid column type.
@@ -253,13 +272,81 @@ func ValidateValue(typeName string, value string) error {
 			return ferrors.TypeMismatch("MONEY", value, "")
 		}
 
-	case TypeINTERVAL:
-		// INTERVAL accepts various interval formats (simplified validation)
-		// Examples: '1 day', '2 hours', '3 months', 'P1D' (ISO 8601)
-		if value == "" {
-			return ferrors.TypeMismatch("INTERVAL", value, "").WithDetail("empty string")
+	case TypeINET:
+		// Accept IPv4, IPv6, or CIDR
+		if ip := net.ParseIP(value); ip != nil {
+			return nil
 		}
-		// Accept any non-empty string for now (full interval parsing is complex)
+		if _, _, err := net.ParseCIDR(value); err == nil {
+			return nil
+		}
+		return ferrors.TypeMismatch("INET", value, "").WithDetail("invalid IP address or CIDR")
+
+	case TypeINTERVAL:
+		// Enhanced interval validation
+		// Supports:
+		// 1. Postgres style: "1 year 2 months 3 days"
+		// 2. ISO-8601 duration: "P1Y2M3D"
+		// 3. Simple time units: "300ms", "1.5h" (Go time.Duration style)
+
+		// First try standard Go duration parse for simple cases
+		if _, err := time.ParseDuration(value); err == nil {
+			return nil
+		}
+
+		// Check for ISO-8601 P-prefix
+		if strings.HasPrefix(strings.ToUpper(value), "P") {
+			// Basic ISO validation - must contain at least one designator
+			validRunes := "P0123456789YMWDTHS.,"
+			for _, r := range strings.ToUpper(value) {
+				if !strings.ContainsRune(validRunes, r) {
+					return ferrors.TypeMismatch("INTERVAL", value, "").WithDetail("invalid ISO-8601 duration characters")
+				}
+			}
+			return nil
+		}
+
+		// Check for Postgres style (quantity unit pairs)
+		// regex to match optional sign, number, optional whitespace, unit
+		// This is a simple heuristic check
+		postgresIntervalRegex := regexp.MustCompile(`^[-+]?\d+(\.\d+)?\s*[a-zA-Z]+`)
+
+		// If it's a simple number (seconds), it's also valid (though usually treated as seconds in Postgres if implied)
+		if _, err := strconv.ParseFloat(value, 64); err == nil {
+			return nil
+		}
+
+		if postgresIntervalRegex.MatchString(value) {
+			return nil
+		}
+
+		// Check if it starts with a number at least
+		if len(value) > 0 {
+			r := rune(value[0])
+			if r >= '0' && r <= '9' {
+				// Likely a compact format like "2mons" that regex didn't catch or nuanced format
+				// "2mons" matches the regex above actually.
+				// Let's rely on the regex.
+				return nil
+			}
+		}
+
+		return ferrors.TypeMismatch("INTERVAL", value, "").WithDetail("must start with quantity or be ISO-8601")
+
+	case TypeSET:
+		// Must be a valid JSON array
+		var arr []interface{}
+		if err := json.Unmarshal([]byte(value), &arr); err != nil {
+			return ferrors.TypeMismatch("SET", value, "").WithDetail("must be a JSON array")
+		}
+		return nil
+
+	case TypeZSET:
+		// Must be a valid JSON array of zsetMember objects
+		var members []zsetMember
+		if err := json.Unmarshal([]byte(value), &members); err != nil {
+			return ferrors.TypeMismatch("ZSET", value, "").WithDetail("must be a JSON array of objects with 'score' and 'member' fields")
+		}
 		return nil
 
 	default:
@@ -330,6 +417,92 @@ func NormalizeValue(typeName string, value string) (string, error) {
 		}
 		return string(compact), nil
 
+	case TypeINET:
+		// Normalize IP/CIDR representation
+		// 1. Try ParseCIDR first
+		if _, ipNet, err := net.ParseCIDR(value); err == nil {
+			return ipNet.String(), nil
+		}
+		// 2. Try ParseIP
+		if ip := net.ParseIP(value); ip != nil {
+			return ip.String(), nil
+		}
+		return "", ferrors.TypeMismatch("INET", value, "")
+
+	case TypeINTERVAL:
+		// For Go durations, normalize to standardized string
+		if d, err := time.ParseDuration(value); err == nil {
+			return d.String(), nil
+		}
+		// Other formats returned as-is
+		return value, nil
+
+	case TypeSET:
+		// Normalization for SET:
+		// 1. Unmarshal array
+		// 2. Deduplicate elements
+		// 3. Sort elements for canonical representation
+		var arr []interface{}
+		if err := json.Unmarshal([]byte(value), &arr); err != nil {
+			return "", ferrors.TypeMismatch("SET", value, "")
+		}
+
+		uniqueMap := make(map[string]interface{})
+		var keys []string
+
+		for _, v := range arr {
+			// Serialize each element to string for robust keying/sorting
+			b, err := json.Marshal(v)
+			if err != nil {
+				return "", err
+			}
+			key := string(b)
+			if _, exists := uniqueMap[key]; !exists {
+				uniqueMap[key] = v
+				keys = append(keys, key)
+			}
+		}
+
+		// Sort keys to ensure deterministic order
+		sort.Strings(keys)
+
+		// Rebuild array
+		resArr := make([]interface{}, 0, len(keys))
+		for _, k := range keys {
+			resArr = append(resArr, uniqueMap[k])
+		}
+
+		b, err := json.Marshal(resArr)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+
+	case TypeZSET:
+		// Normalization for ZSET:
+		// 1. Unmarshal to []zsetMember
+		// 2. Sort by Score (asc), then by Member string rep (asc)
+		var members []zsetMember
+		if err := json.Unmarshal([]byte(value), &members); err != nil {
+			return "", ferrors.TypeMismatch("ZSET", value, "")
+		}
+
+		sort.Slice(members, func(i, j int) bool {
+			if members[i].Score != members[j].Score {
+				return members[i].Score < members[j].Score
+			}
+			// Same score, tie-break by member string representation
+			mi, _ := json.Marshal(members[i].Member)
+			mj, _ := json.Marshal(members[j].Member)
+			return string(mi) < string(mj)
+		})
+
+		b, err := json.Marshal(members)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+
 	default:
 		// INT, SMALLINT, BIGINT, SERIAL, FLOAT, DOUBLE, REAL, DECIMAL, TEXT, VARCHAR, CHAR, BLOB, BYTEA, BINARY, VARBINARY - return as-is
 		return value, nil
@@ -388,6 +561,62 @@ func CompareValues(typeName string, a, b string) int {
 			return -1
 		}
 		return 1
+
+	case TypeINET:
+		// Compare IPs byte-wise
+		// Try CIDR
+		_, ipNetA, errA := net.ParseCIDR(a)
+		_, ipNetB, errB := net.ParseCIDR(b)
+
+		if errA == nil && errB == nil {
+			// Compare CIDRs
+			// Ideally compare IP then mask size
+			ipA := ipNetA.IP
+			ipB := ipNetB.IP
+			cmp := bytes.Compare(ipA, ipB)
+			if cmp != 0 {
+				return cmp
+			}
+			// Same IP, compare mask sizes (longer mask = "larger/more specific" -> arbitrary choice but consistent)
+			// Actually, string compare is probably fine for normalized CIDRs of same IP version
+			if a < b {
+				return -1
+			}
+			if a > b {
+				return 1
+			}
+			return 0
+		}
+
+		// Try IP
+		ipA := net.ParseIP(a)
+		ipB := net.ParseIP(b)
+		if ipA != nil && ipB != nil {
+			// Ensure both are 16-byte representation for comparison
+			ipA16 := ipA.To16()
+			ipB16 := ipB.To16()
+			return bytes.Compare(ipA16, ipB16)
+		}
+
+		// Fallback to string compare
+		if a < b {
+			return -1
+		}
+		if a > b {
+			return 1
+		}
+		return 0
+
+	case TypeSET, TypeZSET:
+		// Since SET and ZSET are normalized to canonical sorted JSON strings,
+		// we can simpler compare their string representations.
+		if a < b {
+			return -1
+		}
+		if a > b {
+			return 1
+		}
+		return 0
 
 	default:
 		// String comparison for TEXT, VARCHAR, CHAR, UUID, BLOB, BYTEA, BINARY, VARBINARY, JSONB

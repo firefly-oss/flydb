@@ -38,6 +38,7 @@ Whether you are building microservices that need local persistence, edge applica
 - **JSONB Support** — Store and query semi-structured JSON data with PostgreSQL-compatible operators (`->`, `->>`, `@>`, `<@`, `?`) and functions.
 - **ODBC/JDBC Ready** — Binary wire protocol with complete metadata APIs enables building standard database drivers for any language or platform.
 - **Configurable Compression** — Built-in support for LZ4, Snappy, and Zstd algorithms to reduce disk usage and network bandwidth with minimal CPU overhead.
+- **Multi-Database Support** — Run multiple isolated databases within a single instance, with support for cross-database queries and joins.
 
 ### Quick Example
 
@@ -671,6 +672,9 @@ UPDATE users SET name = 'Alice Smith' WHERE id = 1;
 
 -- Delete data
 DELETE FROM users WHERE id = 2;
+
+-- Cross-Database Query
+SELECT * FROM myapp.users JOIN otherdb.orders ON ...
 
 -- View table structure
 INSPECT TABLE users;

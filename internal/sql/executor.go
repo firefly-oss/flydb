@@ -146,6 +146,8 @@ type DBManager interface {
 	DropDatabase(name string) error
 	ListDatabases() []string
 	GetDatabaseMetadata(name string) (*storage.DatabaseMetadata, error)
+	GetDatabase(name string) (*storage.Database, error)
+	DatabaseExists(name string) bool
 }
 
 // AuditQueryOptions specifies options for querying audit logs.
@@ -257,6 +259,28 @@ type Executor struct {
 
 	// dbMgr manages database-level operations (CREATE/DROP DATABASE).
 	dbMgr DBManager
+
+	// catalogs maintains a cache of catalogs for each database.
+	catalogs map[string]*Catalog
+}
+
+// getStorage returns the storage engine for the specified database.
+// If dbName is empty, it returns the current database's storage engine.
+func (e *Executor) getStorage(dbName string) (storage.Engine, error) {
+	if dbName == "" || dbName == e.currentDatabase {
+		return e.store, nil
+	}
+
+	if e.dbMgr == nil {
+		return nil, ferrors.InternalError("database manager is not initialized")
+	}
+
+	db, err := e.dbMgr.GetDatabase(dbName)
+	if err != nil {
+		return nil, err
+	}
+
+	return db.Store, nil
 }
 
 // aggState holds the accumulator state for aggregate function computation.
@@ -288,6 +312,7 @@ func NewExecutor(store storage.Engine, auth *auth.AuthManager) *Executor {
 		auth:     auth,
 		collator: storage.GetCollator(storage.CollationDefault, "en_US"),
 		encoder:  storage.GetEncoder(storage.EncodingDefault),
+		catalogs: make(map[string]*Catalog),
 	}
 
 	// Initialize index manager
@@ -302,7 +327,49 @@ func NewExecutor(store storage.Engine, auth *auth.AuthManager) *Executor {
 	// Initialize query cache with default configuration
 	exec.queryCache = cache.New(cache.DefaultConfig())
 
+	exec.queryCache = cache.New(cache.DefaultConfig())
+
+	// Initialize default catalog
+	exec.catalogs["default"] = exec.catalog
+	if exec.store != nil {
+		// Also map the initial store's name if known (unlikely to know here without digging)
+	}
+
 	return exec
+}
+
+// getCatalog returns the catalog for the specified database.
+// If dbName is empty, it returns the catalog for the current database.
+func (e *Executor) getCatalog(dbName string) (*Catalog, error) {
+	// Determine target database
+	targetDB := dbName
+	if targetDB == "" {
+		targetDB = e.currentDatabase
+	}
+	if targetDB == "" {
+		targetDB = storage.DefaultDatabaseName
+	}
+
+	// Check cache
+	if cat, ok := e.catalogs[targetDB]; ok {
+		return cat, nil
+	}
+
+	// Not in cache, load it
+	store, err := e.getStorage(targetDB)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create new catalog
+	cat := NewCatalog(store)
+	e.catalogs[targetDB] = cat
+
+	// If this is the main store, update e.catalog as well?
+	// e.catalog is mostly legacy now, but used in struct.
+	// We'll leave e.catalog as the "primary" one for now.
+
+	return cat, nil
 }
 
 // SetCollation sets the collation for string comparisons.
@@ -497,7 +564,7 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 
 	case *InsertStmt:
 		// INSERT requires access to the target table.
-		if err := e.checkAccess(s.TableName); err != nil {
+		if err := e.checkAccess(s.DatabaseName, s.TableName); err != nil {
 			return "", err
 		}
 		return e.executeInsert(s)
@@ -505,7 +572,7 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 	case *UpdateStmt:
 		// UPDATE requires access to the target table.
 		// RLS is applied during execution to filter which rows can be updated.
-		if err := e.checkAccess(s.TableName); err != nil {
+		if err := e.checkAccess(s.DatabaseName, s.TableName); err != nil {
 			return "", err
 		}
 		return e.executeUpdate(s)
@@ -513,19 +580,19 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 	case *DeleteStmt:
 		// DELETE requires access to the target table.
 		// RLS is applied during execution to filter which rows can be deleted.
-		if err := e.checkAccess(s.TableName); err != nil {
+		if err := e.checkAccess(s.DatabaseName, s.TableName); err != nil {
 			return "", err
 		}
 		return e.executeDelete(s)
 
 	case *SelectStmt:
 		// SELECT requires access to the primary table.
-		if err := e.checkAccess(s.TableName); err != nil {
+		if err := e.checkAccess(s.DatabaseName, s.TableName); err != nil {
 			return "", err
 		}
 		// If there's a JOIN, also check access to the joined table.
 		if s.Join != nil {
-			if err := e.checkAccess(s.Join.TableName); err != nil {
+			if err := e.checkAccess(s.Join.DatabaseName, s.Join.TableName); err != nil {
 				return "", err
 			}
 		}
@@ -667,10 +734,8 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 		return e.executeDropDatabase(s)
 
 	case *UseDatabaseStmt:
-		// USE DATABASE is handled at the server level, not executor level.
-		// This case returns an error because USE should be intercepted by the server
-		// before reaching the executor.
-		return "", ferrors.InternalError("USE statement must be handled by the server")
+		// USE statement is supported in Executor now.
+		return e.executeUse(s)
 
 	case *ExportAuditStmt:
 		// EXPORT AUDIT requires admin privileges.
@@ -684,6 +749,37 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 	return "", ferrors.NewExecutionError("unknown statement")
 }
 
+// executeUse executes a USE statement.
+func (e *Executor) executeUse(stmt *UseDatabaseStmt) (string, error) {
+	if e.dbMgr == nil {
+		return "", ferrors.NewExecutionError("multi-database support not enabled")
+	}
+
+	// Check if database exists
+	db, err := e.dbMgr.GetDatabase(stmt.DatabaseName)
+	if err != nil {
+		if e.dbMgr.DatabaseExists(stmt.DatabaseName) {
+			return "", err
+		}
+		return "", ferrors.NewExecutionError(fmt.Sprintf("database '%s' does not exist", stmt.DatabaseName))
+	}
+
+	// Update current database for this executor
+	e.currentDatabase = stmt.DatabaseName
+	e.store = db.Store
+
+	// Refresh catalog and managers for the new database context
+	e.catalog = NewCatalog(e.store)
+	// Important: Refresh all managers that depend on the store
+	e.indexMgr = storage.NewIndexManager(e.store)
+	e.triggerMgr = NewTriggerManager(e.store)
+
+	// Update cache
+	e.catalogs[stmt.DatabaseName] = e.catalog
+
+	return fmt.Sprintf("USE %s OK", stmt.DatabaseName), nil
+}
+
 // checkAccess verifies if the current user has access to the specified table.
 // Admin users and anonymous users (empty username) have full access.
 // Regular users need an explicit GRANT or appropriate role for the table.
@@ -694,34 +790,61 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 // 3. Role inheritance
 //
 // Parameters:
+//   - database: The database containing the table (empty for current)
 //   - table: The table name to check access for
 //
 // Returns an error if access is denied, nil otherwise.
-func (e *Executor) checkAccess(table string) error {
-	return e.checkAccessWithPrivilege(table, auth.PrivilegeSelect)
+func (e *Executor) checkAccess(database, table string) error {
+	_, err := e.checkAccessWithPrivilege(database, table, auth.PrivilegeSelect)
+	return err
 }
 
 // checkAccessWithPrivilege verifies if the current user has a specific privilege on a table.
 // This is the main authorization check that integrates with the RBAC system.
 //
 // Parameters:
+//   - database: The database containing the table (empty for current)
 //   - table: The table name to check access for
 //   - privilege: The specific privilege required (SELECT, INSERT, UPDATE, DELETE, etc.)
 //
 // Returns an error if access is denied, nil otherwise.
-func (e *Executor) checkAccessWithPrivilege(table string, privilege auth.PrivilegeType) error {
+// checkAccessWithPrivilege checks if the current user has the required privilege.
+// It returns headers for Row-Level Security (RLS) if applicable.
+// If database is empty, it uses the current database context.
+func (e *Executor) checkAccessWithPrivilege(database, table string, privilege auth.PrivilegeType) (*auth.RLS, error) {
 	// Admin and anonymous users have full access.
-	if e.currentUser == "" || e.currentUser == "admin" {
-		return nil
+	// Note: anonymous user check (empty string) should typically act as "no access" in strict mode,
+	// but keeping existing behavior where it might mean "internal system access" or similar if intended.
+	// Actually, auth.CheckPrivilege denies empty username.
+	if e.currentUser == "admin" {
+		return nil, nil
+	}
+
+	// If currentUser is empty, we defer to CheckPrivilege which denies anonymous access usually
+	// unless we treat empty as admin (which line 812 did).
+	// Line 812: if e.currentUser == "" || e.currentUser == "admin" { return nil }
+	// Let's preserve that logic.
+	if e.currentUser == "" {
+		return nil, nil
 	}
 
 	// Use RBAC to check privilege
-	// Note: Database context is managed at the server level, so we use "*" for database-agnostic checks
-	check := e.auth.CheckPrivilege(e.currentUser, privilege, "*", table)
-	if !check.Allowed {
-		return ferrors.PermissionDenied("on table " + table).WithDetail(string(privilege))
+	// Resolve database name
+	dbCheck := database
+	if dbCheck == "" {
+		dbCheck = e.currentDatabase
 	}
-	return nil
+	// If still empty (e.g. no current DB selected), default to "*" or handle error?
+	// For now, "*" seems safe as a fallback for global matches, but strict mode might want error.
+	if dbCheck == "" {
+		dbCheck = "*"
+	}
+
+	check := e.auth.CheckPrivilege(e.currentUser, privilege, dbCheck, table)
+	if !check.Allowed {
+		return nil, ferrors.PermissionDenied("on table " + table).WithDetail(string(privilege))
+	}
+	return check.RLS, nil
 }
 
 // executeCreateUser handles CREATE USER statements.
@@ -884,11 +1007,22 @@ func (e *Executor) executeAlterUser(stmt *AlterUserStmt) (string, error) {
 //
 // Returns "CREATE TABLE OK" on success, or an error.
 func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
+	// Check permissions using RBAC
+	if _, err := e.checkAccessWithPrivilege(stmt.DatabaseName, stmt.TableName, auth.PrivilegeCreate); err != nil {
+		return "", err
+	}
+
 	start := time.Now()
 	operation := fmt.Sprintf("CREATE TABLE %s", stmt.TableName)
 
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Check if table already exists
-	if _, exists := e.catalog.GetTable(stmt.TableName); exists {
+	if _, exists := cat.GetTable(stmt.TableName); exists {
 		if stmt.IfNotExists {
 			// IF NOT EXISTS specified, silently succeed
 			e.logAuditEvent("CREATE_TABLE", "table", stmt.TableName, operation, "SUCCESS", "", time.Since(start).Milliseconds())
@@ -908,7 +1042,7 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 	// Validate foreign key references
 	for _, col := range stmt.Columns {
 		if fk := col.GetForeignKey(); fk != nil {
-			refTable, ok := e.catalog.GetTable(fk.Table)
+			refTable, ok := cat.GetTable(fk.Table)
 			if !ok {
 				return "", ferrors.TableNotFound(fk.Table)
 			}
@@ -929,7 +1063,7 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 	// Validate table-level foreign key constraints
 	for _, constraint := range stmt.Constraints {
 		if constraint.Type == ConstraintForeignKey && constraint.ForeignKey != nil {
-			refTable, ok := e.catalog.GetTable(constraint.ForeignKey.Table)
+			refTable, ok := cat.GetTable(constraint.ForeignKey.Table)
 			if !ok {
 				return "", ferrors.TableNotFound(constraint.ForeignKey.Table)
 			}
@@ -948,11 +1082,11 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 	}
 
 	// Check for circular CASCADE dependencies
-	if err := e.checkCircularCascadeDependencies(stmt.TableName, stmt.Columns, stmt.Constraints); err != nil {
+	if err := e.checkCircularCascadeDependencies(cat, stmt.TableName, stmt.Columns, stmt.Constraints); err != nil {
 		return "", err
 	}
 
-	err := e.catalog.CreateTableWithConstraints(stmt.TableName, stmt.Columns, stmt.Constraints)
+	err = cat.CreateTableWithConstraints(stmt.TableName, stmt.Columns, stmt.Constraints)
 	if err != nil {
 		e.logAuditEvent("CREATE_TABLE", "table", stmt.TableName, operation, "FAILED", err.Error(), time.Since(start).Milliseconds())
 		return "", err
@@ -990,8 +1124,19 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 //
 // Returns "INSERT <count>" on success, or an error.
 func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
+	// Check permissions using RBAC
+	if _, err := e.checkAccessWithPrivilege(stmt.DatabaseName, stmt.TableName, auth.PrivilegeInsert); err != nil {
+		return "", err
+	}
+
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Validate that the table exists.
-	table, ok := e.catalog.GetTable(stmt.TableName)
+	table, ok := cat.GetTable(stmt.TableName)
 	if !ok {
 		return "", ferrors.TableNotFound(stmt.TableName)
 	}
@@ -1010,7 +1155,7 @@ func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
 	insertedCount := 0
 
 	for _, rowValues := range rowsToInsert {
-		normalizedValues, conflictRowKey, err := e.prepareInsertRow(table, stmt.Columns, rowValues)
+		normalizedValues, conflictRowKey, err := e.prepareInsertRow(cat, table, stmt.Columns, rowValues)
 		if err != nil {
 			// Check if this is a unique constraint violation and we have ON CONFLICT
 			if stmt.OnConflict != nil && conflictRowKey != "" {
@@ -1019,7 +1164,7 @@ func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
 					continue
 				} else if stmt.OnConflict.DoUpdate {
 					// Update the conflicting row
-					if err := e.updateConflictingRow(table, conflictRowKey, stmt.OnConflict.Updates); err != nil {
+					if err := e.updateConflictingRow(cat, table, conflictRowKey, stmt.OnConflict.Updates); err != nil {
 						return "", err
 					}
 					insertedCount++
@@ -1030,7 +1175,14 @@ func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
 		}
 
 		// Insert the row
-		if err := e.insertSingleRow(table, stmt.TableName, normalizedValues); err != nil {
+		dbName := stmt.DatabaseName
+		if dbName == "" {
+			dbName = e.currentDatabase
+			if dbName == "" {
+				dbName = storage.DefaultDatabaseName
+			}
+		}
+		if err := e.insertSingleRow(cat, dbName, table, stmt.TableName, normalizedValues); err != nil {
 			return "", err
 		}
 		insertedCount++
@@ -1104,7 +1256,7 @@ func (e *Executor) evaluateDefaultValue(val string) string {
 
 // prepareInsertRow prepares a single row for insertion, handling column mapping and validation.
 // Returns the normalized values, a conflicting row key (if any), and an error.
-func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values []string) ([]string, string, error) {
+func (e *Executor) prepareInsertRow(cat *Catalog, table TableSchema, columns []string, values []string) ([]string, string, error) {
 	normalizedValues := make([]string, len(table.Columns))
 
 	// Build a map of column name to value index if columns are specified
@@ -1129,7 +1281,7 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 				value = e.evaluateFunctionValue(v)
 			} else if col.IsAutoIncrement() {
 				// Generate auto-increment value
-				nextVal, err := e.catalog.GetNextAutoIncrement(table.Name, col.Name)
+				nextVal, err := cat.GetNextAutoIncrement(table.Name, col.Name)
 				if err != nil {
 					return nil, "", ferrors.InternalError(fmt.Sprintf("failed to generate auto-increment value for %s", col.Name)).WithCause(err)
 				}
@@ -1163,10 +1315,10 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 					// Evaluate function values for auto-increment columns too
 					value = e.evaluateFunctionValue(values[i])
 					if intVal, err := parseIntValue(value); err == nil {
-						e.catalog.UpdateAutoIncrement(table.Name, col.Name, intVal)
+						cat.UpdateAutoIncrement(table.Name, col.Name, intVal)
 					}
 				} else {
-					nextVal, err := e.catalog.GetNextAutoIncrement(table.Name, col.Name)
+					nextVal, err := cat.GetNextAutoIncrement(table.Name, col.Name)
 					if err != nil {
 						return nil, "", ferrors.InternalError(fmt.Sprintf("failed to generate auto-increment value for %s", col.Name)).WithCause(err)
 					}
@@ -1214,13 +1366,13 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 	}
 
 	// Check UNIQUE and PRIMARY KEY constraints, returning conflict info
-	conflictRowKey, err := e.checkUniqueConstraintsWithConflict(table, normalizedValues, "")
+	conflictRowKey, err := e.checkUniqueConstraintsWithConflict(cat, table, normalizedValues, "")
 	if err != nil {
 		return nil, conflictRowKey, err
 	}
 
 	// Check FOREIGN KEY constraints
-	if err := e.checkForeignKeyConstraints(table, normalizedValues); err != nil {
+	if err := e.checkForeignKeyConstraints(cat, table, normalizedValues); err != nil {
 		return nil, "", err
 	}
 
@@ -1233,23 +1385,23 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 }
 
 // insertSingleRow inserts a single prepared row into the table.
-func (e *Executor) insertSingleRow(table TableSchema, tableName string, normalizedValues []string) error {
+func (e *Executor) insertSingleRow(cat *Catalog, dbName string, table TableSchema, tableName string, normalizedValues []string) error {
 	// Execute BEFORE INSERT triggers
-	if err := e.executeTriggers(tableName, TriggerTimingBefore, TriggerEventInsert); err != nil {
+	if err := e.executeTriggers(cat, dbName, tableName, TriggerTimingBefore, TriggerEventInsert); err != nil {
 		return ferrors.NewExecutionError("BEFORE INSERT trigger failed").WithCause(err)
 	}
 
 	// Generate a unique row ID
 	seqKey := "seq:" + table.Name
 	var seq int
-	seqVal, err := e.store.Get(seqKey)
+	seqVal, err := cat.store.Get(seqKey)
 	if err == nil {
 		json.Unmarshal(seqVal, &seq)
 	}
 	seq++
 
 	seqBytes, _ := json.Marshal(seq)
-	e.store.Put(seqKey, seqBytes)
+	cat.store.Put(seqKey, seqBytes)
 
 	rowKey := fmt.Sprintf("row:%s:%d", table.Name, seq)
 
@@ -1264,22 +1416,24 @@ func (e *Executor) insertSingleRow(table TableSchema, tableName string, normaliz
 	if err != nil {
 		return ferrors.InternalError("failed to marshal row").WithCause(err)
 	}
-	if err := e.store.Put(rowKey, data); err != nil {
+	if err := cat.store.Put(rowKey, data); err != nil {
 		return ferrors.NewStorageError("failed to store row").WithCause(err)
 	}
 
 	// Update indexes
-	if e.indexMgr != nil {
-		e.indexMgr.OnInsert(table.Name, rowKey, row)
+	if cat.IndexMgr != nil {
+		cat.IndexMgr.OnInsert(table.Name, rowKey, row)
 	}
 
 	// Invoke OnInsert callback
 	if e.OnInsert != nil {
+		// Note: OnInsert callback might rely on e.currentDatabase context?
+		// Or it just streams JSON. We pass it as is.
 		e.OnInsert(table.Name, string(data))
 	}
 
 	// Execute AFTER INSERT triggers
-	if err := e.executeTriggers(tableName, TriggerTimingAfter, TriggerEventInsert); err != nil {
+	if err := e.executeTriggers(cat, dbName, tableName, TriggerTimingAfter, TriggerEventInsert); err != nil {
 		return ferrors.NewExecutionError("AFTER INSERT trigger failed").WithCause(err)
 	}
 
@@ -1287,9 +1441,9 @@ func (e *Executor) insertSingleRow(table TableSchema, tableName string, normaliz
 }
 
 // checkUniqueConstraintsWithConflict checks unique constraints and returns the conflicting row key.
-func (e *Executor) checkUniqueConstraintsWithConflict(table TableSchema, values []string, excludeRowKey string) (string, error) {
+func (e *Executor) checkUniqueConstraintsWithConflict(cat *Catalog, table TableSchema, values []string, excludeRowKey string) (string, error) {
 	prefix := "row:" + table.Name + ":"
-	rows, err := e.store.Scan(prefix)
+	rows, err := cat.store.Scan(prefix)
 	if err != nil {
 		return "", err
 	}
@@ -1327,9 +1481,9 @@ func (e *Executor) checkUniqueConstraintsWithConflict(table TableSchema, values 
 }
 
 // updateConflictingRow updates a row that caused a conflict during INSERT.
-func (e *Executor) updateConflictingRow(table TableSchema, rowKey string, updates map[string]string) error {
+func (e *Executor) updateConflictingRow(cat *Catalog, table TableSchema, rowKey string, updates map[string]string) error {
 	// Get the existing row
-	rowData, err := e.store.Get(rowKey)
+	rowData, err := cat.store.Get(rowKey)
 	if err != nil {
 		return err
 	}
@@ -1350,7 +1504,7 @@ func (e *Executor) updateConflictingRow(table TableSchema, rowKey string, update
 		return err
 	}
 
-	return e.store.Put(rowKey, data)
+	return cat.store.Put(rowKey, data)
 }
 
 // parseIntValue parses a string value as an int64.
@@ -1362,10 +1516,10 @@ func parseIntValue(value string) (int64, error) {
 
 // checkUniqueConstraints verifies that UNIQUE and PRIMARY KEY constraints are satisfied.
 // excludeRowKey is used during UPDATE to exclude the current row from the check.
-func (e *Executor) checkUniqueConstraints(table TableSchema, values []string, excludeRowKey string) error {
+func (e *Executor) checkUniqueConstraints(cat *Catalog, table TableSchema, values []string, excludeRowKey string) error {
 	// Get all existing rows
 	prefix := "row:" + table.Name + ":"
-	rows, err := e.store.Scan(prefix)
+	rows, err := cat.store.Scan(prefix)
 	if err != nil {
 		return err
 	}
@@ -1467,11 +1621,12 @@ func (e *Executor) checkUniqueConstraints(table TableSchema, values []string, ex
 //  4. Returns an error if the referenced value doesn't exist
 //
 // Parameters:
+//   - cat: The catalog for the current database
 //   - table: The table schema containing the foreign key constraints
 //   - values: The row values being inserted/updated (in column order)
 //
 // Returns an error if any foreign key value doesn't exist in the referenced table.
-func (e *Executor) checkForeignKeyConstraints(table TableSchema, values []string) error {
+func (e *Executor) checkForeignKeyConstraints(cat *Catalog, table TableSchema, values []string) error {
 	fks := table.GetForeignKeys()
 
 	for _, fk := range fks {
@@ -1487,14 +1642,16 @@ func (e *Executor) checkForeignKeyConstraints(table TableSchema, values []string
 		}
 
 		// Check if the referenced value exists
-		refTable, ok := e.catalog.GetTable(fk.RefTable)
+		// Use the provided catalog to look up the referenced table
+		refTable, ok := cat.GetTable(fk.RefTable)
 		if !ok {
 			return ferrors.TableNotFound(fk.RefTable)
 		}
 
 		// Scan the referenced table for the value
+		// Use the correct store from the catalog (which wraps the store)
 		prefix := "row:" + fk.RefTable + ":"
-		rows, err := e.store.Scan(prefix)
+		rows, err := cat.store.Scan(prefix)
 		if err != nil {
 			return err
 		}
@@ -1606,8 +1763,24 @@ func (e *Executor) evaluateCheckExpr(expr *CheckExpr, value string) bool {
 //
 // Returns "UPDATE <count>" where count is the number of rows updated.
 func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
+	// Check permissions using RBAC
+	authRLS, err := e.checkAccessWithPrivilege(stmt.DatabaseName, stmt.TableName, auth.PrivilegeUpdate)
+	if err != nil {
+		return "", err
+	}
+	var rls *Condition
+	if authRLS != nil {
+		rls = &Condition{Column: authRLS.Column, Value: authRLS.Value}
+	}
+
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Get table schema for type validation
-	table, ok := e.catalog.GetTable(stmt.TableName)
+	table, ok := cat.GetTable(stmt.TableName)
 	if !ok {
 		return "", ferrors.TableNotFound(stmt.TableName)
 	}
@@ -1648,13 +1821,20 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 	}
 
 	// Execute BEFORE UPDATE triggers
-	if err := e.executeTriggers(stmt.TableName, TriggerTimingBefore, TriggerEventUpdate); err != nil {
+	dbName := stmt.DatabaseName
+	if dbName == "" {
+		dbName = e.currentDatabase
+		if dbName == "" {
+			dbName = storage.DefaultDatabaseName
+		}
+	}
+	if err := e.executeTriggers(cat, dbName, stmt.TableName, TriggerTimingBefore, TriggerEventUpdate); err != nil {
 		return "", ferrors.NewExecutionError("BEFORE UPDATE trigger failed").WithCause(err)
 	}
 
 	// Scan all rows in the table.
 	prefix := "row:" + stmt.TableName + ":"
-	rows, err := e.store.Scan(prefix)
+	rows, err := cat.store.Scan(prefix)
 	if err != nil {
 		return "", err
 	}
@@ -1676,17 +1856,11 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 			}
 		}
 
-		// Apply RLS filter for non-admin users.
-		if e.currentUser != "" && e.currentUser != "admin" {
-			allowed, authRLS := e.auth.CheckPermission(e.currentUser, stmt.TableName)
-			if !allowed {
+		// Apply RLS filter (calculated at start of function)
+		if rls != nil {
+			colVal, exists := row[rls.Column]
+			if !exists || fmt.Sprintf("%v", colVal) != rls.Value {
 				continue
-			}
-			if authRLS != nil {
-				colVal, exists := row[authRLS.Column]
-				if !exists || fmt.Sprintf("%v", colVal) != authRLS.Value {
-					continue
-				}
 			}
 		}
 
@@ -1721,12 +1895,12 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 		}
 
 		// Check UNIQUE and PRIMARY KEY constraints (excluding current row)
-		if err := e.checkUniqueConstraints(table, newValues, key); err != nil {
+		if err := e.checkUniqueConstraints(cat, table, newValues, key); err != nil {
 			return "", err
 		}
 
 		// Check FOREIGN KEY constraints
-		if err := e.checkForeignKeyConstraints(table, newValues); err != nil {
+		if err := e.checkForeignKeyConstraints(cat, table, newValues); err != nil {
 			return "", err
 		}
 
@@ -1749,17 +1923,17 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 		for col := range normalizedUpdates {
 			updatedColumns[col] = true
 		}
-		if err := e.handleForeignKeyReferencesOnUpdate(stmt.TableName, oldRow, row, updatedColumns); err != nil {
+		if err := e.handleForeignKeyReferencesOnUpdate(cat, stmt.TableName, oldRow, row, updatedColumns); err != nil {
 			return "", err
 		}
 
 		// Save the updated row.
 		newData, _ := json.Marshal(row)
-		e.store.Put(key, newData)
+		cat.store.Put(key, newData)
 
 		// Update indexes
-		if e.indexMgr != nil {
-			e.indexMgr.OnUpdate(stmt.TableName, key, oldRow, row)
+		if cat.IndexMgr != nil {
+			cat.IndexMgr.OnUpdate(stmt.TableName, key, oldRow, row)
 		}
 
 		// Invoke OnUpdate callback for WATCH functionality
@@ -1772,7 +1946,7 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 	}
 
 	// Execute AFTER UPDATE triggers
-	if err := e.executeTriggers(stmt.TableName, TriggerTimingAfter, TriggerEventUpdate); err != nil {
+	if err := e.executeTriggers(cat, dbName, stmt.TableName, TriggerTimingAfter, TriggerEventUpdate); err != nil {
 		return "", ferrors.NewExecutionError("AFTER UPDATE trigger failed").WithCause(err)
 	}
 
@@ -1799,14 +1973,37 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 //
 // Returns "DELETE <count>" where count is the number of rows deleted.
 func (e *Executor) executeDelete(stmt *DeleteStmt) (string, error) {
+	// Check permissions using RBAC
+	authRLS, err := e.checkAccessWithPrivilege(stmt.DatabaseName, stmt.TableName, auth.PrivilegeDelete)
+	if err != nil {
+		return "", err
+	}
+	var rls *Condition
+	if authRLS != nil {
+		rls = &Condition{Column: authRLS.Column, Value: authRLS.Value}
+	}
+
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Execute BEFORE DELETE triggers
-	if err := e.executeTriggers(stmt.TableName, TriggerTimingBefore, TriggerEventDelete); err != nil {
+	dbName := stmt.DatabaseName
+	if dbName == "" {
+		dbName = e.currentDatabase
+		if dbName == "" {
+			dbName = storage.DefaultDatabaseName
+		}
+	}
+	if err := e.executeTriggers(cat, dbName, stmt.TableName, TriggerTimingBefore, TriggerEventDelete); err != nil {
 		return "", ferrors.NewExecutionError("BEFORE DELETE trigger failed").WithCause(err)
 	}
 
 	// Scan all rows in the table.
 	prefix := "row:" + stmt.TableName + ":"
-	rows, err := e.store.Scan(prefix)
+	rows, err := cat.store.Scan(prefix)
 	if err != nil {
 		return "", err
 	}
@@ -1828,28 +2025,22 @@ func (e *Executor) executeDelete(stmt *DeleteStmt) (string, error) {
 			}
 		}
 
-		// Apply RLS filter for non-admin users.
-		if e.currentUser != "" && e.currentUser != "admin" {
-			allowed, authRLS := e.auth.CheckPermission(e.currentUser, stmt.TableName)
-			if !allowed {
+		// Apply RLS filter (calculated at start of function)
+		if rls != nil {
+			colVal, exists := row[rls.Column]
+			if !exists || fmt.Sprintf("%v", colVal) != rls.Value {
 				continue
-			}
-			if authRLS != nil {
-				colVal, exists := row[authRLS.Column]
-				if !exists || fmt.Sprintf("%v", colVal) != authRLS.Value {
-					continue
-				}
 			}
 		}
 
 		// Check for foreign key references from other tables
-		if err := e.checkForeignKeyReferences(stmt.TableName, row); err != nil {
+		if err := e.handleForeignKeyReferencesOnDelete(cat, stmt.TableName, row); err != nil {
 			return "", err
 		}
 
 		// Update indexes before deleting
-		if e.indexMgr != nil {
-			e.indexMgr.OnDelete(stmt.TableName, key, row)
+		if cat.IndexMgr != nil {
+			cat.IndexMgr.OnDelete(stmt.TableName, key, row)
 		}
 
 		// Invoke OnDelete callback for WATCH functionality
@@ -1859,12 +2050,12 @@ func (e *Executor) executeDelete(stmt *DeleteStmt) (string, error) {
 		}
 
 		// Delete the row from storage.
-		e.store.Delete(key)
+		cat.store.Delete(key)
 		count++
 	}
 
 	// Execute AFTER DELETE triggers
-	if err := e.executeTriggers(stmt.TableName, TriggerTimingAfter, TriggerEventDelete); err != nil {
+	if err := e.executeTriggers(cat, dbName, stmt.TableName, TriggerTimingAfter, TriggerEventDelete); err != nil {
 		return "", ferrors.NewExecutionError("AFTER DELETE trigger failed").WithCause(err)
 	}
 
@@ -1879,9 +2070,9 @@ func (e *Executor) executeDelete(stmt *DeleteStmt) (string, error) {
 // handleForeignKeyReferencesOnDelete handles foreign key references when a row is deleted.
 // It applies the appropriate referential action (RESTRICT, CASCADE, SET NULL) based on the FK definition.
 // Returns an error if the operation should be prevented (RESTRICT/NO ACTION with dependent rows).
-func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[string]interface{}) error {
+func (e *Executor) handleForeignKeyReferencesOnDelete(cat *Catalog, tableName string, row map[string]interface{}) error {
 	// Get all tables and check their foreign keys
-	for tblName, schema := range e.catalog.Tables {
+	for tblName, schema := range cat.Tables {
 		if tblName == tableName {
 			continue // Skip self-references for now
 		}
@@ -1901,7 +2092,7 @@ func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[
 
 			// Check if any row in the referencing table has this value
 			prefix := "row:" + tblName + ":"
-			rows, err := e.store.Scan(prefix)
+			rows, err := cat.store.Scan(prefix)
 			if err != nil {
 				continue
 			}
@@ -1933,16 +2124,16 @@ func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[
 
 				case ReferentialActionCascade:
 					// Delete the dependent row
-					if err := e.store.Delete(key); err != nil {
+					if err := cat.store.Delete(key); err != nil {
 						return ferrors.NewStorageError("cascade delete failed").WithCause(err)
 					}
 					// Recursively handle cascades from this deleted row
-					if err := e.handleForeignKeyReferencesOnDelete(tblName, refRow); err != nil {
+					if err := e.handleForeignKeyReferencesOnDelete(cat, tblName, refRow); err != nil {
 						return err
 					}
 					// Update indexes
-					if e.indexMgr != nil {
-						e.indexMgr.OnDelete(tblName, key, refRow)
+					if cat.IndexMgr != nil {
+						cat.IndexMgr.OnDelete(tblName, key, refRow)
 					}
 					// Invoke OnDelete callback
 					if e.OnDelete != nil {
@@ -1964,12 +2155,12 @@ func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[
 					}
 					refRow[fk.Column] = nil
 					newData, _ := json.Marshal(refRow)
-					if err := e.store.Put(key, newData); err != nil {
+					if err := cat.store.Put(key, newData); err != nil {
 						return ferrors.NewStorageError("set null failed").WithCause(err)
 					}
 					// Update indexes
-					if e.indexMgr != nil {
-						e.indexMgr.OnUpdate(tblName, key, oldRow, refRow)
+					if cat.IndexMgr != nil {
+						cat.IndexMgr.OnUpdate(tblName, key, oldRow, refRow)
 					}
 					// Invoke OnUpdate callback
 					if e.OnUpdate != nil {
@@ -1998,12 +2189,12 @@ func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[
 					}
 					refRow[fk.Column] = defaultValue
 					newData, _ := json.Marshal(refRow)
-					if err := e.store.Put(key, newData); err != nil {
+					if err := cat.store.Put(key, newData); err != nil {
 						return ferrors.NewStorageError("set default failed").WithCause(err)
 					}
 					// Update indexes
-					if e.indexMgr != nil {
-						e.indexMgr.OnUpdate(tblName, key, oldRow, refRow)
+					if cat.IndexMgr != nil {
+						cat.IndexMgr.OnUpdate(tblName, key, oldRow, refRow)
 					}
 				}
 			}
@@ -2016,9 +2207,9 @@ func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[
 // handleForeignKeyReferencesOnUpdate handles foreign key references when a row's primary key is updated.
 // It applies the appropriate referential action (RESTRICT, CASCADE, SET NULL) based on the FK definition.
 // Returns an error if the operation should be prevented (RESTRICT/NO ACTION with dependent rows).
-func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, newRow map[string]interface{}, updatedColumns map[string]bool) error {
+func (e *Executor) handleForeignKeyReferencesOnUpdate(cat *Catalog, tableName string, oldRow, newRow map[string]interface{}, updatedColumns map[string]bool) error {
 	// Get the table schema to find primary key columns
-	table, ok := e.catalog.GetTable(tableName)
+	table, ok := cat.GetTable(tableName)
 	if !ok {
 		return nil
 	}
@@ -2042,7 +2233,7 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 	}
 
 	// Get all tables and check their foreign keys
-	for tblName, schema := range e.catalog.Tables {
+	for tblName, schema := range cat.Tables {
 		if tblName == tableName {
 			continue // Skip self-references for now
 		}
@@ -2077,7 +2268,7 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 
 			// Check if any row in the referencing table has the old value
 			prefix := "row:" + tblName + ":"
-			rows, err := e.store.Scan(prefix)
+			rows, err := cat.store.Scan(prefix)
 			if err != nil {
 				continue
 			}
@@ -2115,12 +2306,12 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 					}
 					refRow[fk.Column] = newValueStr
 					newData, _ := json.Marshal(refRow)
-					if err := e.store.Put(key, newData); err != nil {
+					if err := cat.store.Put(key, newData); err != nil {
 						return ferrors.NewStorageError("cascade update failed").WithCause(err)
 					}
 					// Update indexes
-					if e.indexMgr != nil {
-						e.indexMgr.OnUpdate(tblName, key, oldRefRow, refRow)
+					if cat.IndexMgr != nil {
+						cat.IndexMgr.OnUpdate(tblName, key, oldRefRow, refRow)
 					}
 					// Invoke OnUpdate callback
 					if e.OnUpdate != nil {
@@ -2142,12 +2333,12 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 					}
 					refRow[fk.Column] = nil
 					newData, _ := json.Marshal(refRow)
-					if err := e.store.Put(key, newData); err != nil {
+					if err := cat.store.Put(key, newData); err != nil {
 						return ferrors.NewStorageError("set null failed").WithCause(err)
 					}
 					// Update indexes
-					if e.indexMgr != nil {
-						e.indexMgr.OnUpdate(tblName, key, oldRefRow, refRow)
+					if cat.IndexMgr != nil {
+						cat.IndexMgr.OnUpdate(tblName, key, oldRefRow, refRow)
 					}
 
 				case ReferentialActionSetDefault:
@@ -2171,12 +2362,12 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 					}
 					refRow[fk.Column] = defaultValue
 					newData, _ := json.Marshal(refRow)
-					if err := e.store.Put(key, newData); err != nil {
+					if err := cat.store.Put(key, newData); err != nil {
 						return ferrors.NewStorageError("set default failed").WithCause(err)
 					}
 					// Update indexes
-					if e.indexMgr != nil {
-						e.indexMgr.OnUpdate(tblName, key, oldRefRow, refRow)
+					if cat.IndexMgr != nil {
+						cat.IndexMgr.OnUpdate(tblName, key, oldRefRow, refRow)
 					}
 				}
 			}
@@ -2188,20 +2379,20 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 
 // checkForeignKeyReferences is a backward-compatible wrapper that checks for RESTRICT/NO ACTION.
 // Deprecated: Use handleForeignKeyReferencesOnDelete for full CASCADE support.
-func (e *Executor) checkForeignKeyReferences(tableName string, row map[string]interface{}) error {
-	return e.handleForeignKeyReferencesOnDelete(tableName, row)
+func (e *Executor) checkForeignKeyReferences(cat *Catalog, tableName string, row map[string]interface{}) error {
+	return e.handleForeignKeyReferencesOnDelete(cat, tableName, row)
 }
 
 // checkCircularCascadeDependencies detects circular CASCADE dependencies that could cause infinite loops.
 // A circular CASCADE dependency occurs when table A has CASCADE to B, B has CASCADE to C, and C has CASCADE to A.
 // This would cause an infinite loop during DELETE or UPDATE operations.
-func (e *Executor) checkCircularCascadeDependencies(newTableName string, columns []ColumnDef, constraints []TableConstraint) error {
+func (e *Executor) checkCircularCascadeDependencies(cat *Catalog, newTableName string, columns []ColumnDef, constraints []TableConstraint) error {
 	// Build a graph of CASCADE dependencies including the new table
 	// Graph: table -> list of tables it cascades to
 	cascadeGraph := make(map[string][]string)
 
 	// Add existing tables' CASCADE dependencies
-	for tableName, schema := range e.catalog.Tables {
+	for tableName, schema := range cat.Tables {
 		fks := schema.GetForeignKeys()
 		for _, fk := range fks {
 			if fk.OnDelete == ReferentialActionCascade || fk.OnUpdate == ReferentialActionCascade {
@@ -2288,6 +2479,13 @@ func (e *Executor) checkCircularCascadeDependencies(newTableName string, columns
 //
 // Returns the query results as newline-separated CSV rows.
 func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
+	// Get the catalog for the target database
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Generate cache key from the query and user context.
 	// Cache key includes: table name, columns, where clause, order by, limit, offset, user.
 	// We only cache simple queries (no JOINs, no aggregates, no subqueries in WHERE).
@@ -2302,12 +2500,12 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 	}
 
 	// Check if the table is actually a view
-	if view, ok := e.catalog.GetView(stmt.TableName); ok {
+	if view, ok := cat.GetView(stmt.TableName); ok {
 		return e.executeViewQuery(stmt, view)
 	}
 
 	// Validate that the primary table exists.
-	table, ok := e.catalog.GetTable(stmt.TableName)
+	table, ok := cat.GetTable(stmt.TableName)
 	if !ok {
 		return "", ferrors.TableNotFound(stmt.TableName)
 	}
@@ -2323,12 +2521,16 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 
 	// Load RLS condition for the current user.
 	// This will be applied to filter rows during processing.
+	// Load RLS condition for the current user.
+	// This will be applied to filter rows during processing.
 	var rls *Condition
 	if e.currentUser != "" && e.currentUser != "admin" {
-		allowed, authRLS := e.auth.CheckPermission(e.currentUser, stmt.TableName)
-		if !allowed {
-			return "", ferrors.PermissionDenied("")
+		// Use RBAC for permission check
+		authRLS, err := e.checkAccessWithPrivilege(stmt.DatabaseName, stmt.TableName, auth.PrivilegeSelect)
+		if err != nil {
+			return "", err
 		}
+
 		if authRLS != nil {
 			rls = &Condition{Column: authRLS.Column, Value: authRLS.Value}
 		}
@@ -2337,14 +2539,14 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 	// Try to use an index for the WHERE clause if available.
 	// This provides O(log N) lookup instead of O(N) full table scan.
 	var rows map[string][]byte
-	var err error
+	// var err error // Removed redeclaration
 
-	if stmt.Where != nil && e.indexMgr != nil && e.indexMgr.HasIndex(stmt.TableName, stmt.Where.Column) {
+	if stmt.Where != nil && cat.IndexMgr != nil && cat.IndexMgr.HasIndex(stmt.TableName, stmt.Where.Column) {
 		// Use index lookup for O(log N) performance
-		rowKey, found := e.indexMgr.Lookup(stmt.TableName, stmt.Where.Column, stmt.Where.Value)
+		rowKey, found := cat.IndexMgr.Lookup(stmt.TableName, stmt.Where.Column, stmt.Where.Value)
 		if found {
 			rows = make(map[string][]byte)
-			val, err := e.store.Get(rowKey)
+			val, err := cat.store.Get(rowKey)
 			if err == nil {
 				rows[rowKey] = val
 			}
@@ -2354,7 +2556,7 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 	} else {
 		// Fall back to full table scan
 		prefix := "row:" + stmt.TableName + ":"
-		rows, err = e.store.Scan(prefix)
+		rows, err = cat.store.Scan(prefix)
 		if err != nil {
 			return "", err
 		}
@@ -2363,14 +2565,21 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 	var result []string
 
 	// If there's a JOIN, load the join table data.
+	// If there's a JOIN, load the join table data.
 	var joinRows map[string][]byte
 	if stmt.Join != nil {
-		_, ok := e.catalog.GetTable(stmt.Join.TableName)
+		// Get catalog for join table (might be different database)
+		joinCat, err := e.getCatalog(stmt.Join.DatabaseName)
+		if err != nil {
+			return "", err
+		}
+
+		_, ok := joinCat.GetTable(stmt.Join.TableName)
 		if !ok {
-			return "", ferrors.TableNotFound("")
+			return "", ferrors.TableNotFound(stmt.Join.TableName)
 		}
 		p := "row:" + stmt.Join.TableName + ":"
-		joinRows, err = e.store.Scan(p)
+		joinRows, err = joinCat.store.Scan(p)
 		if err != nil {
 			return "", err
 		}
@@ -2432,7 +2641,7 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 					combinedRow[k] = v
 				}
 				// Add NULL values for join table columns
-				if joinTable, ok := e.catalog.GetTable(stmt.Join.TableName); ok {
+				if joinTable, ok := cat.GetTable(stmt.Join.TableName); ok {
 					for _, col := range joinTable.Columns {
 						combinedRow[col.Name] = "NULL"
 						combinedRow[stmt.Join.TableName+"."+col.Name] = "NULL"
@@ -2479,7 +2688,7 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 			if !matched {
 				combinedRow := make(map[string]interface{})
 				// Add NULL values for left table columns
-				if leftTable, ok := e.catalog.GetTable(stmt.TableName); ok {
+				if leftTable, ok := cat.GetTable(stmt.TableName); ok {
 					for _, col := range leftTable.Columns {
 						combinedRow[col.Name] = "NULL"
 						combinedRow[stmt.TableName+"."+col.Name] = "NULL"
@@ -2562,9 +2771,9 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 	if len(stmt.Aggregates) > 0 {
 		// If GROUP BY is present, compute aggregates per group
 		if len(stmt.GroupBy) > 0 {
-			return e.computeGroupedAggregates(stmt, rows, rls)
+			return e.computeGroupedAggregates(cat, stmt, rows, rls)
 		}
-		return e.computeAggregates(stmt, rows, rls)
+		return e.computeAggregates(cat, stmt, rows, rls)
 	}
 
 	// Build the result with row count information.
@@ -3808,15 +4017,21 @@ func (e *Executor) executeReleaseSavepoint(stmt *ReleaseSavepointStmt) (string, 
 
 // executeCreateIndex creates a new index on a table column.
 func (e *Executor) executeCreateIndex(stmt *CreateIndexStmt) (string, error) {
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Verify the table exists
-	_, ok := e.catalog.GetTable(stmt.TableName)
+	_, ok := cat.GetTable(stmt.TableName)
 	if !ok {
 		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	// Check if index already exists
 	prefix := "_sys_index:" + stmt.TableName + ":" + stmt.ColumnName
-	existing, err := e.store.Scan(prefix)
+	existing, err := cat.store.Scan(prefix)
 	if err == nil && len(existing) > 0 {
 		if stmt.IfNotExists {
 			// IF NOT EXISTS specified, silently succeed
@@ -3826,7 +4041,7 @@ func (e *Executor) executeCreateIndex(stmt *CreateIndexStmt) (string, error) {
 	}
 
 	// Create the index
-	err = e.indexMgr.CreateIndex(stmt.TableName, stmt.ColumnName)
+	err = cat.IndexMgr.CreateIndex(stmt.TableName, stmt.ColumnName)
 	if err != nil {
 		if stmt.IfNotExists && strings.Contains(err.Error(), "already exists") {
 			return "CREATE INDEX OK", nil
@@ -3839,8 +4054,14 @@ func (e *Executor) executeCreateIndex(stmt *CreateIndexStmt) (string, error) {
 
 // executeDropIndex drops an index from a table column.
 func (e *Executor) executeDropIndex(stmt *DropIndexStmt) (string, error) {
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Verify the table exists
-	_, ok := e.catalog.GetTable(stmt.TableName)
+	_, ok := cat.GetTable(stmt.TableName)
 	if !ok {
 		if stmt.IfExists {
 			return "DROP INDEX OK", nil
@@ -3854,7 +4075,7 @@ func (e *Executor) executeDropIndex(stmt *DropIndexStmt) (string, error) {
 	// We'll look for an index that matches the pattern.
 
 	// First, try to find the index by scanning all indexes for this table
-	if e.indexMgr == nil {
+	if cat.IndexMgr == nil {
 		return "", ferrors.InternalError("index manager not initialized")
 	}
 
@@ -3865,7 +4086,7 @@ func (e *Executor) executeDropIndex(stmt *DropIndexStmt) (string, error) {
 
 	// Get all indexes and find the one matching this name
 	prefix := "_sys_index:" + stmt.TableName + ":"
-	indexes, err := e.store.Scan(prefix)
+	indexes, err := cat.store.Scan(prefix)
 	if err != nil {
 		return "", err
 	}
@@ -3894,7 +4115,7 @@ func (e *Executor) executeDropIndex(stmt *DropIndexStmt) (string, error) {
 	}
 
 	// Drop the index
-	err = e.indexMgr.DropIndex(stmt.TableName, columnToDelete)
+	err = cat.IndexMgr.DropIndex(stmt.TableName, columnToDelete)
 	if err != nil {
 		return "", err
 	}
@@ -3967,12 +4188,13 @@ func (e *Executor) GetPreparedStatementManager() *PreparedStatementManager {
 // It processes all matching rows and computes COUNT, SUM, AVG, MIN, MAX.
 //
 // Parameters:
+//   - cat: The catalog for the current database
 //   - stmt: The SELECT statement with aggregate expressions
 //   - rows: The raw row data from the table
 //   - rls: Optional RLS condition to apply
 //
 // Returns a single row with the aggregate results.
-func (e *Executor) computeAggregates(stmt *SelectStmt, rows map[string][]byte, rls *Condition) (string, error) {
+func (e *Executor) computeAggregates(cat *Catalog, stmt *SelectStmt, rows map[string][]byte, rls *Condition) (string, error) {
 	// Initialize aggregate accumulators
 	states := make(map[int]*aggState)
 	for i := range stmt.Aggregates {
@@ -4136,12 +4358,13 @@ func (e *Executor) computeAggregates(stmt *SelectStmt, rows map[string][]byte, r
 // It processes all matching rows, groups them, and computes COUNT, SUM, AVG, MIN, MAX per group.
 //
 // Parameters:
+//   - cat: The catalog for the current database
 //   - stmt: The SELECT statement with GROUP BY and aggregate expressions
 //   - rows: The raw row data from the table
 //   - rls: Optional RLS condition to apply
 //
 // Returns multiple rows with group key columns and aggregate results.
-func (e *Executor) computeGroupedAggregates(stmt *SelectStmt, rows map[string][]byte, rls *Condition) (string, error) {
+func (e *Executor) computeGroupedAggregates(cat *Catalog, stmt *SelectStmt, rows map[string][]byte, rls *Condition) (string, error) {
 	// Group rows by the GROUP BY columns
 	type groupData struct {
 		keyValues []string                 // Values of GROUP BY columns
@@ -4441,19 +4664,25 @@ func (e *Executor) evaluateHaving(having *HavingClause, states map[int]*aggState
 //
 // Returns formatted metadata information.
 func (e *Executor) executeInspect(stmt *InspectStmt) (string, error) {
+	// Get the catalog for the current database
+	cat, err := e.getCatalog(e.currentDatabase)
+	if err != nil {
+		return "", err
+	}
+
 	switch stmt.Target {
 	case "USERS":
 		return e.inspectUsers()
 	case "TABLES":
-		return e.inspectTables()
+		return e.inspectTables(cat)
 	case "TABLE":
-		return e.inspectTable(stmt.ObjectName)
+		return e.inspectTable(cat, stmt.ObjectName)
 	case "INDEXES":
-		return e.inspectIndexes()
+		return e.inspectIndexes(cat)
 	case "SERVER":
-		return e.inspectServer()
+		return e.inspectServer(cat)
 	case "STATUS":
-		return e.inspectStatus()
+		return e.inspectStatus(cat)
 	case "DATABASES":
 		return e.inspectDatabases()
 	case "DATABASE":
@@ -4559,7 +4788,7 @@ func (e *Executor) inspectUsers() (string, error) {
 
 // inspectServer returns information about the FlyDB server/daemon.
 // Returns plain key-value pairs that the CLI can format.
-func (e *Executor) inspectServer() (string, error) {
+func (e *Executor) inspectServer(cat *Catalog) (string, error) {
 	var results []string
 
 	results = append(results, "Server: FlyDB Daemon")
@@ -4567,12 +4796,12 @@ func (e *Executor) inspectServer() (string, error) {
 	results = append(results, "Status: Running")
 	results = append(results, "Storage: WAL-backed")
 	results = append(results, "Protocol: Binary + Text")
-	results = append(results, fmt.Sprintf("Tables: %d", len(e.catalog.Tables)))
+	results = append(results, fmt.Sprintf("Tables: %d", len(cat.Tables)))
 
 	// Count indexes
 	indexCount := 0
-	if e.indexMgr != nil {
-		indexCount = len(e.indexMgr.ListIndexes())
+	if cat.IndexMgr != nil {
+		indexCount = len(cat.IndexMgr.ListIndexes())
 	}
 	results = append(results, fmt.Sprintf("Indexes: %d", indexCount))
 
@@ -4588,27 +4817,27 @@ func (e *Executor) inspectServer() (string, error) {
 }
 
 // inspectTables returns information about all tables and their schemas.
-func (e *Executor) inspectTables() (string, error) {
+func (e *Executor) inspectTables(cat *Catalog) (string, error) {
 	header := "table_name, type, columns, rows, indexes, size, created_at, modified_at"
-	if len(e.catalog.Tables) == 0 {
+	if len(cat.Tables) == 0 {
 		return fmt.Sprintf("%s\n(0 rows)", header), nil
 	}
 
 	var results []string
 	// Get sorted table names for consistent output
 	var tableNames []string
-	for name := range e.catalog.Tables {
+	for name := range cat.Tables {
 		tableNames = append(tableNames, name)
 	}
 	sort.Strings(tableNames)
 
 	for _, tableName := range tableNames {
-		table := e.catalog.Tables[tableName]
+		table := cat.Tables[tableName]
 		colCount := len(table.Columns)
 
 		// Count rows and calculate size
 		rowPrefix := "row:" + tableName + ":"
-		rows, _ := e.store.Scan(rowPrefix)
+		rows, _ := cat.store.Scan(rowPrefix)
 		rowCount := len(rows)
 
 		// Calculate approximate data size
@@ -4619,8 +4848,8 @@ func (e *Executor) inspectTables() (string, error) {
 
 		// Count indexes
 		indexCount := 0
-		if e.indexMgr != nil {
-			indexes := e.indexMgr.GetIndexedColumns(tableName)
+		if cat.IndexMgr != nil {
+			indexes := cat.IndexMgr.GetIndexedColumns(tableName)
 			indexCount = len(indexes)
 		}
 
@@ -4664,13 +4893,13 @@ func formatBytes(bytes int64) string {
 }
 
 // inspectIndexes returns information about all indexes.
-func (e *Executor) inspectIndexes() (string, error) {
+func (e *Executor) inspectIndexes(cat *Catalog) (string, error) {
 	header := "index_name, table_name, column_name, type"
-	if e.indexMgr == nil {
+	if cat.IndexMgr == nil {
 		return fmt.Sprintf("%s\n(0 rows)", header), nil
 	}
 
-	indexes := e.indexMgr.ListIndexes()
+	indexes := cat.IndexMgr.ListIndexes()
 	if len(indexes) == 0 {
 		return fmt.Sprintf("%s\n(0 rows)", header), nil
 	}
@@ -4981,8 +5210,8 @@ func (e *Executor) inspectPrivileges() (string, error) {
 }
 
 // inspectTable returns detailed information about a specific table.
-func (e *Executor) inspectTable(tableName string) (string, error) {
-	table, ok := e.catalog.GetTable(tableName)
+func (e *Executor) inspectTable(cat *Catalog, tableName string) (string, error) {
+	table, ok := cat.GetTable(tableName)
 	if !ok {
 		return "", ferrors.TableNotFound(tableName)
 	}
@@ -5089,7 +5318,7 @@ func (e *Executor) inspectTable(tableName string) (string, error) {
 
 	// Row count - scan for all rows in this table
 	rowPrefix := "row:" + tableName + ":"
-	rows, err := e.store.Scan(rowPrefix)
+	rows, err := cat.store.Scan(rowPrefix)
 	rowCount := 0
 	if err == nil {
 		rowCount = len(rows)
@@ -5097,8 +5326,8 @@ func (e *Executor) inspectTable(tableName string) (string, error) {
 	results = append(results, fmt.Sprintf("Row count: %d", rowCount))
 
 	// Indexes on this table
-	if e.indexMgr != nil {
-		indexes := e.indexMgr.ListIndexes()
+	if cat.IndexMgr != nil {
+		indexes := cat.IndexMgr.ListIndexes()
 		var tableIndexes []string
 		for _, idx := range indexes {
 			// Index format is "table:column"
@@ -5140,17 +5369,17 @@ func (e *Executor) inspectTable(tableName string) (string, error) {
 
 // inspectStatus returns comprehensive database status and statistics.
 // Returns plain key-value pairs that the CLI can format.
-func (e *Executor) inspectStatus() (string, error) {
+func (e *Executor) inspectStatus(cat *Catalog) (string, error) {
 	var results []string
 
 	// Table count
-	tableCount := len(e.catalog.Tables)
+	tableCount := len(cat.Tables)
 	results = append(results, fmt.Sprintf("Tables: %d", tableCount))
 
 	// List table names
 	if tableCount > 0 {
 		var tableNames []string
-		for name := range e.catalog.Tables {
+		for name := range cat.Tables {
 			tableNames = append(tableNames, name)
 		}
 		sort.Strings(tableNames)
@@ -5167,8 +5396,8 @@ func (e *Executor) inspectStatus() (string, error) {
 
 	// Index count
 	indexCount := 0
-	if e.indexMgr != nil {
-		indexes := e.indexMgr.ListIndexes()
+	if cat.IndexMgr != nil {
+		indexes := cat.IndexMgr.ListIndexes()
 		indexCount = len(indexes)
 	}
 	results = append(results, fmt.Sprintf("Indexes: %d", indexCount))
@@ -5176,9 +5405,9 @@ func (e *Executor) inspectStatus() (string, error) {
 	// Total row count across all tables
 	totalRows := 0
 	totalStorageSize := 0
-	for tableName := range e.catalog.Tables {
+	for tableName := range cat.Tables {
 		rowPrefix := "row:" + tableName + ":"
-		rows, err := e.store.Scan(rowPrefix)
+		rows, err := cat.store.Scan(rowPrefix)
 		if err == nil {
 			totalRows += len(rows)
 			for _, rowData := range rows {
@@ -5190,7 +5419,7 @@ func (e *Executor) inspectStatus() (string, error) {
 	results = append(results, fmt.Sprintf("Data size: %d bytes", totalStorageSize))
 
 	// WAL size if available - try unified engine first, then KVStore
-	if unified, ok := e.store.(*storage.UnifiedStorageEngine); ok {
+	if unified, ok := cat.store.(*storage.UnifiedStorageEngine); ok {
 		if wal := unified.WAL(); wal != nil {
 			if walSize, err := wal.Size(); err == nil {
 				results = append(results, fmt.Sprintf("WAL size: %d bytes", walSize))
@@ -5209,11 +5438,17 @@ func (e *Executor) inspectStatus() (string, error) {
 
 // executeCreateProcedure creates a new stored procedure.
 func (e *Executor) executeCreateProcedure(stmt *CreateProcedureStmt) (string, error) {
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Check if procedure already exists
-	if _, exists := e.catalog.GetProcedure(stmt.Name); exists {
+	if _, exists := cat.GetProcedure(stmt.Name); exists {
 		if stmt.OrReplace {
 			// Drop the existing procedure first
-			if err := e.catalog.DropProcedure(stmt.Name); err != nil {
+			if err := cat.DropProcedure(stmt.Name); err != nil {
 				return "", err
 			}
 		} else if stmt.IfNotExists {
@@ -5230,7 +5465,7 @@ func (e *Executor) executeCreateProcedure(stmt *CreateProcedureStmt) (string, er
 		BodySQL:    stmt.BodySQL,
 	}
 
-	if err := e.catalog.CreateProcedure(proc); err != nil {
+	if err := cat.CreateProcedure(proc); err != nil {
 		return "", err
 	}
 
@@ -5239,7 +5474,13 @@ func (e *Executor) executeCreateProcedure(stmt *CreateProcedureStmt) (string, er
 
 // executeCall executes a stored procedure.
 func (e *Executor) executeCall(stmt *CallStmt) (string, error) {
-	proc, ok := e.catalog.GetProcedure(stmt.ProcedureName)
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
+	proc, ok := cat.GetProcedure(stmt.ProcedureName)
 	if !ok {
 		return "", ferrors.ProcedureNotFound(stmt.ProcedureName)
 	}
@@ -5283,15 +5524,21 @@ func (e *Executor) executeCall(stmt *CallStmt) (string, error) {
 
 // executeDropProcedure removes a stored procedure.
 func (e *Executor) executeDropProcedure(stmt *DropProcedureStmt) (string, error) {
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Check if procedure exists
-	if _, exists := e.catalog.GetProcedure(stmt.Name); !exists {
+	if _, exists := cat.GetProcedure(stmt.Name); !exists {
 		if stmt.IfExists {
 			return "DROP PROCEDURE OK", nil
 		}
 		return "", ferrors.ProcedureNotFound(stmt.Name)
 	}
 
-	if err := e.catalog.DropProcedure(stmt.Name); err != nil {
+	if err := cat.DropProcedure(stmt.Name); err != nil {
 		return "", err
 	}
 	return "DROP PROCEDURE OK", nil
@@ -5305,8 +5552,14 @@ func (e *Executor) executeDropProcedure(stmt *DropProcedureStmt) (string, error)
 //
 // Returns "ALTER TABLE OK" on success, or an error.
 func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Verify the table exists
-	table, ok := e.catalog.GetTable(stmt.TableName)
+	table, ok := cat.GetTable(stmt.TableName)
 	if !ok {
 		return "", ferrors.TableNotFound(stmt.TableName)
 	}
@@ -5324,7 +5577,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 
 		// Validate foreign key references if present
 		if fk := stmt.ColumnDef.GetForeignKey(); fk != nil {
-			refTable, ok := e.catalog.GetTable(fk.Table)
+			refTable, ok := cat.GetTable(fk.Table)
 			if !ok {
 				return "", ferrors.TableNotFound(fk.Table)
 			}
@@ -5341,13 +5594,13 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 		}
 
 		// Add the column to the schema
-		if err := e.catalog.AddColumn(stmt.TableName, *stmt.ColumnDef); err != nil {
+		if err := cat.AddColumn(stmt.TableName, *stmt.ColumnDef); err != nil {
 			return "", err
 		}
 
 		// Update existing rows to include the new column with default value
 		prefix := "row:" + stmt.TableName + ":"
-		rows, err := e.store.Scan(prefix)
+		rows, err := cat.store.Scan(prefix)
 		if err != nil {
 			return "", err
 		}
@@ -5365,7 +5618,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 			}
 			row[stmt.ColumnDef.Name] = defaultVal
 			newData, _ := json.Marshal(row)
-			e.store.Put(key, newData)
+			cat.store.Put(key, newData)
 		}
 
 		// Invoke OnSchemaChange callback
@@ -5386,13 +5639,13 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 		}
 
 		// Drop the column from the schema
-		if err := e.catalog.DropColumn(stmt.TableName, stmt.ColumnName); err != nil {
+		if err := cat.DropColumn(stmt.TableName, stmt.ColumnName); err != nil {
 			return "", err
 		}
 
 		// Update existing rows to remove the column
 		prefix := "row:" + stmt.TableName + ":"
-		rows, err := e.store.Scan(prefix)
+		rows, err := cat.store.Scan(prefix)
 		if err != nil {
 			return "", err
 		}
@@ -5404,7 +5657,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 			}
 			delete(row, stmt.ColumnName)
 			newData, _ := json.Marshal(row)
-			e.store.Put(key, newData)
+			cat.store.Put(key, newData)
 		}
 
 		// Invoke OnSchemaChange callback
@@ -5424,13 +5677,13 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 		}
 
 		// Rename the column in the schema
-		if err := e.catalog.RenameColumn(stmt.TableName, stmt.ColumnName, stmt.NewColumnName); err != nil {
+		if err := cat.RenameColumn(stmt.TableName, stmt.ColumnName, stmt.NewColumnName); err != nil {
 			return "", err
 		}
 
 		// Update existing rows to rename the column
 		prefix := "row:" + stmt.TableName + ":"
-		rows, err := e.store.Scan(prefix)
+		rows, err := cat.store.Scan(prefix)
 		if err != nil {
 			return "", err
 		}
@@ -5444,7 +5697,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 				row[stmt.NewColumnName] = v
 				delete(row, stmt.ColumnName)
 				newData, _ := json.Marshal(row)
-				e.store.Put(key, newData)
+				cat.store.Put(key, newData)
 			}
 		}
 
@@ -5491,7 +5744,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 		}
 
 		// Modify the column in the schema
-		if err := e.catalog.ModifyColumn(stmt.TableName, stmt.ColumnName, stmt.NewColumnType, newConstraints); err != nil {
+		if err := cat.ModifyColumn(stmt.TableName, stmt.ColumnName, stmt.NewColumnType, newConstraints); err != nil {
 			return "", err
 		}
 
@@ -5514,7 +5767,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 
 		// Validate foreign key references if present
 		if stmt.Constraint.Type == ConstraintForeignKey && stmt.Constraint.ForeignKey != nil {
-			refTable, ok := e.catalog.GetTable(stmt.Constraint.ForeignKey.Table)
+			refTable, ok := cat.GetTable(stmt.Constraint.ForeignKey.Table)
 			if !ok {
 				return "", ferrors.TableNotFound(stmt.Constraint.ForeignKey.Table)
 			}
@@ -5531,7 +5784,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 		}
 
 		// Add the constraint to the catalog
-		if err := e.catalog.AddConstraint(stmt.TableName, *stmt.Constraint); err != nil {
+		if err := cat.AddConstraint(stmt.TableName, *stmt.Constraint); err != nil {
 			return "", err
 		}
 
@@ -5554,7 +5807,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 		}
 
 		// Drop the constraint from the catalog
-		if err := e.catalog.DropConstraint(stmt.TableName, stmt.ConstraintName); err != nil {
+		if err := cat.DropConstraint(stmt.TableName, stmt.ConstraintName); err != nil {
 			return "", err
 		}
 
@@ -5582,11 +5835,17 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 //
 // Returns "CREATE VIEW OK" on success, or an error.
 func (e *Executor) executeCreateView(stmt *CreateViewStmt) (string, error) {
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Check if view already exists
-	if _, exists := e.catalog.GetView(stmt.ViewName); exists {
+	if _, exists := cat.GetView(stmt.ViewName); exists {
 		if stmt.OrReplace {
 			// Drop the existing view first
-			if err := e.catalog.DropView(stmt.ViewName); err != nil {
+			if err := cat.DropView(stmt.ViewName); err != nil {
 				return "", err
 			}
 		} else if stmt.IfNotExists {
@@ -5599,9 +5858,9 @@ func (e *Executor) executeCreateView(stmt *CreateViewStmt) (string, error) {
 
 	// Validate that the underlying table(s) exist
 	if stmt.Query.TableName != "" {
-		if _, ok := e.catalog.GetTable(stmt.Query.TableName); !ok {
+		if _, ok := cat.GetTable(stmt.Query.TableName); !ok {
 			// Check if it's a view
-			if _, ok := e.catalog.GetView(stmt.Query.TableName); !ok {
+			if _, ok := cat.GetView(stmt.Query.TableName); !ok {
 				return "", ferrors.TableNotFound(stmt.Query.TableName)
 			}
 		}
@@ -5611,7 +5870,7 @@ func (e *Executor) executeCreateView(stmt *CreateViewStmt) (string, error) {
 	querySQL := reconstructSelectSQL(stmt.Query)
 
 	// Create the view in the catalog
-	if err := e.catalog.CreateView(stmt.ViewName, querySQL); err != nil {
+	if err := cat.CreateView(stmt.ViewName, querySQL); err != nil {
 		return "", err
 	}
 
@@ -5625,15 +5884,21 @@ func (e *Executor) executeCreateView(stmt *CreateViewStmt) (string, error) {
 //
 // Returns "DROP VIEW OK" on success, or an error.
 func (e *Executor) executeDropView(stmt *DropViewStmt) (string, error) {
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Check if view exists
-	if _, exists := e.catalog.GetView(stmt.ViewName); !exists {
+	if _, exists := cat.GetView(stmt.ViewName); !exists {
 		if stmt.IfExists {
 			return "DROP VIEW OK", nil
 		}
 		return "", ferrors.ViewNotFound(stmt.ViewName)
 	}
 
-	if err := e.catalog.DropView(stmt.ViewName); err != nil {
+	if err := cat.DropView(stmt.ViewName); err != nil {
 		return "", err
 	}
 	return "DROP VIEW OK", nil
@@ -5646,16 +5911,22 @@ func (e *Executor) executeDropView(stmt *DropViewStmt) (string, error) {
 //
 // Returns "CREATE TRIGGER OK" on success, or an error.
 func (e *Executor) executeCreateTrigger(stmt *CreateTriggerStmt) (string, error) {
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Validate that the table exists
-	if _, ok := e.catalog.GetTable(stmt.TableName); !ok {
+	if _, ok := cat.GetTable(stmt.TableName); !ok {
 		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	// Check if trigger already exists
-	if e.triggerMgr.TriggerExists(stmt.TableName, stmt.TriggerName) {
+	if cat.TriggerMgr.TriggerExists(stmt.TableName, stmt.TriggerName) {
 		if stmt.OrReplace {
 			// Drop the existing trigger first
-			if err := e.triggerMgr.DropTrigger(stmt.TableName, stmt.TriggerName); err != nil {
+			if err := cat.TriggerMgr.DropTrigger(stmt.TableName, stmt.TriggerName); err != nil {
 				return "", err
 			}
 		} else if stmt.IfNotExists {
@@ -5675,7 +5946,7 @@ func (e *Executor) executeCreateTrigger(stmt *CreateTriggerStmt) (string, error)
 		ActionSQL: stmt.ActionSQL,
 	}
 
-	if err := e.triggerMgr.CreateTrigger(trigger); err != nil {
+	if err := cat.TriggerMgr.CreateTrigger(trigger); err != nil {
 		return "", err
 	}
 
@@ -5689,15 +5960,21 @@ func (e *Executor) executeCreateTrigger(stmt *CreateTriggerStmt) (string, error)
 //
 // Returns "DROP TRIGGER OK" on success, or an error.
 func (e *Executor) executeDropTrigger(stmt *DropTriggerStmt) (string, error) {
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Check if trigger exists
-	if !e.triggerMgr.TriggerExists(stmt.TableName, stmt.TriggerName) {
+	if !cat.TriggerMgr.TriggerExists(stmt.TableName, stmt.TriggerName) {
 		if stmt.IfExists {
 			return "DROP TRIGGER OK", nil
 		}
 		return "", ferrors.TriggerNotFound(stmt.TriggerName, stmt.TableName)
 	}
 
-	if err := e.triggerMgr.DropTrigger(stmt.TableName, stmt.TriggerName); err != nil {
+	if err := cat.TriggerMgr.DropTrigger(stmt.TableName, stmt.TriggerName); err != nil {
 		return "", err
 	}
 	return "DROP TRIGGER OK", nil
@@ -5718,8 +5995,19 @@ func (e *Executor) executeDropTrigger(stmt *DropTriggerStmt) (string, error) {
 //
 // Returns "DROP TABLE OK" on success, or an error.
 func (e *Executor) executeDropTable(stmt *DropTableStmt) (string, error) {
+	// Check permissions using RBAC
+	if _, err := e.checkAccessWithPrivilege(stmt.DatabaseName, stmt.TableName, auth.PrivilegeDrop); err != nil {
+		return "", err
+	}
+
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Check if table exists
-	table, ok := e.catalog.GetTable(stmt.TableName)
+	table, ok := cat.GetTable(stmt.TableName)
 	if !ok {
 		if stmt.IfExists {
 			return "DROP TABLE OK", nil
@@ -5729,7 +6017,7 @@ func (e *Executor) executeDropTable(stmt *DropTableStmt) (string, error) {
 
 	// Check for foreign key references from other tables
 	// We need to ensure no other table references this table
-	for tableName, tableSchema := range e.catalog.Tables {
+	for tableName, tableSchema := range cat.Tables {
 		if tableName == stmt.TableName {
 			continue
 		}
@@ -5744,42 +6032,42 @@ func (e *Executor) executeDropTable(stmt *DropTableStmt) (string, error) {
 
 	// Delete all rows in the table
 	prefix := "row:" + stmt.TableName + ":"
-	rows, err := e.store.Scan(prefix)
+	rows, err := cat.store.Scan(prefix)
 	if err != nil {
 		return "", ferrors.NewStorageError("failed to scan table rows").WithCause(err)
 	}
 
 	for key, rowData := range rows {
 		// Update indexes before deleting
-		if e.indexMgr != nil {
+		if cat.IndexMgr != nil {
 			var row map[string]interface{}
 			if err := json.Unmarshal(rowData, &row); err == nil {
-				e.indexMgr.OnDelete(stmt.TableName, key, row)
+				cat.IndexMgr.OnDelete(stmt.TableName, key, row)
 			}
 		}
-		e.store.Delete(key)
+		cat.store.Delete(key)
 	}
 
 	// Delete the sequence counter for auto-increment columns
 	for _, col := range table.Columns {
 		if col.Type == "SERIAL" {
 			seqKey := "seq:" + stmt.TableName + ":" + col.Name
-			e.store.Delete(seqKey)
+			cat.store.Delete(seqKey)
 		}
 	}
 
 	// Drop all indexes for the table
-	if e.indexMgr != nil {
-		e.indexMgr.DropAllIndexesForTable(stmt.TableName)
+	if cat.IndexMgr != nil {
+		cat.IndexMgr.DropAllIndexesForTable(stmt.TableName)
 	}
 
 	// Drop all triggers for the table
-	if e.triggerMgr != nil {
-		e.triggerMgr.DropAllTriggersForTable(stmt.TableName)
+	if cat.TriggerMgr != nil {
+		cat.TriggerMgr.DropAllTriggersForTable(stmt.TableName)
 	}
 
 	// Remove the table schema from the catalog
-	if err := e.catalog.DropTable(stmt.TableName); err != nil {
+	if err := cat.DropTable(stmt.TableName); err != nil {
 		return "", err
 	}
 
@@ -5810,14 +6098,20 @@ func (e *Executor) executeDropTable(stmt *DropTableStmt) (string, error) {
 //
 // Returns "TRUNCATE TABLE OK" on success, or an error.
 func (e *Executor) executeTruncateTable(stmt *TruncateTableStmt) (string, error) {
+	// Get the catalog for the target database
+	cat, err := e.getCatalog(stmt.DatabaseName)
+	if err != nil {
+		return "", err
+	}
+
 	// Check if table exists
-	table, ok := e.catalog.GetTable(stmt.TableName)
+	table, ok := cat.GetTable(stmt.TableName)
 	if !ok {
 		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	// Check for foreign key references from other tables
-	for tableName, tableSchema := range e.catalog.Tables {
+	for tableName, tableSchema := range cat.Tables {
 		if tableName == stmt.TableName {
 			continue
 		}
@@ -5826,7 +6120,7 @@ func (e *Executor) executeTruncateTable(stmt *TruncateTableStmt) (string, error)
 				if constraint.Type == ConstraintForeignKey && constraint.ForeignKey != nil && constraint.ForeignKey.Table == stmt.TableName {
 					// Check if the referencing table has any rows
 					refPrefix := "row:" + tableName + ":"
-					refRows, err := e.store.Scan(refPrefix)
+					refRows, err := cat.store.Scan(refPrefix)
 					if err == nil && len(refRows) > 0 {
 						return "", ferrors.ConstraintViolation("FOREIGN KEY", fmt.Sprintf("cannot truncate table %s: referenced by foreign key in table %s with existing data", stmt.TableName, tableName))
 					}
@@ -5837,27 +6131,27 @@ func (e *Executor) executeTruncateTable(stmt *TruncateTableStmt) (string, error)
 
 	// Delete all rows in the table
 	prefix := "row:" + stmt.TableName + ":"
-	rows, err := e.store.Scan(prefix)
+	rows, err := cat.store.Scan(prefix)
 	if err != nil {
 		return "", ferrors.NewStorageError("failed to scan table rows").WithCause(err)
 	}
 
 	for key, rowData := range rows {
 		// Update indexes before deleting
-		if e.indexMgr != nil {
+		if cat.IndexMgr != nil {
 			var row map[string]interface{}
 			if err := json.Unmarshal(rowData, &row); err == nil {
-				e.indexMgr.OnDelete(stmt.TableName, key, row)
+				cat.IndexMgr.OnDelete(stmt.TableName, key, row)
 			}
 		}
-		e.store.Delete(key)
+		cat.store.Delete(key)
 	}
 
 	// Reset auto-increment sequences
 	for _, col := range table.Columns {
 		if col.Type == "SERIAL" {
 			seqKey := "seq:" + stmt.TableName + ":" + col.Name
-			e.store.Delete(seqKey)
+			cat.store.Delete(seqKey)
 		}
 	}
 
@@ -5870,33 +6164,17 @@ func (e *Executor) executeTruncateTable(stmt *TruncateTableStmt) (string, error)
 }
 
 // executeTriggers executes all triggers for a table with the specified timing and event.
-// It parses and executes the action SQL for each matching trigger.
-//
-// Parameters:
-//   - tableName: The table the operation is being performed on
-//   - timing: BEFORE or AFTER
-//   - event: INSERT, UPDATE, or DELETE
-//
-// Returns an error if any trigger fails to execute.
-func (e *Executor) executeTriggers(tableName string, timing TriggerTiming, event TriggerEvent) error {
-	triggers := e.triggerMgr.GetTriggers(tableName, timing, event)
-
-	for _, trigger := range triggers {
-		// Parse and execute the trigger's action SQL
-		lexer := NewLexer(trigger.ActionSQL)
-		parser := NewParser(lexer)
-		stmt, err := parser.Parse()
-		if err != nil {
-			return ferrors.NewExecutionError(fmt.Sprintf("trigger %s: failed to parse action SQL", trigger.Name)).WithCause(err)
-		}
-
-		_, err = e.Execute(stmt)
-		if err != nil {
-			return ferrors.NewExecutionError(fmt.Sprintf("trigger %s: failed to execute action", trigger.Name)).WithCause(err)
-		}
+func (e *Executor) executeTriggers(cat *Catalog, dbName, tableName string, timing TriggerTiming, event TriggerEvent) error {
+	if cat.TriggerMgr == nil {
+		return nil
 	}
 
-	return nil
+	// Create ephemeral executor with correct DB context
+	ephemeral := *e
+	ephemeral.currentDatabase = dbName
+	// Note: We don't need to deep copy catalogs map, it's shared.
+
+	return cat.TriggerMgr.Fire(tableName, timing, event, &ephemeral)
 }
 
 // reconstructSelectSQL reconstructs a SQL query string from a SelectStmt AST.
@@ -6061,6 +6339,11 @@ func parseDateTime(s string) (time.Time, error) {
 
 // executeCreateDatabase creates a new database.
 func (e *Executor) executeCreateDatabase(stmt *CreateDatabaseStmt) (string, error) {
+	// Check permissions using RBAC (Server level)
+	if _, err := e.checkAccessWithPrivilege("", "", auth.PrivilegeCreate); err != nil {
+		return "", err
+	}
+
 	if e.dbMgr == nil {
 		return "", ferrors.InternalError("database manager not initialized")
 	}
@@ -6080,6 +6363,11 @@ func (e *Executor) executeCreateDatabase(stmt *CreateDatabaseStmt) (string, erro
 
 // executeDropDatabase drops a database.
 func (e *Executor) executeDropDatabase(stmt *DropDatabaseStmt) (string, error) {
+	// Check permissions using RBAC (Server level or Owner)
+	if _, err := e.checkAccessWithPrivilege(stmt.DatabaseName, "", auth.PrivilegeDrop); err != nil {
+		return "", err
+	}
+
 	if e.dbMgr == nil {
 		return "", ferrors.InternalError("database manager not initialized")
 	}

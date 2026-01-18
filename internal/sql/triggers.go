@@ -1,53 +1,3 @@
-/*
- * Copyright (c) 2026 Firefly Software Solutions Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-/*
-Package sql contains the TriggerManager component for database triggers.
-
-TriggerManager Overview:
-========================
-
-The TriggerManager handles the registration, storage, and execution of database
-triggers. Triggers are automatic actions that execute in response to INSERT,
-UPDATE, or DELETE operations on tables.
-
-Trigger Execution Flow:
-=======================
-
- 1. A DML operation (INSERT, UPDATE, DELETE) is initiated
- 2. BEFORE triggers are executed (if any)
- 3. The DML operation is performed
- 4. AFTER triggers are executed (if any)
-
-Trigger Storage:
-================
-
-Triggers are stored in the KVStore with the key format:
-
-	trigger:<table>:<name> → Trigger JSON
-
-This allows efficient lookup of all triggers for a specific table.
-
-Thread Safety:
-==============
-
-The TriggerManager uses a sync.RWMutex to provide thread-safe access
-to the trigger registry. Multiple readers can access triggers concurrently,
-but writes are exclusive.
-*/
 package sql
 
 import (
@@ -245,5 +195,28 @@ func (tm *TriggerManager) DropAllTriggersForTable(tableName string) error {
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
+	return nil
+}
+
+// Fire executes all triggers for a table with the specified timing and event.
+// It parses and executes the action SQL for each matching trigger using the provided executor.
+func (tm *TriggerManager) Fire(tableName string, timing TriggerTiming, event TriggerEvent, exec *Executor) error {
+	triggers := tm.GetTriggers(tableName, timing, event)
+
+	for _, trigger := range triggers {
+		// Parse and execute the trigger's action SQL
+		lexer := NewLexer(trigger.ActionSQL)
+		parser := NewParser(lexer)
+		stmt, err := parser.Parse()
+		if err != nil {
+			return ferrors.NewExecutionError(fmt.Sprintf("trigger %s: failed to parse action SQL", trigger.Name)).WithCause(err)
+		}
+
+		_, err = exec.Execute(stmt)
+		if err != nil {
+			return ferrors.NewExecutionError(fmt.Sprintf("trigger %s: failed to execute action", trigger.Name)).WithCause(err)
+		}
+	}
+
 	return nil
 }

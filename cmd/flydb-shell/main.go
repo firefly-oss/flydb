@@ -1979,6 +1979,7 @@ func processCommand(client *BinaryClient, input string, config CLIConfig) (strin
 			return "", cli.ErrMissingArgument("database_name", "USE <database_name>")
 		}
 		dbName := strings.TrimSpace(parts[1])
+		dbName = strings.TrimSuffix(dbName, ";")
 		// Execute the USE command on the server
 		result, err := client.Query("USE " + dbName)
 		if err != nil {
@@ -2033,6 +2034,7 @@ func processCommand(client *BinaryClient, input string, config CLIConfig) (strin
 	// Update current database if USE command was executed via SQL mode
 	if strings.HasPrefix(strings.ToUpper(query), "USE ") && strings.Contains(result, "OK") {
 		dbName := strings.TrimSpace(query[4:])
+		dbName = strings.TrimSuffix(dbName, ";")
 		replState.CurrentDatabase = dbName
 	}
 

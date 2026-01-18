@@ -217,8 +217,7 @@ func (l *Lexer) NextToken() Token {
 		for l.pos < len(l.input) && (unicode.IsLetter(rune(l.input[l.pos])) ||
 			unicode.IsDigit(rune(l.input[l.pos])) ||
 			l.input[l.pos] == '_' ||
-			l.input[l.pos] == '*' ||
-			l.input[l.pos] == '.') {
+			l.input[l.pos] == '*') {
 			l.advance()
 		}
 

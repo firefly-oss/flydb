@@ -1148,6 +1148,20 @@ DROP DATABASE [IF EXISTS] database_name
 ```sql
 -- Drop a database
 DROP DATABASE staging
+```
+
+#### USE
+
+Switch the current database context for the session.
+
+```sql
+USE database_name
+```
+
+**Example:**
+```sql
+USE analytics
+```
 
 -- Drop only if it exists (no error if database doesn't exist)
 DROP DATABASE IF EXISTS temp_db
@@ -1355,6 +1369,7 @@ INSPECT TABLE users
 | `REAL` | - | 64-bit floating point | `2.718` |
 | `DECIMAL` | `NUMERIC` | Arbitrary precision decimal | `123.456` |
 | `MONEY` | - | Currency values | `$1234.56`, `€99.99` |
+| `INET` | - | IPv4/IPv6 address or CIDR | `'192.168.1.1'`, `'10.0.0.0/8'` |
 
 ### String Types
 
@@ -1399,6 +1414,8 @@ INSPECT TABLE users
 |------|---------|-------------|---------|
 | `UUID` | - | Universally unique identifier (RFC 4122) | `'550e8400-e29b-41d4-a716-446655440000'` |
 | `JSONB` | `JSON` | Binary JSON for structured data | `'{"key": "value"}'` |
+| `SET` | - | Unordered collection of unique elements | `'[1, 2, 3]'`, `'["a", "b"]'` |
+| `ZSET` | `SORTEDSET` | Ordered set with scores | `'[{"score": 1, "member": "a"}]'` |
 
 ---
 

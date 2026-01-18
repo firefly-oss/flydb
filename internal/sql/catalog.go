@@ -108,6 +108,12 @@ type Catalog struct {
 
 	// store is the underlying storage engine for persistence.
 	store storage.Engine
+
+	// IndexMgr manages B-Tree indexes for efficient lookups.
+	IndexMgr *storage.IndexManager
+
+	// TriggerMgr manages database triggers.
+	TriggerMgr *TriggerManager
 }
 
 // TableSchema defines the structure of a database table.
@@ -229,6 +235,8 @@ func NewCatalog(store storage.Engine) *Catalog {
 		Procedures: make(map[string]StoredProcedure),
 		Views:      make(map[string]ViewDefinition),
 		store:      store,
+		IndexMgr:   storage.NewIndexManager(store),
+		TriggerMgr: NewTriggerManager(store),
 	}
 	// Load existing schemas from storage into memory.
 	c.load()

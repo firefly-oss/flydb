@@ -174,6 +174,29 @@ func (p *Parser) wrapError(expected string, err error) error {
 		WithCause(err)
 }
 
+// parseTableIdentifier parses a table name which may include a database prefix.
+// Returns (database, table, error).
+func (p *Parser) parseTableIdentifier() (string, string, error) {
+	if !p.expectPeek(TokenIdent) {
+		return "", "", p.syntaxError("table name")
+	}
+	part1 := p.cur.Value
+
+	// Check for dot separator
+	if p.peek.Type == TokenDot {
+		p.nextToken() // consume dot
+		if !p.expectPeek(TokenIdent) {
+			return "", "", p.syntaxError("table name after dot")
+		}
+		part2 := p.cur.Value
+		// part1 is database, part2 is table
+		return part1, part2, nil
+	}
+
+	// Only table name
+	return "", part1, nil
+}
+
 // Parse parses the input and returns the corresponding Statement AST.
 // This is the main entry point for parsing SQL statements.
 //
@@ -393,10 +416,10 @@ func (p *Parser) parseGrant() (Statement, error) {
 	}
 
 	// Parse the table name.
-	if !p.expectPeek(TokenIdent) {
-		return nil, p.syntaxError("table name")
+	dbName, tableName, err := p.parseTableIdentifier()
+	if err != nil {
+		return nil, err
 	}
-	tableName := p.cur.Value
 
 	// Parse optional WHERE clause for RLS.
 	var where *Condition
@@ -423,7 +446,7 @@ func (p *Parser) parseGrant() (Statement, error) {
 	}
 	username := p.cur.Value
 
-	return &GrantStmt{TableName: tableName, Username: username, Where: where}, nil
+	return &GrantStmt{DatabaseName: dbName, TableName: tableName, Username: username, Where: where}, nil
 }
 
 // parseGrantRole parses a GRANT role TO user statement.
@@ -485,10 +508,10 @@ func (p *Parser) parseRevoke() (Statement, error) {
 			p.nextToken() // Skip ON
 
 			// Parse the table name
-			if !p.expectPeek(TokenIdent) {
-				return nil, p.syntaxError("table name after ON")
+			dbName, tableName, err := p.parseTableIdentifier()
+			if err != nil {
+				return nil, err
 			}
-			tableName := p.cur.Value
 
 			// Expect FROM keyword and username
 			if !p.expectPeek(TokenKeyword) || p.cur.Value != "FROM" {
@@ -499,7 +522,7 @@ func (p *Parser) parseRevoke() (Statement, error) {
 			}
 			username := p.cur.Value
 
-			return &RevokeStmt{TableName: tableName, Username: username}, nil
+			return &RevokeStmt{DatabaseName: dbName, TableName: tableName, Username: username}, nil
 		case "ROLE":
 			// Explicit ROLE keyword - skip it and parse role revoke
 			p.nextToken() // Skip ROLE keyword
@@ -587,11 +610,11 @@ func (p *Parser) parseCreate() (*CreateTableStmt, error) {
 	}
 
 	// Parse the table name.
-	if p.peek.Type != TokenIdent && p.peek.Type != TokenKeyword {
-		return nil, p.syntaxError("table name")
+	dbName, tableName, err := p.parseTableIdentifier()
+	if err != nil {
+		return nil, err
 	}
-	p.nextToken()
-	stmt := &CreateTableStmt{TableName: p.cur.Value, IfNotExists: ifNotExists}
+	stmt := &CreateTableStmt{DatabaseName: dbName, TableName: tableName, IfNotExists: ifNotExists}
 
 	// Expect opening parenthesis.
 	if !p.expectPeek(TokenLParen) {
@@ -1185,18 +1208,30 @@ func (p *Parser) parseColumnList() ([]string, error) {
 //	INSERT INTO users (id, name) VALUES (1, 'Alice')
 //	INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')
 //
-// Returns an InsertStmt AST node.
+// parseInsert parses an INSERT INTO statement.
+// Syntax: INSERT INTO [db.]<table> ...
 func (p *Parser) parseInsert() (*InsertStmt, error) {
-	// Expect INTO keyword.
+	// Skip INSERT keyword (already validated) -> handled by expectPeek logic adjustment or simply don't skip if current token is INSERT and we want to check next.
+	// Actually, if we remove p.nextToken(), p.cur is INSERT.
+	// We want to check if next token is INTO.
+	// p.expectPeek check p.peek.
+	// If p.cur=INSERT, p.peek=INTO.
+	// p.expectPeek(TokenKeyword) -> matches INTO. Advances. p.cur=INTO.
+	// Then p.cur.Value == "INTO" checks out.
+	// So removing p.nextToken() is correct.
+
+	// Expect INTO keyword
 	if !p.expectPeek(TokenKeyword) || p.cur.Value != "INTO" {
 		return nil, p.syntaxError("INTO")
 	}
 
-	// Parse the table name.
-	if !p.expectPeek(TokenIdent) {
-		return nil, p.syntaxError("table name")
+	// Parse table name
+	dbName, tableName, err := p.parseTableIdentifier()
+	if err != nil {
+		return nil, err
 	}
-	stmt := &InsertStmt{TableName: p.cur.Value}
+
+	stmt := &InsertStmt{DatabaseName: dbName, TableName: tableName}
 
 	// Check if next token is ( for column list or VALUES for value list
 	p.nextToken()
@@ -1349,14 +1384,19 @@ func (p *Parser) parseInsert() (*InsertStmt, error) {
 // Multiple column assignments can be separated by commas.
 // The WHERE clause is optional.
 //
-// Returns an UpdateStmt AST node.
+// parseUpdate parses an UPDATE statement.
+// Syntax: UPDATE [db.]<table> SET ...
 func (p *Parser) parseUpdate() (*UpdateStmt, error) {
-	// Parse the table name.
-	if !p.expectPeek(TokenIdent) {
-		return nil, p.syntaxError("table name")
-	}
-	tableName := p.cur.Value
+	// Skip UPDATE keyword
+	p.nextToken()
 
+	// Parse table name
+	dbName, tableName, err := p.parseTableIdentifier()
+	if err != nil {
+		return nil, err
+	}
+
+	stmt := &UpdateStmt{DatabaseName: dbName, TableName: tableName, Updates: make(map[string]string)}
 	// Expect SET keyword.
 	if !p.expectPeek(TokenKeyword) || p.cur.Value != "SET" {
 		return nil, p.syntaxError("SET")
@@ -1391,6 +1431,7 @@ func (p *Parser) parseUpdate() (*UpdateStmt, error) {
 			break
 		}
 	}
+	stmt.Updates = updates
 
 	// Parse optional WHERE clause.
 	var where *Condition
@@ -1413,8 +1454,9 @@ func (p *Parser) parseUpdate() (*UpdateStmt, error) {
 		}
 		where = &Condition{Column: col, Value: value}
 	}
+	stmt.Where = where
 
-	return &UpdateStmt{TableName: tableName, Updates: updates, Where: where}, nil
+	return stmt, nil
 }
 
 // parseDelete parses a DELETE statement.
@@ -1424,18 +1466,24 @@ func (p *Parser) parseUpdate() (*UpdateStmt, error) {
 //
 // The WHERE clause is optional. Without it, all rows are deleted.
 //
-// Returns a DeleteStmt AST node.
+// parseDelete parses a DELETE statement.
+// Syntax: DELETE FROM [db.]<table> [WHERE ...]
 func (p *Parser) parseDelete() (*DeleteStmt, error) {
-	// Expect FROM keyword.
+	// Skip DELETE keyword
+	p.nextToken()
+
+	// Expect FROM keyword
 	if !p.expectPeek(TokenKeyword) || p.cur.Value != "FROM" {
 		return nil, p.syntaxError("FROM")
 	}
 
-	// Parse the table name.
-	if !p.expectPeek(TokenIdent) {
-		return nil, p.syntaxError("table name")
+	// Parse table name
+	dbName, tableName, err := p.parseTableIdentifier()
+	if err != nil {
+		return nil, err
 	}
-	tableName := p.cur.Value
+
+	stmt := &DeleteStmt{DatabaseName: dbName, TableName: tableName}
 
 	// Parse optional WHERE clause.
 	var where *Condition
@@ -1455,8 +1503,9 @@ func (p *Parser) parseDelete() (*DeleteStmt, error) {
 		val := p.cur.Value
 		where = &Condition{Column: col, Value: val}
 	}
+	stmt.Where = where
 
-	return &DeleteStmt{TableName: tableName, Where: where}, nil
+	return stmt, nil
 }
 
 // parseSelect parses a SELECT statement.
@@ -1510,7 +1559,16 @@ func (p *Parser) parseSelect() (*SelectStmt, error) {
 				stmt.Functions = append(stmt.Functions, fn)
 			} else {
 				p.nextToken()
-				stmt.Columns = append(stmt.Columns, p.cur.Value)
+				colName := p.cur.Value
+				// Check for qualified name (table.column)
+				if p.peek.Type == TokenDot {
+					p.nextToken() // consume dot
+					if !p.expectPeek(TokenIdent) {
+						return nil, p.syntaxError("column name after dot")
+					}
+					colName += "." + p.cur.Value
+				}
+				stmt.Columns = append(stmt.Columns, colName)
 			}
 		} else {
 			return nil, p.syntaxError("column or FROM")
@@ -1530,10 +1588,13 @@ func (p *Parser) parseSelect() (*SelectStmt, error) {
 	if !p.expectPeek(TokenKeyword) || p.cur.Value != "FROM" {
 		return nil, p.syntaxError("FROM")
 	}
-	if !p.expectPeek(TokenIdent) {
-		return nil, p.syntaxError("table name")
+
+	dbName, tableName, err := p.parseTableIdentifier()
+	if err != nil {
+		return nil, err
 	}
-	stmt.TableName = p.cur.Value
+	stmt.DatabaseName = dbName
+	stmt.TableName = tableName
 
 	// Parse optional JOIN clause.
 	// Supports: JOIN, INNER JOIN, LEFT [OUTER] JOIN, RIGHT [OUTER] JOIN, FULL [OUTER] JOIN
@@ -1575,10 +1636,10 @@ func (p *Parser) parseSelect() (*SelectStmt, error) {
 		p.nextToken() // Skip JOIN
 
 		// Parse the join table name.
-		if !p.expectPeek(TokenIdent) {
-			return nil, p.syntaxError("table name in JOIN")
+		joinDbName, joinTable, err := p.parseTableIdentifier()
+		if err != nil {
+			return nil, err
 		}
-		joinTable := p.cur.Value
 
 		// Expect ON keyword.
 		if !p.expectPeek(TokenKeyword) || p.cur.Value != "ON" {
@@ -1590,17 +1651,35 @@ func (p *Parser) parseSelect() (*SelectStmt, error) {
 			return nil, p.syntaxError("column in ON")
 		}
 		leftCol := p.cur.Value
+		// Check for qualified identifier (table.column)
+		if p.peek.Type == TokenDot {
+			p.nextToken() // consume dot
+			if !p.expectPeek(TokenIdent) {
+				return nil, p.syntaxError("column name after dot")
+			}
+			leftCol += "." + p.cur.Value
+		}
 
 		if !p.expectPeek(TokenEqual) {
 			return nil, p.syntaxError("=")
 		}
 		p.nextToken()
-		rightCol := p.cur.Value // Can be identifier or value
+		// rightCol can be identifier (possibly qualified) or value
+		rightCol := p.cur.Value
+		// If it's an identifier, check for qualified name
+		if p.cur.Type == TokenIdent && p.peek.Type == TokenDot {
+			p.nextToken() // consume dot
+			if !p.expectPeek(TokenIdent) {
+				return nil, p.syntaxError("column name after dot")
+			}
+			rightCol += "." + p.cur.Value
+		}
 
 		stmt.Join = &JoinClause{
-			JoinType:  joinType,
-			TableName: joinTable,
-			On:        &Condition{Column: leftCol, Value: rightCol},
+			JoinType:     joinType,
+			DatabaseName: joinDbName,
+			TableName:    joinTable,
+			On:           &Condition{Column: leftCol, Value: rightCol},
 		}
 	}
 
@@ -2077,10 +2156,10 @@ func (p *Parser) parseCreateIndex() (*CreateIndexStmt, error) {
 	}
 
 	// Parse the table name
-	if !p.expectPeek(TokenIdent) {
-		return nil, p.syntaxError("table name")
+	dbName, tableName, err := p.parseTableIdentifier()
+	if err != nil {
+		return nil, err
 	}
-	tableName := p.cur.Value
 
 	// Expect opening parenthesis
 	if !p.expectPeek(TokenLParen) {
@@ -2099,10 +2178,11 @@ func (p *Parser) parseCreateIndex() (*CreateIndexStmt, error) {
 	}
 
 	return &CreateIndexStmt{
-		IndexName:   indexName,
-		TableName:   tableName,
-		ColumnName:  columnName,
-		IfNotExists: ifNotExists,
+		IndexName:    indexName,
+		DatabaseName: dbName,
+		TableName:    tableName,
+		ColumnName:   columnName,
+		IfNotExists:  ifNotExists,
 	}, nil
 }
 
@@ -2449,12 +2529,11 @@ func (p *Parser) parseInspect() (*InspectStmt, error) {
 		return &InspectStmt{Target: "AUDIT", Where: where, Limit: limit}, nil
 	case "TABLE":
 		// This target requires an object name
-		p.nextToken()
-		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
-			return nil, p.syntaxErrorCur("table name after INSPECT TABLE")
+		dbName, tableName, err := p.parseTableIdentifier()
+		if err != nil {
+			return nil, err
 		}
-		objectName := p.cur.Value
-		return &InspectStmt{Target: target, ObjectName: objectName}, nil
+		return &InspectStmt{Target: target, DatabaseName: dbName, ObjectName: tableName}, nil
 	case "DATABASE":
 		// INSPECT DATABASE <name> - inspect a specific database
 		p.nextToken()
@@ -2908,68 +2987,82 @@ func (p *Parser) parseCall() (*CallStmt, error) {
 // parseDrop parses a DROP statement.
 // Syntax: DROP TABLE|INDEX|PROCEDURE|VIEW|TRIGGER|DATABASE [IF EXISTS] <name> ...
 func (p *Parser) parseDrop() (Statement, error) {
-	p.nextToken() // Skip DROP
+	// Skip DROP keyword
+	p.nextToken()
 
-	if p.cur.Type != TokenKeyword {
-		return nil, p.syntaxError("TABLE, INDEX, PROCEDURE, VIEW, TRIGGER, DATABASE, ROLE, or USER after DROP")
-	}
+	if p.peek.Value == "TABLE" {
+		p.nextToken() // consume TABLE
 
-	switch p.cur.Value {
-	case "TABLE":
 		// Parse optional IF EXISTS
 		ifExists := false
-		p.nextToken()
-		if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
-			p.nextToken()
-			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+		if p.peek.Type == TokenKeyword && p.peek.Value == "IF" {
+			p.nextToken() // consume IF
+			if !p.expectPeek(TokenKeyword) || p.cur.Value != "EXISTS" {
 				return nil, p.syntaxError("EXISTS after IF")
 			}
 			ifExists = true
-			p.nextToken()
 		}
-		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
-			return nil, p.syntaxError("table name")
+
+		// Parse table name
+		dbName, tableName, err := p.parseTableIdentifier()
+		if err != nil {
+			return nil, err
 		}
-		return &DropTableStmt{TableName: p.cur.Value, IfExists: ifExists}, nil
-	case "INDEX":
+
+		return &DropTableStmt{DatabaseName: dbName, TableName: tableName, IfExists: ifExists}, nil
+	} else if p.peek.Value == "INDEX" {
+		p.nextToken() // consume INDEX
+
 		// Parse optional IF EXISTS
 		ifExists := false
-		p.nextToken()
-		if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
-			p.nextToken()
-			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+		if p.peek.Type == TokenKeyword && p.peek.Value == "IF" {
+			p.nextToken() // consume IF
+			if !p.expectPeek(TokenKeyword) || p.cur.Value != "EXISTS" {
 				return nil, p.syntaxError("EXISTS after IF")
 			}
 			ifExists = true
-			p.nextToken()
 		}
-		if p.cur.Type != TokenIdent {
+
+		// Parse index name
+		if !p.expectPeek(TokenIdent) {
 			return nil, p.syntaxError("index name")
 		}
 		indexName := p.cur.Value
 
 		// Expect ON keyword
 		if !p.expectPeek(TokenKeyword) || p.cur.Value != "ON" {
-			return nil, p.syntaxError("ON after index name")
+			return nil, p.syntaxError("ON")
 		}
 
 		// Parse table name
-		if !p.expectPeek(TokenIdent) {
-			return nil, p.syntaxError("table name after ON")
+		dbName, tableName, err := p.parseTableIdentifier()
+		if err != nil {
+			return nil, err
 		}
-		tableName := p.cur.Value
 
-		return &DropIndexStmt{IndexName: indexName, TableName: tableName, IfExists: ifExists}, nil
+		return &DropIndexStmt{IndexName: indexName, DatabaseName: dbName, TableName: tableName, IfExists: ifExists}, nil
+	}
+
+	// For other DROP types, continue with the original switch structure
+	if p.cur.Type != TokenKeyword {
+		return nil, p.syntaxError("TABLE, INDEX, PROCEDURE, VIEW, TRIGGER, DATABASE, ROLE, or USER after DROP")
+	}
+
+	switch p.cur.Value {
 	case "PROCEDURE":
 		// Parse optional IF EXISTS
 		ifExists := false
 		p.nextToken()
 		if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
 			p.nextToken()
-			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
-				return nil, p.syntaxError("EXISTS after IF")
+			if p.cur.Type != TokenKeyword || p.cur.Value != "NOT" {
+				return nil, p.syntaxError("NOT after IF")
 			}
 			ifExists = true
+			p.nextToken()
+			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+				return nil, p.syntaxError("EXISTS after IF NOT")
+			}
 			p.nextToken()
 		}
 		if p.cur.Type != TokenIdent {
@@ -2982,10 +3075,14 @@ func (p *Parser) parseDrop() (Statement, error) {
 		p.nextToken()
 		if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
 			p.nextToken()
-			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
-				return nil, p.syntaxError("EXISTS after IF")
+			if p.cur.Type != TokenKeyword || p.cur.Value != "NOT" {
+				return nil, p.syntaxError("NOT after IF")
 			}
 			ifExists = true
+			p.nextToken()
+			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+				return nil, p.syntaxError("EXISTS after IF NOT")
+			}
 			p.nextToken()
 		}
 		if p.cur.Type != TokenIdent {
@@ -2998,10 +3095,14 @@ func (p *Parser) parseDrop() (Statement, error) {
 		p.nextToken()
 		if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
 			p.nextToken()
-			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
-				return nil, p.syntaxError("EXISTS after IF")
+			if p.cur.Type != TokenKeyword || p.cur.Value != "NOT" {
+				return nil, p.syntaxError("NOT after IF")
 			}
 			ifExists = true
+			p.nextToken()
+			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+				return nil, p.syntaxError("EXISTS after IF NOT")
+			}
 			p.nextToken()
 		}
 		if p.cur.Type != TokenIdent {
@@ -3015,22 +3116,26 @@ func (p *Parser) parseDrop() (Statement, error) {
 		}
 
 		// Parse table name
-		if !p.expectPeek(TokenIdent) {
-			return nil, p.syntaxError("table name after ON")
+		dbName, tableName, err := p.parseTableIdentifier()
+		if err != nil {
+			return nil, err
 		}
-		tableName := p.cur.Value
 
-		return &DropTriggerStmt{TriggerName: triggerName, TableName: tableName, IfExists: ifExists}, nil
+		return &DropTriggerStmt{TriggerName: triggerName, DatabaseName: dbName, TableName: tableName, IfExists: ifExists}, nil
 	case "DATABASE":
 		// Parse optional IF EXISTS
 		ifExists := false
 		p.nextToken()
 		if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
 			p.nextToken()
-			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
-				return nil, p.syntaxError("EXISTS after IF")
+			if p.cur.Type != TokenKeyword || p.cur.Value != "NOT" {
+				return nil, p.syntaxError("NOT after IF")
 			}
 			ifExists = true
+			p.nextToken()
+			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+				return nil, p.syntaxError("EXISTS after IF NOT")
+			}
 			p.nextToken()
 		}
 		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
@@ -3043,10 +3148,14 @@ func (p *Parser) parseDrop() (Statement, error) {
 		p.nextToken()
 		if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
 			p.nextToken()
-			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
-				return nil, p.syntaxError("EXISTS after IF")
+			if p.cur.Type != TokenKeyword || p.cur.Value != "NOT" {
+				return nil, p.syntaxError("NOT after IF")
 			}
 			ifExists = true
+			p.nextToken()
+			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+				return nil, p.syntaxError("EXISTS after IF NOT")
+			}
 			p.nextToken()
 		}
 		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
@@ -3059,10 +3168,14 @@ func (p *Parser) parseDrop() (Statement, error) {
 		p.nextToken()
 		if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
 			p.nextToken()
-			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
-				return nil, p.syntaxError("EXISTS after IF")
+			if p.cur.Type != TokenKeyword || p.cur.Value != "NOT" {
+				return nil, p.syntaxError("NOT after IF")
 			}
 			ifExists = true
+			p.nextToken()
+			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+				return nil, p.syntaxError("EXISTS after IF NOT")
+			}
 			p.nextToken()
 		}
 		if p.cur.Type != TokenIdent {
@@ -3081,17 +3194,21 @@ func (p *Parser) parseDrop() (Statement, error) {
 //
 // Returns a TruncateTableStmt AST node.
 func (p *Parser) parseTruncate() (*TruncateTableStmt, error) {
+	// Skip TRUNCATE keyword
+	p.nextToken()
+
 	// Expect TABLE keyword
 	if !p.expectPeek(TokenKeyword) || p.cur.Value != "TABLE" {
-		return nil, p.syntaxError("TABLE after TRUNCATE")
+		return nil, p.syntaxError("TABLE")
 	}
 
-	// Parse the table name
-	if !p.expectPeek(TokenIdent) {
-		return nil, p.syntaxError("table name after TRUNCATE TABLE")
+	// Parse table name
+	dbName, tableName, err := p.parseTableIdentifier()
+	if err != nil {
+		return nil, err
 	}
 
-	return &TruncateTableStmt{TableName: p.cur.Value}, nil
+	return &TruncateTableStmt{DatabaseName: dbName, TableName: tableName}, nil
 }
 
 // parseAlter parses an ALTER statement (ALTER TABLE or ALTER USER).

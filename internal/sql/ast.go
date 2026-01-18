@@ -29,9 +29,9 @@ AST Design Pattern:
 
 FlyDB uses the Visitor pattern for AST processing:
 
-  1. All statement types implement the Statement interface
-  2. The statementNode() method is a marker (no implementation needed)
-  3. The Executor uses type switches to handle each statement type
+ 1. All statement types implement the Statement interface
+ 2. The statementNode() method is a marker (no implementation needed)
+ 3. The Executor uses type switches to handle each statement type
 
 This design allows:
   - Type-safe handling of different statement types
@@ -156,9 +156,10 @@ func (s CreateUserStmt) statementNode() {}
 // The optional WHERE clause enables RLS, restricting the user
 // to only see rows matching the condition.
 type GrantStmt struct {
-	TableName string     // The table to grant access to
-	Username  string     // The user receiving the permission
-	Where     *Condition // Optional RLS condition (nil = full access)
+	DatabaseName string     // The database containing the table
+	TableName    string     // The table to grant access to
+	Username     string     // The user receiving the permission
+	Where        *Condition // Optional RLS condition (nil = full access)
 }
 
 // statementNode implements the Statement interface.
@@ -179,8 +180,9 @@ func (s GrantStmt) statementNode() {}
 // This removes all access rights for the user on the specified table,
 // including any Row-Level Security conditions that were set.
 type RevokeStmt struct {
-	TableName string // The table to revoke access from
-	Username  string // The user losing the permission
+	DatabaseName string // The database containing the table
+	TableName    string // The table to revoke access from
+	Username     string // The user losing the permission
 }
 
 // statementNode implements the Statement interface.
@@ -341,10 +343,11 @@ func (s AlterUserStmt) statementNode() {}
 // Supported column types: INT, TEXT, SERIAL, and others defined in types.go
 // Supported constraints: PRIMARY KEY, FOREIGN KEY/REFERENCES, NOT NULL, UNIQUE, AUTO_INCREMENT, DEFAULT
 type CreateTableStmt struct {
-	TableName   string            // The name of the new table
-	IfNotExists bool              // If true, don't error if table already exists
-	Columns     []ColumnDef       // Column definitions (name, type, and constraints)
-	Constraints []TableConstraint // Table-level constraints (composite keys, etc.)
+	DatabaseName string            // The database to create the table in
+	TableName    string            // The name of the new table
+	IfNotExists  bool              // If true, don't error if table already exists
+	Columns      []ColumnDef       // Column definitions (name, type, and constraints)
+	Constraints  []TableConstraint // Table-level constraints (composite keys, etc.)
 }
 
 // statementNode implements the Statement interface.
@@ -412,12 +415,12 @@ type ColumnConstraint struct {
 //	CHECK (status IN ('active', 'inactive', 'pending'))
 //	CHECK (price > 0 AND price < 10000)
 type CheckExpr struct {
-	Column   string   // Column being checked
-	Operator string   // Comparison operator: =, <, >, <=, >=, <>, IN, BETWEEN
-	Value    string   // Value for simple comparisons
-	Values   []string // Values for IN clause
-	MinValue string   // Min value for BETWEEN
-	MaxValue string   // Max value for BETWEEN
+	Column   string     // Column being checked
+	Operator string     // Comparison operator: =, <, >, <=, >=, <>, IN, BETWEEN
+	Value    string     // Value for simple comparisons
+	Values   []string   // Values for IN clause
+	MinValue string     // Min value for BETWEEN
+	MaxValue string     // Max value for BETWEEN
 	And      *CheckExpr // Optional AND condition
 	Or       *CheckExpr // Optional OR condition
 }
@@ -535,11 +538,12 @@ type TableConstraint struct {
 // When Columns is empty, values must match all columns in table order.
 // When Columns is specified, only those columns receive values.
 type InsertStmt struct {
-	TableName    string              // The target table
-	Columns      []string            // Optional: specific columns to insert into
-	Values       []string            // Values for the first row (backward compatibility)
-	MultiValues  [][]string          // Multiple rows of values
-	OnConflict   *OnConflictClause   // Optional: ON CONFLICT handling for upsert
+	DatabaseName string            // The database containing the table
+	TableName    string            // The target table
+	Columns      []string          // Optional: specific columns to insert into
+	Values       []string          // Values for the first row (backward compatibility)
+	MultiValues  [][]string        // Multiple rows of values
+	OnConflict   *OnConflictClause // Optional: ON CONFLICT handling for upsert
 }
 
 // OnConflictClause represents the ON CONFLICT clause for upsert operations.
@@ -565,9 +569,10 @@ func (s InsertStmt) statementNode() {}
 //
 // If no WHERE clause is provided, all rows are updated.
 type UpdateStmt struct {
-	TableName string            // The target table
-	Updates   map[string]string // Column-to-value mapping for updates
-	Where     *Condition        // Optional filter condition
+	DatabaseName string            // The database containing the table
+	TableName    string            // The target table
+	Updates      map[string]string // Column-to-value mapping for updates
+	Where        *Condition        // Optional filter condition
 }
 
 // statementNode implements the Statement interface.
@@ -586,8 +591,9 @@ func (s UpdateStmt) statementNode() {}
 //
 // If no WHERE clause is provided, all rows are deleted.
 type DeleteStmt struct {
-	TableName string     // The target table
-	Where     *Condition // Optional filter condition
+	DatabaseName string     // The database containing the table
+	TableName    string     // The target table
+	Where        *Condition // Optional filter condition
 }
 
 // statementNode implements the Statement interface.
@@ -635,21 +641,22 @@ type OrderByClause struct {
 //	SELECT category, COUNT(*) FROM products GROUP BY category
 //	SELECT category, SUM(price) FROM products GROUP BY category HAVING SUM(price) > 100
 type SelectStmt struct {
-	TableName  string           // Primary table to query
-	Columns    []string         // Columns to return (or "*" for all)
-	Distinct   bool             // Whether to remove duplicate rows
-	Aggregates []*AggregateExpr // Aggregate function expressions
-	Functions  []*FunctionExpr  // Scalar function expressions
-	Where      *Condition       // Optional simple filter condition (backward compat)
-	WhereExt   *WhereClause     // Optional extended WHERE clause with subquery support
-	Join       *JoinClause      // Optional JOIN clause
-	GroupBy    []string         // Optional GROUP BY columns
-	Having     *HavingClause    // Optional HAVING clause for filtering groups
-	OrderBy    *OrderByClause   // Optional ORDER BY clause
-	Limit      int              // Maximum rows to return (0 = unlimited)
-	Offset     int              // Number of rows to skip (0 = none)
-	Subquery   *SelectStmt      // Optional subquery for FROM clause
-	FromAlias  string           // Alias for subquery or table
+	DatabaseName string           // The database containing the table
+	TableName    string           // Primary table to query
+	Columns      []string         // Columns to return (or "*" for all)
+	Distinct     bool             // Whether to remove duplicate rows
+	Aggregates   []*AggregateExpr // Aggregate function expressions
+	Functions    []*FunctionExpr  // Scalar function expressions
+	Where        *Condition       // Optional simple filter condition (backward compat)
+	WhereExt     *WhereClause     // Optional extended WHERE clause with subquery support
+	Join         *JoinClause      // Optional JOIN clause
+	GroupBy      []string         // Optional GROUP BY columns
+	Having       *HavingClause    // Optional HAVING clause for filtering groups
+	OrderBy      *OrderByClause   // Optional ORDER BY clause
+	Limit        int              // Maximum rows to return (0 = unlimited)
+	Offset       int              // Number of rows to skip (0 = none)
+	Subquery     *SelectStmt      // Optional subquery for FROM clause
+	FromAlias    string           // Alias for subquery or table
 }
 
 // statementNode implements the Statement interface.
@@ -670,10 +677,10 @@ func (s SelectStmt) statementNode() {}
 //
 // UNION removes duplicates by default. UNION ALL keeps all rows including duplicates.
 type UnionStmt struct {
-	Left     *SelectStmt // Left SELECT statement
-	Right    *SelectStmt // Right SELECT statement
-	All      bool        // If true, keep duplicates (UNION ALL)
-	NextUnion *UnionStmt // For chaining multiple UNIONs
+	Left      *SelectStmt // Left SELECT statement
+	Right     *SelectStmt // Right SELECT statement
+	All       bool        // If true, keep duplicates (UNION ALL)
+	NextUnion *UnionStmt  // For chaining multiple UNIONs
 }
 
 // statementNode implements the Statement interface.
@@ -753,9 +760,10 @@ const (
 // FlyDB implements a Nested Loop Join algorithm, which iterates
 // through all combinations of rows and filters by the ON condition.
 type JoinClause struct {
-	JoinType  JoinType   // Type of join: INNER, LEFT, RIGHT, FULL
-	TableName string     // The table to join with
-	On        *Condition // The join condition (left_col = right_col)
+	JoinType     JoinType   // Type of join: INNER, LEFT, RIGHT, FULL
+	DatabaseName string     // The database containing the joined table
+	TableName    string     // The table to join with
+	On           *Condition // The join condition (left_col = right_col)
 }
 
 // Condition represents a simple equality condition.
@@ -910,10 +918,11 @@ func (s ReleaseSavepointStmt) statementNode() {}
 // Indexes improve query performance for WHERE clause lookups
 // on the indexed column.
 type CreateIndexStmt struct {
-	IndexName   string // Name of the index
-	TableName   string // Table to create the index on
-	ColumnName  string // Column to index
-	IfNotExists bool   // If true, don't error if index already exists
+	IndexName    string // Name of the index
+	DatabaseName string // The database containing the table
+	TableName    string // Table to create the index on
+	ColumnName   string // Column to index
+	IfNotExists  bool   // If true, don't error if index already exists
 }
 
 // statementNode implements the Statement interface.
@@ -932,9 +941,10 @@ func (s CreateIndexStmt) statementNode() {}
 //
 // Removes an index from a table.
 type DropIndexStmt struct {
-	IndexName string // Name of the index to drop
-	TableName string // Table the index is on
-	IfExists  bool   // If true, don't error if index doesn't exist
+	IndexName    string // Name of the index to drop
+	DatabaseName string // The database containing the table
+	TableName    string // Table the index is on
+	IfExists     bool   // If true, don't error if index doesn't exist
 }
 
 // statementNode implements the Statement interface.
@@ -1019,10 +1029,11 @@ func (s DeallocateStmt) statementNode() {}
 //	INSPECT AUDIT [WHERE ...] [LIMIT n]
 //	INSPECT AUDIT STATS
 type InspectStmt struct {
-	Target     string      // The target to inspect: USERS, DATABASES, DATABASE, TABLES, TABLE, INDEXES, AUDIT, AUDIT_STATS
-	ObjectName string      // Optional: specific object name for TABLE or DATABASE targets
-	Where      *Condition  // Optional: WHERE clause for AUDIT queries
-	Limit      int         // Optional: LIMIT for AUDIT queries
+	Target       string     // The target to inspect: USERS, DATABASES, DATABASE, TABLES, TABLE, INDEXES, AUDIT, AUDIT_STATS
+	DatabaseName string     // Optional: database containing the table/object
+	ObjectName   string     // Optional: specific object name for TABLE or DATABASE targets
+	Where        *Condition // Optional: WHERE clause for AUDIT queries
+	Limit        int        // Optional: LIMIT for AUDIT queries
 }
 
 // statementNode implements the Statement interface.
@@ -1041,10 +1052,10 @@ func (s InspectStmt) statementNode() {}
 //	EXPORT AUDIT TO 'audit.csv' FORMAT csv WHERE username = 'admin'
 //	EXPORT AUDIT TO 'audit.sql' FORMAT sql LIMIT 1000
 type ExportAuditStmt struct {
-	Filename string      // The output filename
-	Format   string      // Export format: json, csv, or sql
-	Where    *Condition  // Optional: WHERE clause for filtering
-	Limit    int         // Optional: LIMIT for number of records
+	Filename string     // The output filename
+	Format   string     // Export format: json, csv, or sql
+	Where    *Condition // Optional: WHERE clause for filtering
+	Limit    int        // Optional: LIMIT for number of records
 }
 
 // statementNode implements the Statement interface.
@@ -1152,12 +1163,13 @@ type FunctionExpr struct {
 //	    UPDATE orders SET status = $2 WHERE id = $1;
 //	END
 type CreateProcedureStmt struct {
-	Name        string           // Procedure name
-	IfNotExists bool             // If true, don't error if procedure already exists
-	OrReplace   bool             // If true, replace existing procedure
-	Parameters  []ProcedureParam // Input parameters
-	Body        []Statement      // SQL statements in the procedure body
-	BodySQL     []string         // Raw SQL strings for the body (for storage)
+	Name         string           // Procedure name
+	DatabaseName string           // The database to create the procedure in
+	IfNotExists  bool             // If true, don't error if procedure already exists
+	OrReplace    bool             // If true, replace existing procedure
+	Parameters   []ProcedureParam // Input parameters
+	Body         []Statement      // SQL statements in the procedure body
+	BodySQL      []string         // Raw SQL strings for the body (for storage)
 }
 
 // statementNode implements the Statement interface.
@@ -1181,6 +1193,7 @@ type ProcedureParam struct {
 //	CALL update_status(42, 'completed')
 type CallStmt struct {
 	ProcedureName string   // Name of the procedure to call
+	DatabaseName  string   // The database containing the procedure
 	Arguments     []string // Arguments to pass to the procedure
 }
 
@@ -1198,8 +1211,9 @@ func (s CallStmt) statementNode() {}
 //	DROP PROCEDURE get_user
 //	DROP PROCEDURE IF EXISTS get_user
 type DropProcedureStmt struct {
-	Name     string // Procedure name to drop
-	IfExists bool   // If true, don't error if procedure doesn't exist
+	Name         string // Procedure name to drop
+	DatabaseName string // The database containing the procedure
+	IfExists     bool   // If true, don't error if procedure doesn't exist
 }
 
 // statementNode implements the Statement interface.
@@ -1225,10 +1239,11 @@ type StoredProcedure struct {
 //	CREATE VIEW IF NOT EXISTS order_summary AS SELECT user_id, COUNT(*) FROM orders GROUP BY user_id
 //	CREATE OR REPLACE VIEW active_users AS SELECT * FROM users WHERE status = 'active'
 type CreateViewStmt struct {
-	ViewName    string      // The name of the view
-	IfNotExists bool        // If true, don't error if view already exists
-	OrReplace   bool        // If true, replace existing view
-	Query       *SelectStmt // The SELECT query that defines the view
+	ViewName     string      // The name of the view
+	DatabaseName string      // The database to create the view in
+	IfNotExists  bool        // If true, don't error if view already exists
+	OrReplace    bool        // If true, replace existing view
+	Query        *SelectStmt // The SELECT query that defines the view
 }
 
 // statementNode implements the Statement interface.
@@ -1246,8 +1261,9 @@ func (s CreateViewStmt) statementNode() {}
 //	DROP VIEW active_users
 //	DROP VIEW IF EXISTS active_users
 type DropViewStmt struct {
-	ViewName string // The name of the view to drop
-	IfExists bool   // If true, don't error if view doesn't exist
+	ViewName     string // The name of the view to drop
+	DatabaseName string // The database containing the view
+	IfExists     bool   // If true, don't error if view doesn't exist
 }
 
 // statementNode implements the Statement interface.
@@ -1258,12 +1274,12 @@ type AlterTableAction string
 
 // ALTER TABLE action constants.
 const (
-	AlterActionAddColumn    AlterTableAction = "ADD COLUMN"
-	AlterActionDropColumn   AlterTableAction = "DROP COLUMN"
-	AlterActionRenameColumn AlterTableAction = "RENAME COLUMN"
-	AlterActionModifyColumn AlterTableAction = "MODIFY COLUMN"
-	AlterActionAddConstraint    AlterTableAction = "ADD CONSTRAINT"
-	AlterActionDropConstraint   AlterTableAction = "DROP CONSTRAINT"
+	AlterActionAddColumn      AlterTableAction = "ADD COLUMN"
+	AlterActionDropColumn     AlterTableAction = "DROP COLUMN"
+	AlterActionRenameColumn   AlterTableAction = "RENAME COLUMN"
+	AlterActionModifyColumn   AlterTableAction = "MODIFY COLUMN"
+	AlterActionAddConstraint  AlterTableAction = "ADD CONSTRAINT"
+	AlterActionDropConstraint AlterTableAction = "DROP CONSTRAINT"
 )
 
 // AlterTableStmt represents an ALTER TABLE statement.
@@ -1285,6 +1301,7 @@ const (
 //	ALTER TABLE users RENAME COLUMN email TO email_address
 //	ALTER TABLE users MODIFY COLUMN age BIGINT
 type AlterTableStmt struct {
+	DatabaseName   string           // The database containing the table
 	TableName      string           // The table to alter
 	Action         AlterTableAction // The type of alteration
 	ColumnDef      *ColumnDef       // For ADD COLUMN and MODIFY COLUMN
@@ -1336,13 +1353,14 @@ const (
 // Triggers are executed automatically when the specified event occurs on the table.
 // BEFORE triggers execute before the operation, AFTER triggers execute after.
 type CreateTriggerStmt struct {
-	TriggerName string        // The name of the trigger (unique per table)
-	IfNotExists bool          // If true, don't error if trigger already exists
-	OrReplace   bool          // If true, replace existing trigger
-	Timing      TriggerTiming // BEFORE or AFTER
-	Event       TriggerEvent  // INSERT, UPDATE, or DELETE
-	TableName   string        // The table the trigger is attached to
-	ActionSQL   string        // The SQL statement to execute when the trigger fires
+	TriggerName  string        // The name of the trigger (unique per table)
+	IfNotExists  bool          // If true, don't error if trigger already exists
+	OrReplace    bool          // If true, replace existing trigger
+	Timing       TriggerTiming // BEFORE or AFTER
+	Event        TriggerEvent  // INSERT, UPDATE, or DELETE
+	DatabaseName string        // The database containing the table
+	TableName    string        // The table the trigger is attached to
+	ActionSQL    string        // The SQL statement to execute when the trigger fires
 }
 
 // statementNode implements the Statement interface.
@@ -1360,9 +1378,10 @@ func (s CreateTriggerStmt) statementNode() {}
 //	DROP TRIGGER log_insert ON users
 //	DROP TRIGGER IF EXISTS log_insert ON users
 type DropTriggerStmt struct {
-	TriggerName string // The name of the trigger to drop
-	TableName   string // The table the trigger is attached to
-	IfExists    bool   // If true, don't error if trigger doesn't exist
+	TriggerName  string // The name of the trigger to drop
+	DatabaseName string // The database containing the table
+	TableName    string // The table the trigger is attached to
+	IfExists     bool   // If true, don't error if trigger doesn't exist
 }
 
 // statementNode implements the Statement interface.
@@ -1389,8 +1408,9 @@ type Trigger struct {
 //	DROP TABLE users
 //	DROP TABLE IF EXISTS temp_data
 type DropTableStmt struct {
-	TableName string // The name of the table to drop
-	IfExists  bool   // If true, don't error if table doesn't exist
+	DatabaseName string // The database containing the table
+	TableName    string // The name of the table to drop
+	IfExists     bool   // If true, don't error if table doesn't exist
 }
 
 // statementNode implements the Statement interface.
@@ -1407,12 +1427,12 @@ func (s DropTableStmt) statementNode() {}
 //
 //	TRUNCATE TABLE logs
 type TruncateTableStmt struct {
-	TableName string // The name of the table to truncate
+	DatabaseName string // The database containing the table
+	TableName    string // The name of the table to truncate
 }
 
 // statementNode implements the Statement interface.
 func (s TruncateTableStmt) statementNode() {}
-
 
 // =============================================================================
 // Database Management Statements

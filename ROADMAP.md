@@ -3,7 +3,7 @@
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
 **Version:** 01.26.17
-**Last Updated:** January 17, 2026
+**Last Updated:** January 18, 2026
 
 ---
 
@@ -64,6 +64,13 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Audit Log Export | Export to JSON, CSV, SQL formats | 01.26.17 |
 | Audit Statistics | Detailed statistics on audit events, users, and operations | 01.26.17 |
 | Cluster Audit Aggregation | Distributed audit log querying across cluster nodes | 01.26.17 |
+| INET Type | IPv4/IPv6 and CIDR support | 01.26.17 |
+| SET Type | Unordered collection of unique elements | 01.26.17 |
+| ZSET Type | Sorted sets with scores | 01.26.17 |
+| Enhanced INTERVAL | Postgres-style and ISO-8601 interval support | 01.26.17 |
+| USE Command | Switch database context dynamically | 01.26.17 |
+| Cross-Database Queries | SELECT/JOIN across databases | 01.26.17 |
+| Multi-DB RBAC | Access control for cross-database operations | 01.26.17 |
 
 ### INSERT Enhancements
 
@@ -456,7 +463,7 @@ storage:
 
 | Version | Release Date | Highlights |
 |---------|--------------|------------|
-| 01.26.17 | January 17, 2026 | Compression algorithms (LZ4, Snappy, Zstd), Audit Trail, Locality-aware routing, Partition migration |
+| 01.26.17 | January 18, 2026 | Extended Data Types, Compression, Audit Trail, Cluster Management |
 | 01.26.16 | January 17, 2026 | Cluster encryption validation, first-run UX improvements, admin password immutability |
 | 01.26.15 | January 14, 2026 | TLS transport security enabled by default with auto-generated certificates |
 | 01.26.14 | January 13, 2026 | Cluster mode fixes, HA client connections, remote flydb-dump support |

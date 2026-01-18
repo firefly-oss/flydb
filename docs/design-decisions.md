@@ -352,9 +352,10 @@ type DatabaseMetadata struct {
 | Advantage | Disadvantage |
 |-----------|--------------|
 | Complete isolation | One file per database |
-| Independent management | No cross-database queries |
-| Portable databases | Separate executor per database |
-| Per-database settings | Memory for each loaded database |
+| Independent management | Separate executor per database |
+| Portable databases | Memory for each loaded database |
+| Cross-database queries | |
+| Per-database settings | |
 
 ---
 

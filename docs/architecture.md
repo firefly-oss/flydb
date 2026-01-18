@@ -397,6 +397,14 @@ Each client connection maintains its own database context:
 ┌─────────────────┐     ┌─────────────────┐
 │  Executor: app  │     │  Executor: logs │
 └─────────────────┘     └─────────────────┘
+
+### Cross-Database Queries
+
+FlyDB supports querying data across multiple databases using fully qualified table names (`database.table`). This allows for:
+- **Cross-Database Joins**: `SELECT ... FROM db1.users JOIN db2.orders ...`
+- **Data Migration**: `INSERT INTO db2.archive SELECT * FROM db1.active ...`
+
+Permissions are enforced for the accessing user on all accessed objects, regardless of the database they reside in.
 ```
 
 ## Collation, Encoding, and Locale System

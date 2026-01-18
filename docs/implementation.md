@@ -544,6 +544,7 @@ func (s *Server) GetConnectionDatabase(conn net.Conn) string
 | Drop | `DROP DATABASE mydb` | Removes database and all data |
 | Switch | `USE mydb` | Changes current database for connection |
 | List | `SHOW DATABASES` | Lists all available databases |
+| Cross-DB Query | `SELECT * FROM active.users JOIN archive.users ...` | Query across databases using qualified names |
 
 ### Lazy Loading
 

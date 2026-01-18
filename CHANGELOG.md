@@ -7,38 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [01.26.17] - 2026-01-17
+### Extended Data Types Support & Core Features
 
-### Audit Trail, Compression, and Cluster Management
-
-This release introduces major production-grade features including a comprehensive audit trail system, a high-performance pluggable compression system, and advanced cluster management with partition-aware routing and live migration.
+This release introduces comprehensive support for network and collection data types, alongside major production-grade features including a comprehensive audit trail system, a high-performance pluggable compression system, and advanced cluster management.
 
 ### Added
 
-#### 1. High-Performance Compression System
+#### 1. Network Data Types
+- **INET**: Support for IPv4 and IPv6 addresses and CIDR blocks (e.g., `192.168.1.1`, `10.0.0.0/8`, `::1`).
+  - Validation: Strict IP/CIDR validation using standard libraries.
+  - Normalization: Canonical string representation.
+  - Comparison: Byte-wise comparison for correct IP sorting.
+
+#### 2. Collection Data Types
+- **SET**: Unordered collection of unique elements.
+  - Storage: JSON array with enforced uniqueness.
+  - Normalization: Automatic deduplication and sorting for canonical storage.
+- **ZSET (Sorted Set)**: Ordered collection of unique elements with scores.
+  - Storage: JSON array of objects `{"score": <num>, "member": <val>}`.
+  - Normalization: Automatic sorting by score and member.
+
+#### 3. Improved INTERVAL Support
+- Enhanced parsing logic for **INTERVAL** type to support:
+  - Postgres-style intervals (e.g., `1 year 2 months`, `2mons`).
+  - ISO-8601 durations (e.g., `P1Y2M`).
+  - Standard Go duration strings (e.g., `1h`, `300ms`).
+
+#### 4. High-Performance Compression System
 - **Multi-Algorithm Support**: Added support for **LZ4**, **Snappy**, and **Zstd** compression.
 - **Performance Optimizations**: Implemented `sync.Pool` for writers, buffers, and encoders to minimize GC pressure and improve throughput.
 - **Batch Compression**: New `BatchCompressor` for significantly better compression ratios on small database records.
 - **Cluster Integration**: Compression support for replication traffic and data migration.
 
-#### 2. Advanced Cluster & Replication
+#### 5. Advanced Cluster & Replication
 - **Partition Key Index**: Implemented a per-partition key index in `UnifiedClusterManager` for O(1) partition lookups and efficient scanning.
 - **Partition Migration**: Robust live data migration between nodes with completion signaling and automatic recovery.
 - **Locality-Aware Routing**: New routing strategies that respect datacenter, rack, and zone metadata for reduced latency in geo-distributed deployments.
 - **Unified Messaging**: Consolidated cluster management and data replication protocols for improved reliability.
 - **Cluster Health Monitoring**: Real-time health tracking and reporting for all cluster nodes.
 
-#### 3. SQL Engine Enhancements
+#### 6. SQL Engine Enhancements
 - **Database Management**: Integrated `DatabaseManager` into the `Executor` for full support of `CREATE DATABASE`, `DROP DATABASE`, and `INSPECT DATABASES`.
 - **Integrated Audit Trail**: (details below)
 
-#### 4. Comprehensive Audit Trail System
+#### 7. Multi-Database Support & Cross-Database Queries
+- **USE Command**: Switch between databases dynamically within a session using `USE <database>`.
+- **Cross-Database Queries**: Execute JOINs and queries across multiple databases using fully qualified names (e.g., `SELECT * FROM db1.users JOIN db2.orders ...`).
+- **RBAC Enforcement**: Full Role-Based Access Control support for cross-database operations, enforcing permissions on all accessed objects.
+
+#### 8. Comprehensive Audit Trail System
 **MAJOR FEATURE**: Complete audit logging and trail management for all database operations.
 - **Audit Event Tracking**: Automatic logging of all database operations (Auth, DDL, DML, DCL, Admin, Cluster).
 - **SQL-Based Inspection**: New `INSPECT AUDIT` and `INSPECT AUDIT STATS` commands.
 - **Audit Export**: New `EXPORT AUDIT` command supporting JSON, CSV, and SQL formats.
 
-#### 5. SDK Enhancements
+#### 9. SDK Enhancements
 - **Audit Client**: Implemented `AuditClient` in the Go SDK for programmatic access to audit logs.
 - **Enhanced Sessions**: Real query execution logic replaced previous stubs in the `Session` object.
 
