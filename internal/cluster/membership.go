@@ -140,7 +140,7 @@ func DefaultMembershipConfig(nodeID, nodeAddr string) MembershipConfig {
 type GossipMessage struct {
 	Type      GossipMessageType `json:"type"`
 	SenderID  string            `json:"sender_id"`
-	Members   []*MemberInfo       `json:"members,omitempty"`
+	Members   []*MemberInfo     `json:"members,omitempty"`
 	Timestamp int64             `json:"timestamp"`
 }
 
@@ -314,7 +314,7 @@ func (mm *MembershipManager) announceLeave() {
 
 	for _, m := range members {
 		go func(node *MemberInfo) {
-			addr := fmt.Sprintf("%s:%d", node.Addr, node.ClusterPort)
+			addr := net.JoinHostPort(node.Addr, fmt.Sprint(node.ClusterPort))
 			conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
 			if err != nil {
 				return
@@ -324,7 +324,6 @@ func (mm *MembershipManager) announceLeave() {
 		}(m)
 	}
 }
-
 
 // acceptConnections handles incoming gossip connections
 func (mm *MembershipManager) acceptConnections() {
@@ -467,7 +466,7 @@ func (mm *MembershipManager) gossipRound() {
 		return
 	}
 
-	addr := fmt.Sprintf("%s:%d", target.Addr, target.ClusterPort)
+	addr := net.JoinHostPort(target.Addr, fmt.Sprint(target.ClusterPort))
 	conn, err := net.DialTimeout("tcp", addr, mm.config.ProbeTimeout)
 	if err != nil {
 		mm.markSuspect(target.ID)
@@ -511,7 +510,6 @@ func (mm *MembershipManager) gossipRound() {
 	mm.clearSuspicion(target.ID)
 }
 
-
 // probeLoop periodically probes members for health
 func (mm *MembershipManager) probeLoop() {
 	defer mm.wg.Done()
@@ -550,7 +548,7 @@ func (mm *MembershipManager) probeMembers() {
 
 // probeMember probes a single member
 func (mm *MembershipManager) probeMember(node *MemberInfo) {
-	addr := fmt.Sprintf("%s:%d", node.Addr, node.ClusterPort)
+	addr := net.JoinHostPort(node.Addr, fmt.Sprint(node.ClusterPort))
 	conn, err := net.DialTimeout("tcp", addr, mm.config.ProbeTimeout)
 	if err != nil {
 		mm.markSuspect(node.ID)

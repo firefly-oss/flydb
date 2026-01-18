@@ -3831,7 +3831,7 @@ func matchLikeHelper(str, pattern string, si, pi int) bool {
 			if si >= len(str) {
 				return false
 			}
-			if strings.ToLower(string(str[si])) != strings.ToLower(string(pattern[pi])) {
+			if !strings.EqualFold(string(str[si]), string(pattern[pi])) {
 				return false
 			}
 			si++

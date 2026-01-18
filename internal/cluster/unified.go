@@ -536,7 +536,6 @@ type ClusterEvent struct {
 
 // ClusterMetrics holds cluster-wide metrics
 type ClusterMetrics struct {
-	mu sync.RWMutex
 
 	// Term is the current election term
 	Term uint64 `json:"term"`
@@ -674,7 +673,8 @@ type UnifiedClusterManager struct {
 	followerStopMu     sync.Mutex    // protects followerStopCh
 
 	// Metrics
-	metrics *ClusterMetrics
+	metrics   *ClusterMetrics
+	metricsMu sync.RWMutex
 
 	// Event handling
 	eventCh        chan ClusterEvent
@@ -980,8 +980,8 @@ func (ucm *UnifiedClusterManager) GetNodeID() string {
 
 // GetMetrics returns a copy of the current cluster metrics
 func (ucm *UnifiedClusterManager) GetMetrics() ClusterMetrics {
-	ucm.metrics.mu.RLock()
-	defer ucm.metrics.mu.RUnlock()
+	ucm.metricsMu.RLock()
+	defer ucm.metricsMu.RUnlock()
 	return *ucm.metrics
 }
 
@@ -1337,7 +1337,7 @@ func (ucm *UnifiedClusterManager) sendHeartbeats() {
 
 // sendHeartbeatTo sends a heartbeat to a specific node
 func (ucm *UnifiedClusterManager) sendHeartbeatTo(node *ClusterNode) {
-	addr := fmt.Sprintf("%s:%d", node.Addr, node.ClusterPort)
+	addr := net.JoinHostPort(node.Addr, fmt.Sprint(node.ClusterPort))
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		// Don't log every heartbeat failure - it gets noisy
@@ -1595,10 +1595,10 @@ func (ucm *UnifiedClusterManager) checkNodeHealth() {
 
 	ucm.nodesMu.Unlock()
 
-	ucm.metrics.mu.Lock()
+	ucm.metricsMu.Lock()
 	ucm.metrics.TotalNodes = len(ucm.nodes)
 	ucm.metrics.HealthyNodes = healthyCount
-	ucm.metrics.mu.Unlock()
+	ucm.metricsMu.Unlock()
 
 	// If the leader is dead and we're a follower, trigger re-election
 	if leaderDead && ucm.GetRole() == RoleFollower {
@@ -2124,7 +2124,7 @@ func (ucm *UnifiedClusterManager) sendDataToReplica(nodeID string, partitionID i
 		return fmt.Errorf("node %s not found", nodeID)
 	}
 
-	addr := fmt.Sprintf("%s:%d", node.Addr, node.DataPort)
+	addr := net.JoinHostPort(node.Addr, fmt.Sprint(node.DataPort))
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return err
@@ -2477,9 +2477,9 @@ func (ucm *UnifiedClusterManager) handleFollowerConnection(conn net.Conn) {
 				currentOffset = newOffset
 
 				// Update metrics
-				ucm.metrics.mu.Lock()
+				ucm.metricsMu.Lock()
 				ucm.metrics.BytesReplicated += bytesReplicated
-				ucm.metrics.mu.Unlock()
+				ucm.metricsMu.Unlock()
 
 				// Update follower state
 				follower.mu.Lock()
@@ -3074,7 +3074,7 @@ func (ucm *UnifiedClusterManager) sendPartitionData(partitionID int, toNode stri
 		return fmt.Errorf("destination node %s not found", toNode)
 	}
 
-	addr := fmt.Sprintf("%s:%d", node.Addr, node.DataPort)
+	addr := net.JoinHostPort(node.Addr, fmt.Sprint(node.DataPort))
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("failed to connect to %s: %w", addr, err)
@@ -3263,7 +3263,7 @@ func (ucm *UnifiedClusterManager) scanRemote(nodeID string, prefix string) (map[
 		return nil, fmt.Errorf("node %s not found", nodeID)
 	}
 
-	addr := fmt.Sprintf("%s:%d", node.Addr, node.DataPort)
+	addr := net.JoinHostPort(node.Addr, fmt.Sprint(node.DataPort))
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to %s: %w", addr, err)

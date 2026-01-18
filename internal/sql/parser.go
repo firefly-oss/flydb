@@ -176,8 +176,12 @@ func (p *Parser) wrapError(expected string, err error) error {
 
 // parseTableIdentifier parses a table name which may include a database prefix.
 // Returns (database, table, error).
+// parseTableIdentifier parses a table name which may include a database prefix.
+// Returns (database, table, error).
 func (p *Parser) parseTableIdentifier() (string, string, error) {
-	if !p.expectPeek(TokenIdent) {
+	if p.peek.Type == TokenIdent || p.peek.Type == TokenKeyword {
+		p.nextToken()
+	} else {
 		return "", "", p.syntaxError("table name")
 	}
 	part1 := p.cur.Value
@@ -185,7 +189,9 @@ func (p *Parser) parseTableIdentifier() (string, string, error) {
 	// Check for dot separator
 	if p.peek.Type == TokenDot {
 		p.nextToken() // consume dot
-		if !p.expectPeek(TokenIdent) {
+		if p.peek.Type == TokenIdent || p.peek.Type == TokenKeyword {
+			p.nextToken()
+		} else {
 			return "", "", p.syntaxError("table name after dot")
 		}
 		part2 := p.cur.Value
@@ -639,7 +645,6 @@ func (p *Parser) parseCreate() (*CreateTableStmt, error) {
 					p.nextToken()
 					continue
 				}
-				break
 			}
 		}
 
@@ -662,7 +667,6 @@ func (p *Parser) parseCreate() (*CreateTableStmt, error) {
 					p.nextToken()
 					continue
 				}
-				break
 			}
 		}
 
@@ -1211,14 +1215,7 @@ func (p *Parser) parseColumnList() ([]string, error) {
 // parseInsert parses an INSERT INTO statement.
 // Syntax: INSERT INTO [db.]<table> ...
 func (p *Parser) parseInsert() (*InsertStmt, error) {
-	// Skip INSERT keyword (already validated) -> handled by expectPeek logic adjustment or simply don't skip if current token is INSERT and we want to check next.
-	// Actually, if we remove p.nextToken(), p.cur is INSERT.
-	// We want to check if next token is INTO.
-	// p.expectPeek check p.peek.
-	// If p.cur=INSERT, p.peek=INTO.
-	// p.expectPeek(TokenKeyword) -> matches INTO. Advances. p.cur=INTO.
-	// Then p.cur.Value == "INTO" checks out.
-	// So removing p.nextToken() is correct.
+	// Skip INSERT keyword (already validated)
 
 	// Expect INTO keyword
 	if !p.expectPeek(TokenKeyword) || p.cur.Value != "INTO" {
@@ -1388,7 +1385,6 @@ func (p *Parser) parseInsert() (*InsertStmt, error) {
 // Syntax: UPDATE [db.]<table> SET ...
 func (p *Parser) parseUpdate() (*UpdateStmt, error) {
 	// Skip UPDATE keyword
-	p.nextToken()
 
 	// Parse table name
 	dbName, tableName, err := p.parseTableIdentifier()
@@ -1470,7 +1466,6 @@ func (p *Parser) parseUpdate() (*UpdateStmt, error) {
 // Syntax: DELETE FROM [db.]<table> [WHERE ...]
 func (p *Parser) parseDelete() (*DeleteStmt, error) {
 	// Skip DELETE keyword
-	p.nextToken()
 
 	// Expect FROM keyword
 	if !p.expectPeek(TokenKeyword) || p.cur.Value != "FROM" {
@@ -2990,9 +2985,7 @@ func (p *Parser) parseDrop() (Statement, error) {
 	// Skip DROP keyword
 	p.nextToken()
 
-	if p.peek.Value == "TABLE" {
-		p.nextToken() // consume TABLE
-
+	if p.cur.Value == "TABLE" {
 		// Parse optional IF EXISTS
 		ifExists := false
 		if p.peek.Type == TokenKeyword && p.peek.Value == "IF" {
@@ -3010,9 +3003,7 @@ func (p *Parser) parseDrop() (Statement, error) {
 		}
 
 		return &DropTableStmt{DatabaseName: dbName, TableName: tableName, IfExists: ifExists}, nil
-	} else if p.peek.Value == "INDEX" {
-		p.nextToken() // consume INDEX
-
+	} else if p.cur.Value == "INDEX" {
 		// Parse optional IF EXISTS
 		ifExists := false
 		if p.peek.Type == TokenKeyword && p.peek.Value == "IF" {
@@ -3195,7 +3186,6 @@ func (p *Parser) parseDrop() (Statement, error) {
 // Returns a TruncateTableStmt AST node.
 func (p *Parser) parseTruncate() (*TruncateTableStmt, error) {
 	// Skip TRUNCATE keyword
-	p.nextToken()
 
 	// Expect TABLE keyword
 	if !p.expectPeek(TokenKeyword) || p.cur.Value != "TABLE" {

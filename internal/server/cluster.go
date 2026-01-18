@@ -44,42 +44,42 @@ Enhanced Cluster Features:
 ==========================
 
 1. Term-based Leader Election:
-   - Each election increments a term number
-   - Prevents stale leaders from accepting writes
-   - Fencing tokens ensure only the current leader can modify data
+  - Each election increments a term number
+  - Prevents stale leaders from accepting writes
+  - Fencing tokens ensure only the current leader can modify data
 
 2. Split-Brain Prevention:
-   - Quorum-based decisions (majority required)
-   - Leaders step down if they lose quorum
-   - Network partition detection
+  - Quorum-based decisions (majority required)
+  - Leaders step down if they lose quorum
+  - Network partition detection
 
 3. Health Monitoring:
-   - Per-node health status tracking
-   - Configurable health check intervals
-   - Automatic unhealthy node detection
+  - Per-node health status tracking
+  - Configurable health check intervals
+  - Automatic unhealthy node detection
 
 4. Dynamic Cluster Membership:
-   - Nodes can join/leave without downtime
-   - Membership changes are replicated
-   - Graceful node removal
+  - Nodes can join/leave without downtime
+  - Membership changes are replicated
+  - Graceful node removal
 
 5. Cluster Metrics:
-   - Replication lag tracking
-   - Election statistics
-   - Connection health metrics
+  - Replication lag tracking
+  - Election statistics
+  - Connection health metrics
 
 Leader Election Algorithm:
 ==========================
 
 FlyDB uses an enhanced Bully algorithm for leader election:
 
-  1. Each node has a unique ID (based on address)
-  2. Elections use monotonically increasing term numbers
-  3. Nodes send heartbeats to the leader
-  4. If a follower doesn't receive a heartbeat response, it starts an election
-  5. The node with the highest ID (lexicographically) becomes the new leader
-  6. Elections require quorum acknowledgment
-  7. The new leader announces itself to all other nodes
+ 1. Each node has a unique ID (based on address)
+ 2. Elections use monotonically increasing term numbers
+ 3. Nodes send heartbeats to the leader
+ 4. If a follower doesn't receive a heartbeat response, it starts an election
+ 5. The node with the highest ID (lexicographically) becomes the new leader
+ 6. Elections require quorum acknowledgment
+ 7. The new leader announces itself to all other nodes
 
 Heartbeat Protocol:
 ===================
@@ -92,12 +92,12 @@ Heartbeat Protocol:
 Failover Process:
 =================
 
-  1. Follower detects leader failure (missed heartbeats)
-  2. Follower increments term and starts election
-  3. Follower sends ELECTION message to higher-ID nodes
-  4. If no response and quorum available, follower declares itself leader
-  5. New leader sends COORDINATOR message to all nodes
-  6. Other nodes update their leader reference and term
+ 1. Follower detects leader failure (missed heartbeats)
+ 2. Follower increments term and starts election
+ 3. Follower sends ELECTION message to higher-ID nodes
+ 4. If no response and quorum available, follower declares itself leader
+ 5. New leader sends COORDINATOR message to all nodes
+ 6. Other nodes update their leader reference and term
 
 See Also:
 =========
@@ -138,7 +138,7 @@ const (
 type NodeState int
 
 const (
-	StateFollower  NodeState = iota
+	StateFollower NodeState = iota
 	StateCandidate
 	StateLeader
 )
@@ -216,7 +216,6 @@ type NodeHealth struct {
 
 // ClusterMetrics holds cluster-wide metrics
 type ClusterMetrics struct {
-	mu sync.RWMutex
 
 	// Term is the current election term
 	Term uint64 `json:"term"`
@@ -304,7 +303,8 @@ type ClusterManager struct {
 	selfJoinedAt time.Time
 
 	// Metrics
-	metrics *ClusterMetrics
+	metrics   *ClusterMetrics
+	metricsMu sync.RWMutex
 
 	// Event channel for cluster events
 	eventCh chan ClusterEvent
@@ -374,8 +374,8 @@ func (cm *ClusterManager) IncrementTerm() uint64 {
 
 // GetMetrics returns a copy of the current cluster metrics
 func (cm *ClusterManager) GetMetrics() ClusterMetrics {
-	cm.metrics.mu.RLock()
-	defer cm.metrics.mu.RUnlock()
+	cm.metricsMu.RLock()
+	defer cm.metricsMu.RUnlock()
 
 	// Update dynamic metrics
 	cm.peersMu.RLock()
@@ -532,9 +532,9 @@ func (cm *ClusterManager) AddNode(nodeAddr string) error {
 	// Update quorum size
 	totalNodes := len(cm.peers) + 1
 	cm.config.MinQuorum = totalNodes/2 + 1
-	cm.metrics.mu.Lock()
+	cm.metricsMu.Lock()
 	cm.metrics.QuorumSize = cm.config.MinQuorum
-	cm.metrics.mu.Unlock()
+	cm.metricsMu.Unlock()
 
 	cm.emitEvent(EventNodeJoined, nodeAddr, "")
 
@@ -566,9 +566,9 @@ func (cm *ClusterManager) RemoveNode(nodeAddr string) error {
 	// Update quorum size
 	totalNodes := len(cm.peers) + 1
 	cm.config.MinQuorum = totalNodes/2 + 1
-	cm.metrics.mu.Lock()
+	cm.metricsMu.Lock()
 	cm.metrics.QuorumSize = cm.config.MinQuorum
-	cm.metrics.mu.Unlock()
+	cm.metricsMu.Unlock()
 
 	cm.emitEvent(EventNodeLeft, nodeAddr, "")
 
@@ -622,11 +622,11 @@ func (cm *ClusterManager) checkQuorumStatus() {
 
 	hasQuorum := healthyCount >= cm.config.MinQuorum
 
-	cm.metrics.mu.Lock()
+	cm.metricsMu.Lock()
 	hadQuorum := cm.metrics.HasQuorum
 	cm.metrics.HasQuorum = hasQuorum
 	cm.metrics.HealthyNodes = healthyCount
-	cm.metrics.mu.Unlock()
+	cm.metricsMu.Unlock()
 
 	if hadQuorum && !hasQuorum {
 		cm.emitEvent(EventQuorumLost, cm.config.NodeID, "")
@@ -715,9 +715,9 @@ func (cm *ClusterManager) BecomeLeader() {
 
 	fmt.Printf("Node %s is now the LEADER (Term: %d)\n", cm.nodeID, cm.GetTerm())
 
-	cm.metrics.mu.Lock()
+	cm.metricsMu.Lock()
 	cm.metrics.LeaderChanges++
-	cm.metrics.mu.Unlock()
+	cm.metricsMu.Unlock()
 
 	cm.emitEvent(EventLeaderElected, cm.nodeID, "bootstrap")
 
@@ -960,10 +960,10 @@ func (cm *ClusterManager) startElection() {
 	// Increment term for new election
 	newTerm := cm.IncrementTerm()
 
-	cm.metrics.mu.Lock()
+	cm.metricsMu.Lock()
 	cm.metrics.ElectionCount++
 	cm.metrics.LastElectionTime = time.Now()
-	cm.metrics.mu.Unlock()
+	cm.metricsMu.Unlock()
 
 	fmt.Printf("Node %s starting election (Term: %d)\n", cm.nodeID, newTerm)
 
@@ -1002,6 +1002,7 @@ func (cm *ClusterManager) startElection() {
 	timeout := time.After(ElectionTimeout)
 	gotResponse := false
 
+Loop:
 	for i := 0; i < len(higherPeers); i++ {
 		select {
 		case resp := <-responses:
@@ -1009,7 +1010,7 @@ func (cm *ClusterManager) startElection() {
 				gotResponse = true
 			}
 		case <-timeout:
-			break
+			break Loop
 		}
 	}
 
@@ -1064,9 +1065,9 @@ func (cm *ClusterManager) becomeLeaderAfterElection() {
 	cm.leaderID = cm.nodeID
 	cm.leaderMu.Unlock()
 
-	cm.metrics.mu.Lock()
+	cm.metricsMu.Lock()
 	cm.metrics.LeaderChanges++
-	cm.metrics.mu.Unlock()
+	cm.metricsMu.Unlock()
 
 	fmt.Printf("Node %s won election, becoming LEADER (Term: %d)\n", cm.nodeID, cm.GetTerm())
 

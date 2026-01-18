@@ -252,7 +252,7 @@ func TestFormatFileSize(t *testing.T) {
 // TestHAClientHosts tests HAClient host management
 func TestHAClientHosts(t *testing.T) {
 	hosts := []string{"node1:8889", "node2:8889", "node3:8889"}
-	client := NewHAClient(hosts)
+	client := NewHAClient(hosts, false, false, "", "", "")
 
 	if len(client.hosts) != 3 {
 		t.Errorf("HAClient hosts count = %d, want 3", len(client.hosts))
@@ -297,4 +297,3 @@ func TestIsRemoteMode(t *testing.T) {
 		t.Error("isRemoteMode() = false when host is set, want true")
 	}
 }
-

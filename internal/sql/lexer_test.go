@@ -54,15 +54,25 @@ func TestLexerIdentifiers(t *testing.T) {
 	input := "users user_name table1 users.id"
 	lexer := NewLexer(input)
 
-	expected := []string{"users", "user_name", "table1", "users.id"}
+	expected := []struct {
+		tokenType TokenType
+		value     string
+	}{
+		{TokenIdent, "users"},
+		{TokenIdent, "user_name"},
+		{TokenIdent, "table1"},
+		{TokenIdent, "users"},
+		{TokenDot, "."},
+		{TokenIdent, "id"},
+	}
 
 	for _, exp := range expected {
 		tok := lexer.NextToken()
-		if tok.Type != TokenIdent {
-			t.Errorf("Expected TokenIdent, got %v", tok.Type)
+		if tok.Type != exp.tokenType {
+			t.Errorf("Expected token type %v, got %v", exp.tokenType, tok.Type)
 		}
-		if tok.Value != exp {
-			t.Errorf("Expected '%s', got '%s'", exp, tok.Value)
+		if tok.Value != exp.value {
+			t.Errorf("Expected value '%s', got '%s'", exp.value, tok.Value)
 		}
 	}
 }
@@ -172,4 +182,3 @@ func TestLexerCompleteQuery(t *testing.T) {
 		}
 	}
 }
-
